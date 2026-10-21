@@ -24,6 +24,7 @@ type Config struct {
 	HTTP           string
 	Port           int
 	ForwardAddr    string
+	RelayListen    string
 	ClientIPHeader string
 	TrustedProxies []string
 	Modules        string
@@ -35,6 +36,7 @@ type Process struct {
 	Binary     string
 	HTTPSAddr  string
 	HTTPAddr   string
+	RelayAddr  string
 	log        *lockedBuffer
 	cmd        *exec.Cmd
 	exited     chan struct{}
@@ -81,6 +83,9 @@ func (c Config) TOML(dataDir string) string {
 	if c.HTTP != "" {
 		listen += fmt.Sprintf("http = %q\n", c.HTTP)
 	}
+	if c.RelayListen != "" {
+		listen += fmt.Sprintf("relay = %q\n", c.RelayListen)
+	}
 	if c.ClientIPHeader != "" {
 		listen += fmt.Sprintf("client_ip_header = %q\n", c.ClientIPHeader)
 	}
@@ -116,6 +121,7 @@ relay = %q
 var (
 	listeningHTTPS = regexp.MustCompile(`listening https=(\S+)`)
 	listeningHTTP  = regexp.MustCompile(`listening http=(\S+)`)
+	listeningRelay = regexp.MustCompile(`listening relay=(\S+)`)
 )
 
 func WithKey(extra, table, key, value string) string {
@@ -158,11 +164,17 @@ func StartProcess(t testing.TB, binary string, cfg Config) *Process {
 		logged := p.log.String()
 		if m := listeningHTTPS.FindStringSubmatch(logged); m != nil {
 			p.HTTPSAddr = m[1]
-			if cfg.HTTP == "" {
-				return p
+			if cfg.HTTP != "" {
+				if h := listeningHTTP.FindStringSubmatch(logged); h != nil {
+					p.HTTPAddr = h[1]
+				}
 			}
-			if h := listeningHTTP.FindStringSubmatch(logged); h != nil {
-				p.HTTPAddr = h[1]
+			if cfg.RelayListen != "" {
+				if r := listeningRelay.FindStringSubmatch(logged); r != nil {
+					p.RelayAddr = r[1]
+				}
+			}
+			if (cfg.HTTP == "" || p.HTTPAddr != "") && (cfg.RelayListen == "" || p.RelayAddr != "") {
 				return p
 			}
 		}

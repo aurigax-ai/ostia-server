@@ -139,3 +139,64 @@ func TestForwardModePassesNonRelayTrafficToAProxyAndStillRelays(t *testing.T) {
 		t.Fatalf("the proxy must be told the client's address with PROXY protocol: wanted %s in %v", local, sources.Sources())
 	}
 }
+
+func TestRelayListenerServesOnlyRelayHostsAndReadsProxyHeadersFromTrustedProxies(t *testing.T) {
+	pki := testkit.NewPKI(t, t.TempDir(), apiHost, "*."+shareHost)
+	proc := testkit.StartProcess(t, serverBinary, testkit.Config{
+		APIDomain: apiHost, ShareDomain: shareHost, RelayDomain: relayHost, CertFile: pki.CertFile, KeyFile: pki.KeyFile,
+		RelayListen: "127.0.0.1:0", TrustedProxies: []string{"127.0.0.1"}, ClientIPHeader: "X-Forwarded-For",
+		Extra: withGenerousRelayLimits("[relay]\nconnections_per_minute_per_ip = 3\n"),
+	})
+	n := testkit.Net{HTTPSAddr: proc.HTTPSAddr, Roots: pki.Roots, APIHost: apiHost}
+	code, _, _ := cutLine(proc.Admin(t, "invite"))
+	api := testkit.NewAPI(n, testkit.NewIdentity("desktop"))
+	api.Onboard(t, code)
+	cert := testkit.NewGatewayCert(t)
+	gateway := testkit.StartGateway(t, cert)
+	desktop := &testkit.RelayDesktop{API: api, Gateway: gateway}
+	desktop.Prepare(t)
+	desktop.Listen(t)
+
+	for _, version := range []byte{1, 2} {
+		forwarder := testkit.StartProxyForwarder(t, proc.RelayAddr, version)
+		phones := testkit.Net{HTTPSAddr: forwarder.Addr, APIHost: apiHost}
+		reaches := func() bool {
+			conn, err := testkit.DialAuthed(t.Context(), phones, desktop.Host, cert.Fingerprint, gateway.Token)
+			if err != nil {
+				return false
+			}
+			defer conn.Close()
+			reply, err := testkit.Converse(conn, "through the relay port")
+			return err == nil && reply != ""
+		}
+		forwarder.SetSource(fmt.Sprintf("203.0.113.%d:40000", version))
+		waitUntil(t, fmt.Sprintf("a phone reaches the desktop through PROXY protocol v%d", version), reaches)
+		for range 6 {
+			reaches()
+		}
+		if reaches() {
+			t.Fatalf("v%d: the per-address limit must apply to the address in the PROXY header", version)
+		}
+		forwarder.SetSource(fmt.Sprintf("198.51.100.%d:40000", version))
+		if !reaches() {
+			t.Fatalf("v%d: another client address must not share that limit", version)
+		}
+	}
+
+	forwarder := testkit.StartProxyForwarder(t, proc.RelayAddr, 2)
+	raw, err := testkit.Net{HTTPSAddr: forwarder.Addr}.Dial(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	conn := tls.Client(raw, &tls.Config{ServerName: apiHost, RootCAs: pki.Roots, MinVersion: tls.VersionTLS12})
+	if err := conn.HandshakeContext(t.Context()); err == nil {
+		t.Fatal("the relay port must not terminate or serve the API host")
+	}
+
+	direct := testkit.Net{HTTPSAddr: proc.RelayAddr}
+	if conn, err := testkit.DialPhone(t.Context(), direct, desktop.Host, cert.Fingerprint); err == nil {
+		_ = conn.Close()
+		t.Fatal("a trusted proxy address that sends no PROXY header must be refused")
+	}
+}

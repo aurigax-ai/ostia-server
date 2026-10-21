@@ -425,3 +425,60 @@ func TestPublishRoutesRequireASession(t *testing.T) {
 		}
 	}
 }
+
+func TestShareDomainInTheAPIsOwnZoneStillSandboxesEveryArtifact(t *testing.T) {
+	const api, share = "sync.ostia.test", "share.ostia.test"
+	pki := testkit.NewPKI(t, t.TempDir(), api, "*."+share)
+	proc := testkit.StartProcess(t, serverBinary, testkit.Config{
+		APIDomain: api, ShareDomain: share, RelayDomain: "relay.ostia.test", CertFile: pki.CertFile, KeyFile: pki.KeyFile,
+	})
+	n := testkit.Net{HTTPSAddr: proc.HTTPSAddr, Roots: pki.Roots, APIHost: api}
+	owner := testkit.NewAPI(n, testkit.NewIdentity("desktop"))
+	owner.Onboard(t, strings.TrimSpace(strings.SplitN(proc.Admin(t, "invite"), "\n", 2)[0]))
+
+	hostile := "<script>document.cookie='__Host-ostia_admin=x; Domain=ostia.test'; fetch('https://" + api + "/admin/')</script>"
+	public := owner.PublishHTML(t, testkit.ShareOptions{Mode: "public", HTML: hostile})
+	if !strings.HasSuffix(strings.Split(public.URL, "/")[2], "."+share) {
+		t.Fatalf("share url %s", public.URL)
+	}
+	for _, method := range []string{"GET", "HEAD"} {
+		req, err := http.NewRequest(method, "https://"+public.ID+"."+share+"/", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Cookie", "__Host-ostia_admin=a-session")
+		res, err := n.Client().Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = res.Body.Close()
+		if res.StatusCode != http.StatusOK || res.Header.Get("Content-Security-Policy") != "sandbox allow-scripts" {
+			t.Fatalf("%s public share: %d CSP %q", method, res.StatusCode, res.Header.Get("Content-Security-Policy"))
+		}
+		if len(res.Cookies()) != 0 {
+			t.Fatalf("%s: the share host set a cookie", method)
+		}
+	}
+
+	encrypted := owner.PublishHTML(t, testkit.ShareOptions{Mode: "link", HTML: hostile})
+	for _, path := range []string{"/", "/meta", "/blob", "/shell.js", "/crypto.js", "/shell.css"} {
+		res := n.ShareGet(t, share, encrypted.ID, path)
+		csp := res.Header.Get("Content-Security-Policy")
+		if csp == "" || res.Header.Get("Set-Cookie") != "" || strings.Contains(csp, "allow-same-origin") {
+			t.Fatalf("%s: CSP %q Set-Cookie %q", path, csp, res.Header.Get("Set-Cookie"))
+		}
+	}
+	shell := n.ShareGet(t, share, encrypted.ID, "/shell.js")
+	if !strings.Contains(string(shell.Body), "sandbox: 'allow-scripts'") || strings.Contains(string(shell.Body), "allow-same-origin") {
+		t.Fatal("the encrypted shell must frame the artifact with sandbox=allow-scripts and no allow-same-origin")
+	}
+	if blob := n.ShareGet(t, share, encrypted.ID, "/blob"); strings.Contains(string(blob.Body), "document.cookie") {
+		t.Fatal("an encrypted share must not be served as readable bytes")
+	}
+	if res := n.ShareGet(t, share, public.ID, "/blob"); res.Status != http.StatusNotFound {
+		t.Fatalf("a public share has no blob route: %s", res)
+	}
+	if res := n.ShareGet(t, share, public.ID, "/admin/"); res.Status != http.StatusNotFound {
+		t.Fatalf("the admin UI must not exist on a share host: %s", res)
+	}
+}

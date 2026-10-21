@@ -74,7 +74,7 @@ func (r reply) named(name string) *http.Cookie {
 }
 
 func (r reply) cookie() *http.Cookie {
-	return r.named("ostia_admin")
+	return r.named("__Host-ostia_admin")
 }
 
 var nextLink = regexp.MustCompile(`<a class="btn" href="([^"]+)">Continue</a>`)
@@ -101,6 +101,9 @@ func (e *adminEnv) send(method, host, path string, form url.Values, cookie *http
 	if form != nil {
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	}
+	if method == "POST" {
+		req.Header.Set("Sec-Fetch-Site", "same-origin")
+	}
 	if cookie != nil {
 		req.AddCookie(cookie)
 	}
@@ -115,6 +118,9 @@ func (e *adminEnv) from(ip, method, path string, form url.Values) reply {
 	req.Host = "api.test"
 	req.RemoteAddr = ip + ":4000"
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	if method == "POST" {
+		req.Header.Set("Sec-Fetch-Site", "same-origin")
+	}
 	rec := httptest.NewRecorder()
 	e.handler.ServeHTTP(rec, req)
 	return reply{rec}
@@ -307,7 +313,7 @@ func TestUnauthenticatedAdminRoutesAreRefused(t *testing.T) {
 	if _, err := e.srv.DB.Account(t.Context(), acct.ID); err != nil {
 		t.Fatalf("an unauthenticated delete removed the account: %v", err)
 	}
-	forged := &http.Cookie{Name: "ostia_admin", Value: ids.Token()}
+	forged := &http.Cookie{Name: "__Host-ostia_admin", Value: ids.Token()}
 	if res := e.get("/admin/accounts", forged); res.Code != http.StatusSeeOther {
 		t.Errorf("a made-up session cookie answered %d", res.Code)
 	}
@@ -378,8 +384,11 @@ func TestSetupWithTheCodeMakesTheGitHubUserTheAdminAndSpendsTheCode(t *testing.T
 		t.Fatalf("%d %s", res.Code, res.Body)
 	}
 	session := res.cookie()
-	if session == nil || !session.HttpOnly || !session.Secure || session.SameSite != http.SameSiteStrictMode || session.Path != "/admin" || session.MaxAge != int(adminui.SessionTTL/time.Second) {
+	if session == nil || !session.HttpOnly || !session.Secure || session.SameSite != http.SameSiteStrictMode || session.Path != "/" || session.Domain != "" || session.MaxAge != int(adminui.SessionTTL/time.Second) {
 		t.Fatalf("session cookie %+v", session)
+	}
+	if old := res.named("ostia_admin"); old == nil || old.MaxAge >= 0 || old.Path != "/admin" {
+		t.Fatalf("the cookie of the earlier release must be expired: %+v", old)
 	}
 	if cleared := res.named(oauthCookieName); cleared == nil || cleared.MaxAge >= 0 {
 		t.Fatalf("the state cookie must be cleared: %+v", cleared)
@@ -510,7 +519,7 @@ func TestSignInStateMustBelongToTheBrowserThatStartedIt(t *testing.T) {
 		"no cookie":                  nil,
 		"a wrong cookie":             {Name: oauthCookieName, Value: ids.Token()},
 		"another flow's cookie":      other.cookie,
-		"a cookie of the wrong name": {Name: "ostia_admin", Value: f.state},
+		"a cookie of the wrong name": {Name: "__Host-ostia_admin", Value: f.state},
 	} {
 		res := e.land(callback, cookie)
 		if res.Code != http.StatusBadRequest || res.cookie() != nil || !strings.Contains(res.Body.String(), "did not start in this browser") {
@@ -786,7 +795,7 @@ func TestSessionEndsAfterEightHoursAndOnSignOut(t *testing.T) {
 
 	s = e.signIn()
 	out := e.act(s, "/admin/logout", url.Values{})
-	if out.Code != http.StatusSeeOther || out.cookie() == nil || out.cookie().MaxAge >= 0 {
+	if out.Code != http.StatusSeeOther || out.cookie() == nil || out.cookie().MaxAge >= 0 || out.cookie().Path != "/" || out.cookie().Domain != "" {
 		t.Fatalf("sign-out must clear the cookie: %d %+v", out.Code, out.cookie())
 	}
 	if res := e.get("/admin/invites", s.cookie); res.Code != http.StatusSeeOther {
@@ -1167,7 +1176,7 @@ func TestAdminSessionsEndWhenTheServerRestarts(t *testing.T) {
 func TestOnlyASessionCookieThatMatchesALiveSessionCounts(t *testing.T) {
 	e := newAdminEnv(t, nil, Options{})
 	s := e.signIn()
-	planted := &http.Cookie{Name: "ostia_admin", Value: "planted"}
+	planted := &http.Cookie{Name: "__Host-ostia_admin", Value: "planted"}
 	for name, order := range map[string][]*http.Cookie{"planted first": {planted, s.cookie}, "planted last": {s.cookie, planted}} {
 		req := httptest.NewRequest("GET", "/admin/invites", nil)
 		req.Host = "api.test"
@@ -1183,7 +1192,7 @@ func TestOnlyASessionCookieThatMatchesALiveSessionCounts(t *testing.T) {
 	req := httptest.NewRequest("GET", "/admin/invites", nil)
 	req.Host = "api.test"
 	req.AddCookie(planted)
-	req.AddCookie(&http.Cookie{Name: "ostia_admin", Value: "another"})
+	req.AddCookie(&http.Cookie{Name: "__Host-ostia_admin", Value: "another"})
 	rec := httptest.NewRecorder()
 	e.handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusSeeOther {
@@ -1336,4 +1345,41 @@ func mustAudit(t *testing.T, e *adminEnv) []store.AuditEntry {
 		t.Fatal(err)
 	}
 	return entries
+}
+
+func TestAdminPostsNeedASameOriginRequest(t *testing.T) {
+	e := newAdminEnv(t, nil, Options{})
+	s := e.signIn()
+	post := func(headers map[string]string) int {
+		req := httptest.NewRequest("POST", "/admin/invites", strings.NewReader(url.Values{"ttl": {"7d"}, "csrf": {s.csrf}}.Encode()))
+		req.Host = "api.test"
+		req.RemoteAddr = "192.0.2.77:4000"
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.AddCookie(s.cookie)
+		for k, v := range headers {
+			req.Header.Set(k, v)
+		}
+		rec := httptest.NewRecorder()
+		e.handler.ServeHTTP(rec, req)
+		return rec.Code
+	}
+	origin := e.srv.Cfg.APIOrigin()
+	for name, c := range map[string]struct {
+		headers map[string]string
+		ok      bool
+	}{
+		"same-origin fetch metadata":       {map[string]string{"Sec-Fetch-Site": "same-origin"}, true},
+		"matching origin, no metadata":     {map[string]string{"Origin": origin}, true},
+		"cross-site fetch metadata":        {map[string]string{"Sec-Fetch-Site": "cross-site", "Origin": origin}, false},
+		"same-site fetch metadata":         {map[string]string{"Sec-Fetch-Site": "same-site"}, false},
+		"null origin from a sandbox":       {map[string]string{"Origin": "null"}, false},
+		"origin of a sibling host":         {map[string]string{"Origin": "https://abc.share.test"}, false},
+		"origin with the wrong scheme":     {map[string]string{"Origin": "http://api.test"}, false},
+		"neither header":                   {nil, false},
+		"metadata overrides a good origin": {map[string]string{"Sec-Fetch-Site": "none", "Origin": origin}, false},
+	} {
+		if got := post(c.headers); (got != http.StatusForbidden) != c.ok {
+			t.Errorf("%s: answered %d", name, got)
+		}
+	}
 }

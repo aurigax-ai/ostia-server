@@ -46,6 +46,7 @@ type Options struct {
 
 type Server struct {
 	Cfg     config.Config
+	proxies *httpx.Proxies
 	DB      *store.DB
 	Blobs   blob.Store
 	Key     *serverkey.Key
@@ -101,6 +102,7 @@ func New(cfg config.Config, opts Options) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
+	s.proxies = proxies
 	s.Guard = &httpx.Guard{IP: proxies.ClientIP, Now: now}
 	s.Auth = &auth.Service{DB: db, Blobs: blobs, Key: key, Cfg: cfg.Auth, Now: now, Guard: s.Guard}
 	if cfg.Auth.GitHubClientID != "" {
@@ -300,6 +302,24 @@ func (s *Server) Run(ctx context.Context) error {
 			closers = append(closers, func() { _ = secured.Close() })
 		}
 	}
+	if s.Cfg.Listen.Relay != "" {
+		raw, err := net.Listen("tcp", s.Cfg.Listen.Relay)
+		if err != nil {
+			return err
+		}
+		closers = append(closers, func() { _ = raw.Close() })
+		if len(s.Cfg.Listen.TrustedProxies) == 0 {
+			slog.Warn("listen.relay has no listen.trusted_proxies: no PROXY protocol header is read, so every phone behind a proxy shares the proxy's address and its rate limits")
+		}
+		ln := sni.TrustProxyHeaders(raw, s.proxies.Trusts, s.Cfg.Relay.HelloTimeout.Std())
+		slog.Info("listening", "relay", raw.Addr().String())
+		router := s.sniRouter(func(conn net.Conn) { _ = conn.Close() })
+		wg.Go(func() {
+			if err := router.Serve(ln); err != nil {
+				errs <- err
+			}
+		})
+	}
 	if s.Relay != nil {
 		wg.Go(func() { s.Relay.Run(ctx) })
 	}
@@ -345,6 +365,23 @@ func (s *Server) maintain(ctx context.Context) {
 }
 
 func (s *Server) router(terminated *connListener) *sni.Router {
+	return s.sniRouter(func(conn net.Conn) {
+		if s.Cfg.TLS.Mode == config.TLSForward {
+			forwardTo(s.Cfg.TLS.ForwardAddr, s.Cfg.TLS.ForwardProxyProtocol, conn)
+			return
+		}
+		secured := tls.Server(conn, s.certs.config())
+		_ = secured.SetDeadline(time.Now().Add(tlsHandshakeWait))
+		if err := secured.Handshake(); err != nil {
+			_ = conn.Close()
+			return
+		}
+		_ = secured.SetDeadline(time.Time{})
+		terminated.push(secured)
+	})
+}
+
+func (s *Server) sniRouter(onOther func(net.Conn)) *sni.Router {
 	r := &sni.Router{
 		HelloTimeout:    s.Cfg.Relay.HelloTimeout.Std(),
 		MaxPending:      s.Cfg.Relay.MaxPendingHellos,
@@ -357,20 +394,7 @@ func (s *Server) router(terminated *connListener) *sni.Router {
 			}
 			return sni.Other, ""
 		},
-		OnOther: func(conn net.Conn) {
-			if s.Cfg.TLS.Mode == config.TLSForward {
-				forwardTo(s.Cfg.TLS.ForwardAddr, s.Cfg.TLS.ForwardProxyProtocol, conn)
-				return
-			}
-			secured := tls.Server(conn, s.certs.config())
-			_ = secured.SetDeadline(time.Now().Add(tlsHandshakeWait))
-			if err := secured.Handshake(); err != nil {
-				_ = conn.Close()
-				return
-			}
-			_ = secured.SetDeadline(time.Time{})
-			terminated.push(secured)
-		},
+		OnOther: onOther,
 	}
 	if s.Relay != nil {
 		r.OnRelay = s.Relay.HandlePhone

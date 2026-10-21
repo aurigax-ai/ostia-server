@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/pelletier/go-toml/v2"
-	"golang.org/x/net/publicsuffix"
 
 	"github.com/aurigax-ai/ostia-server/internal/httpx"
 	"github.com/aurigax-ai/ostia-server/internal/store"
@@ -49,6 +48,7 @@ type Domains struct {
 
 type Listen struct {
 	HTTPS          string   `toml:"https"`
+	Relay          string   `toml:"relay"`
 	HTTP           string   `toml:"http"`
 	ClientIPHeader string   `toml:"client_ip_header"`
 	TrustedProxies []string `toml:"trusted_proxies"`
@@ -266,9 +266,9 @@ func Load(path string) (Config, error) {
 }
 
 func (c *Config) normalize() {
-	c.Domains.API = strings.ToLower(strings.TrimSpace(c.Domains.API))
-	c.Domains.Share = strings.ToLower(strings.TrimSpace(c.Domains.Share))
-	c.Domains.Relay = strings.ToLower(strings.TrimSpace(c.Domains.Relay))
+	c.Domains.API = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(c.Domains.API)), ".")
+	c.Domains.Share = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(c.Domains.Share)), ".")
+	c.Domains.Relay = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(c.Domains.Relay)), ".")
 	if c.Domains.Port == 0 {
 		c.Domains.Port = defaultPort(c.Domains.Scheme)
 	}
@@ -329,17 +329,18 @@ func (c Config) Validate() error {
 	need(c.Domains.API != "", "domains.api is required")
 	if c.Modules.Relay {
 		need(c.Domains.Relay != "", "domains.relay is required when modules.relay is on")
-		need(c.Listen.HTTPS != "", "listen.https is required when modules.relay is on")
+		need(c.Listen.HTTPS != "" || c.Listen.Relay != "", "listen.https or listen.relay is required when modules.relay is on")
 	}
 	if c.Modules.Publish {
 		need(c.Domains.Share != "", "domains.share is required when modules.publish is on")
 	}
 	need(c.Listen.HTTPS != "" || c.Listen.HTTP != "", "set listen.https or listen.http")
+	if c.Listen.Relay != "" {
+		need(c.Modules.Relay, "listen.relay needs modules.relay on")
+	}
 	if c.Domains.Share != "" {
 		need(c.Domains.Share != c.Domains.API, "domains.share must differ from domains.api")
-		if site(c.Domains.Share) == site(c.Domains.API) {
-			errs = append(errs, fmt.Errorf("domains.share must be on a different registrable domain than domains.api, both are under %s", site(c.Domains.API)))
-		}
+		need(!strings.HasSuffix(c.Domains.API, "."+c.Domains.Share), "domains.share must not be a parent of domains.api, use a dedicated zone such as share."+c.Domains.API)
 	}
 	if c.Domains.Relay != "" {
 		need(c.Domains.Relay != c.Domains.API && c.Domains.Relay != c.Domains.Share, "domains.relay must differ from the api and share domains")
@@ -384,14 +385,6 @@ func defaultPort(scheme string) int {
 		return 80
 	}
 	return 443
-}
-
-func site(host string) string {
-	registrable, err := publicsuffix.EffectiveTLDPlusOne(host)
-	if err != nil {
-		return host
-	}
-	return registrable
 }
 
 func (c Config) RelayEnabled() bool   { return c.Modules.Relay }
