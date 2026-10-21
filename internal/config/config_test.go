@@ -80,18 +80,23 @@ func TestValidationErrors(t *testing.T) {
 		body string
 		want string
 	}{
-		"missing api":        {strings.Replace(minimal, `api = "api.example.com"`, "", 1), "domains.api"},
-		"share equals api":   {strings.Replace(minimal, "example-share.net", "api.example.com", 1), "domains.share must differ"},
-		"share under api":    {strings.Replace(minimal, "example-share.net", "share.api.example.com", 1), "different registrable domain"},
-		"share beside api":   {strings.Replace(minimal, "example-share.net", "shares.example.com", 1), "different registrable domain"},
-		"share on co.uk":     {strings.Replace(strings.Replace(minimal, "example-share.net", "a.co.uk", 1), "api.example.com", "api.b.co.uk", 1), ""},
-		"api under relay":    {strings.Replace(minimal, "api.example.com", "api.r.example.com", 1), "must not sit under"},
-		"no certs":           {strings.Replace(minimal, "[[tls.certs]]\ncert = \"/etc/c.pem\"\nkey = \"/etc/k.pem\"\n", "", 1), "tls.certs"},
-		"bad tls mode":       {strings.Replace(minimal, "[tls]\n", "[tls]\nmode = \"acme\"\n", 1), "tls.mode"},
-		"forward needs addr": {strings.Replace(minimal, "[tls]\n", "[tls]\nmode = \"forward\"\n", 1), "forward_addr"},
-		"push no creds":      {minimal + "\n[modules]\npush = true\n", "push.fcm or push.apns"},
-		"bad scheme":         {strings.Replace(minimal, "[domains]\n", "[domains]\nscheme = \"ftp\"\n", 1), "domains.scheme"},
-		"expiry order":       {minimal + "\n[publish]\nmax_expiry = \"1h\"\n", "max_expiry"},
+		"missing api":            {strings.Replace(minimal, `api = "api.example.com"`, "", 1), "domains.api"},
+		"share equals api":       {strings.Replace(minimal, "example-share.net", "api.example.com", 1), "domains.share must differ"},
+		"share under api":        {strings.Replace(minimal, "example-share.net", "share.api.example.com", 1), "different registrable domain"},
+		"share beside api":       {strings.Replace(minimal, "example-share.net", "shares.example.com", 1), "different registrable domain"},
+		"share on co.uk":         {strings.Replace(strings.Replace(minimal, "example-share.net", "a.co.uk", 1), "api.example.com", "api.b.co.uk", 1), ""},
+		"api under relay":        {strings.Replace(minimal, "api.example.com", "api.r.example.com", 1), "must not sit under"},
+		"no certs":               {strings.Replace(minimal, "[[tls.certs]]\ncert = \"/etc/c.pem\"\nkey = \"/etc/k.pem\"\n", "", 1), "tls.certs"},
+		"bad tls mode":           {strings.Replace(minimal, "[tls]\n", "[tls]\nmode = \"acme\"\n", 1), "tls.mode"},
+		"forward needs addr":     {strings.Replace(minimal, "[tls]\n", "[tls]\nmode = \"forward\"\n", 1), "forward_addr"},
+		"push no creds":          {minimal + "\n[modules]\npush = true\n", "push.fcm or push.apns"},
+		"bad scheme":             {strings.Replace(minimal, "[domains]\n", "[domains]\nscheme = \"ftp\"\n", 1), "domains.scheme"},
+		"expiry order":           {minimal + "\n[publish]\nmax_expiry = \"1h\"\n", "max_expiry"},
+		"endless invites":        {minimal + "\n[auth]\ninvite_ttl = \"0s\"\n", "auth.invite_ttl must be positive"},
+		"endless device invites": {minimal + "\n[auth]\ndevice_invite_ttl = \"0s\"\n", "auth.device_invite_ttl must be positive"},
+		"bad journal":            {minimal + "\n[storage]\nsqlite_journal = \"truncate\"\n", "storage.sqlite_journal"},
+		"empty journal":          {minimal + "\n[storage]\nsqlite_journal = \"\"\n", "storage.sqlite_journal"},
+		"no retention":           {minimal + "\n[auth]\nrevoked_device_retention = \"0s\"\n", "revoked_device_retention"},
 	}
 	for name, c := range cases {
 		_, err := Load(write(t, c.body))
@@ -168,5 +173,16 @@ func TestPortAndHostValidation(t *testing.T) {
 		if _, err := Load(write(t, c.body)); err == nil || !strings.Contains(err.Error(), c.want) {
 			t.Errorf("%s: %v", name, err)
 		}
+	}
+}
+
+func TestSQLiteJournalDefaultsToWALAndAcceptsDelete(t *testing.T) {
+	cfg, err := Load(write(t, minimal))
+	if err != nil || cfg.Storage.SQLiteJournal != "wal" {
+		t.Fatalf("default: %q %v", cfg.Storage.SQLiteJournal, err)
+	}
+	cfg, err = Load(write(t, minimal+"\n[storage]\nsqlite_journal = \"delete\"\n"))
+	if err != nil || cfg.Storage.SQLiteJournal != "delete" {
+		t.Fatalf("delete: %q %v", cfg.Storage.SQLiteJournal, err)
 	}
 }

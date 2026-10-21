@@ -12,6 +12,7 @@ import (
 	"golang.org/x/net/publicsuffix"
 
 	"github.com/aurigax-ai/ostia-server/internal/httpx"
+	"github.com/aurigax-ai/ostia-server/internal/store"
 )
 
 const (
@@ -30,6 +31,7 @@ type Config struct {
 	Relay    Relay   `toml:"relay"`
 	Publish  Publish `toml:"publish"`
 	Sync     Sync    `toml:"sync"`
+	Storage  Storage `toml:"storage"`
 	Push     Push    `toml:"push"`
 }
 
@@ -78,6 +80,8 @@ type Auth struct {
 	ElevationTTL    Duration `toml:"elevation_ttl"`
 	ApprovalTTL     Duration `toml:"approval_ttl"`
 	ApproverMinAge  Duration `toml:"approver_min_age"`
+
+	RevokedDeviceRetention Duration `toml:"revoked_device_retention"`
 }
 
 type Relay struct {
@@ -116,6 +120,10 @@ type Sync struct {
 	ManifestHistory        int      `toml:"manifest_history"`
 	ManifestCheckpointDays int      `toml:"manifest_checkpoint_days"`
 	GCGrace                Duration `toml:"gc_grace"`
+}
+
+type Storage struct {
+	SQLiteJournal string `toml:"sqlite_journal"`
 }
 
 type Push struct {
@@ -179,6 +187,8 @@ func Default() Config {
 			ElevationTTL:    Duration(5 * time.Minute),
 			ApprovalTTL:     Duration(5 * time.Minute),
 			ApproverMinAge:  Duration(24 * time.Hour),
+
+			RevokedDeviceRetention: Duration(30 * 24 * time.Hour),
 		},
 		Relay: Relay{
 			MaxStreamsPerLabel:                  8,
@@ -214,7 +224,8 @@ func Default() Config {
 			ManifestCheckpointDays: 14,
 			GCGrace:                Duration(time.Hour),
 		},
-		Push: Push{MaxHandles: 100000, MaxHandlesPerAccount: 20, TicketTTL: Duration(10 * time.Minute), TicketBurst: 3},
+		Storage: Storage{SQLiteJournal: store.JournalWAL},
+		Push:    Push{MaxHandles: 100000, MaxHandlesPerAccount: 20, TicketTTL: Duration(10 * time.Minute), TicketBurst: 3},
 	}
 }
 
@@ -299,7 +310,11 @@ func (c Config) Validate() error {
 	if c.Modules.Push {
 		need(c.Push.FCM.ServiceAccountFile != "" || c.Push.APNs.KeyFile != "", "modules.push needs push.fcm or push.apns credentials")
 	}
+	need(store.ValidJournal(c.Storage.SQLiteJournal), fmt.Sprintf("storage.sqlite_journal must be %q or %q", store.JournalWAL, store.JournalDelete))
 	need(c.Auth.SessionTTL.Std() > 0, "auth.session_ttl must be positive")
+	need(c.Auth.InviteTTL.Std() > 0, "auth.invite_ttl must be positive, an invite code that never expires is not allowed")
+	need(c.Auth.DeviceInviteTTL.Std() > 0, "auth.device_invite_ttl must be positive, an invite code that never expires is not allowed")
+	need(c.Auth.RevokedDeviceRetention.Std() > 0, "auth.revoked_device_retention must be positive")
 	need(c.Auth.ApproverMinAge == 0 || c.Auth.ApproverMinAge >= c.Auth.SessionTTL, "auth.approver_min_age must be 0 or at least auth.session_ttl, otherwise a stolen session outlives the wait")
 	need(c.Publish.MaxExpiry >= c.Publish.DefaultExpiry, "publish.max_expiry must not be below publish.default_expiry")
 	return errors.Join(errs...)

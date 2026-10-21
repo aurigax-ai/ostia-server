@@ -44,6 +44,7 @@ device_invite_ttl = "10m0s"
 elevation_ttl = "5m0s"
 approval_ttl = "5m0s"
 approver_min_age = "24h0m0s"
+revoked_device_retention = "720h0m0s"
 
 [relay]
 max_streams_per_label = 8
@@ -71,6 +72,9 @@ max_expiry = "8760h0m0s"
 allow_never = false
 allow_public = true
 sweep_interval = "1h0m0s"
+
+[storage]
+sqlite_journal = "wal"
 
 [sync]
 max_blob_bytes = 16777216

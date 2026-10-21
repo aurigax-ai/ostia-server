@@ -56,3 +56,19 @@ func TestSweepsRunWithPublishSwitchedOff(t *testing.T) {
 		t.Fatalf("%v", err)
 	}
 }
+
+func TestHTTPServersBoundSlowRequests(t *testing.T) {
+	cfg := config.Default()
+	cfg.DataDir = t.TempDir()
+	cfg.Domains.API = "api.test"
+	cfg.Listen.HTTPS, cfg.Listen.HTTP = "", "127.0.0.1:0"
+	srv, err := New(cfg, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = srv.DB.Close() })
+	h := srv.newHTTPServer(nil)
+	if h.ReadHeaderTimeout <= 0 || h.ReadTimeout <= 0 || h.WriteTimeout <= 0 || h.IdleTimeout <= 0 {
+		t.Fatalf("an unbounded phase of a request: %+v", h)
+	}
+}

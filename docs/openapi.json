@@ -2432,7 +2432,7 @@
         "x-module": "sync"
       },
       "put": {
-        "summary": "Replace the sealed manifest if it has not changed",
+        "summary": "Replace the sealed manifest if it has not changed (signed with the device key)",
         "security": [
           {
             "bearer": []
@@ -2518,6 +2518,16 @@
                 }
               }
             }
+          },
+          "403": {
+            "description": "device-signature-required, bad-signature or stale-signature",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           }
         },
         "requestBody": {
@@ -2548,6 +2558,24 @@
               "type": "integer"
             },
             "description": "the version read, 0 for none"
+          },
+          {
+            "name": "X-Device-Signature",
+            "in": "header",
+            "required": true,
+            "description": "Base64url Ed25519 signature over \"ostia-server/manifest-put/v1\\n<device id>\\n<timestamp>\\n<If-Match as a decimal number>\\n<unpadded base64url SHA-256 of the exact request body>\"",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Device-Timestamp",
+            "in": "header",
+            "required": true,
+            "description": "Unix milliseconds, within two minutes of the server clock and larger than this device's previous signed timestamp",
+            "schema": {
+              "type": "integer"
+            }
           }
         ],
         "tags": [
@@ -2872,7 +2900,7 @@
     },
     "/v1/sync/wraps/{slot}": {
       "get": {
-        "summary": "Read a key wrap",
+        "summary": "Read a key wrap (the passphrase and recovery wraps must be signed with the device key)",
         "security": [
           {
             "bearer": []
@@ -2938,6 +2966,16 @@
                 }
               }
             }
+          },
+          "403": {
+            "description": "device-signature-required, bad-signature or stale-signature",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           }
         },
         "parameters": [
@@ -2949,6 +2987,24 @@
               "type": "string"
             },
             "description": "passphrase, recovery or device:<device id>"
+          },
+          {
+            "name": "X-Device-Signature",
+            "in": "header",
+            "required": false,
+            "description": "Required for the passphrase and recovery slots: base64url Ed25519 signature over \"ostia-server/wrap-read/v1\\n<device id>\\n<timestamp>\\n<slot>\"",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Device-Timestamp",
+            "in": "header",
+            "required": false,
+            "description": "Unix milliseconds, within two minutes of the server clock and larger than this device's previous signed timestamp",
+            "schema": {
+              "type": "integer"
+            }
           }
         ],
         "tags": [
@@ -4059,7 +4115,7 @@
           },
           "lastSeen": {
             "type": "integer",
-            "description": "Unix milliseconds"
+            "description": "Unix milliseconds, the start of the UTC day of the device's last activity"
           },
           "current": {
             "type": "boolean"

@@ -35,16 +35,16 @@ type Service struct {
 }
 
 func (s *Service) Mount(mux *httpx.Mux) {
-	mux.Handle("GET /v1/sync/manifest", s.Auth.Authed(s.getManifest))
-	mux.Handle("PUT /v1/sync/manifest", s.Auth.Authed(s.putManifest))
+	mux.HandleBulk("GET /v1/sync/manifest", s.Auth.Authed(s.getManifest))
+	mux.HandleBulk("PUT /v1/sync/manifest", s.Auth.Authed(s.putManifest))
 	mux.Handle("GET /v1/sync/manifest/versions", s.Auth.Authed(s.manifestVersions))
-	mux.Handle("GET /v1/sync/blobs/{blobId}", s.Auth.Authed(s.getBlob))
-	mux.Handle("PUT /v1/sync/blobs/{blobId}", s.Auth.Authed(s.putBlob))
+	mux.HandleBulk("GET /v1/sync/blobs/{blobId}", s.Auth.Authed(s.getBlob))
+	mux.HandleBulk("PUT /v1/sync/blobs/{blobId}", s.Auth.Authed(s.putBlob))
 	mux.Handle("GET /v1/sync/wraps", s.Auth.Authed(s.listWraps))
 	mux.Handle("GET /v1/sync/wraps/{slot}", s.Auth.Authed(s.getWrap))
 	mux.Handle("PUT /v1/sync/wraps/{slot}", s.Auth.Authed(s.putWrap))
 	mux.Handle("DELETE /v1/sync/wraps/{slot}", s.Auth.Authed(s.deleteWrap))
-	mux.Handle("POST /v1/sync/rotate", s.Auth.Authed(s.rotate))
+	mux.HandleBulk("POST /v1/sync/rotate", s.Auth.Authed(s.rotate))
 	mux.Handle("POST /v1/sync/gc", s.Auth.Authed(s.gc))
 	mux.Handle("GET /v1/sync/usage", s.Auth.Authed(s.usage))
 }
@@ -122,10 +122,21 @@ func (s *Service) putManifest(w http.ResponseWriter, r *http.Request, p auth.Pri
 	if err != nil {
 		return err
 	}
+	stamp, err := s.Auth.SignedTimestamp(r)
+	if err != nil {
+		return err
+	}
+	body, err := httpx.ReadBody(w, r, s.manifestLimit())
+	if err != nil {
+		return err
+	}
+	if err := s.Auth.RequireSignature(r, p, auth.ManifestPutContext, stamp, auth.ManifestPutFields(expected, body)...); err != nil {
+		return err
+	}
 	var in struct {
 		Blob httpx.B64 `json:"blob"`
 	}
-	if err := httpx.ReadJSON(w, r, &in, s.manifestLimit()); err != nil {
+	if err := httpx.DecodeJSON(body, &in); err != nil {
 		return err
 	}
 	if len(in.Blob) == 0 || int64(len(in.Blob)) > s.Cfg.MaxManifestBytes {
@@ -261,6 +272,11 @@ func (s *Service) listWraps(w http.ResponseWriter, r *http.Request, p auth.Princ
 
 func (s *Service) getWrap(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
 	slot := r.PathValue("slot")
+	if slot == slotPassphrase || slot == slotRecovery {
+		if err := s.Auth.RequireSignedTimestamp(r, p, auth.WrapReadContext, slot); err != nil {
+			return err
+		}
+	}
 	wrap, err := s.DB.Wrap(r.Context(), p.AccountID, slot)
 	if errors.Is(err, store.ErrNotFound) {
 		return httpx.ErrNotFound

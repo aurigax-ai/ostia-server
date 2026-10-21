@@ -17,7 +17,7 @@ func (c *clock) now() time.Time { return c.t }
 func open(t *testing.T) (*DB, *clock) {
 	t.Helper()
 	c := &clock{t: time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC)}
-	d, err := Open(filepath.Join(t.TempDir(), "db.sqlite"), c.now)
+	d, err := Open(filepath.Join(t.TempDir(), "db.sqlite"), JournalWAL, c.now)
 	if err != nil {
 		t.Fatal(err)
 	}

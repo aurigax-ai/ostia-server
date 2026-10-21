@@ -6,7 +6,7 @@
 
 | Key | Default | |
 |---|---|---|
-| `data_dir` | `./data` | SQLite database, blobs and `server.key`. Created with mode 0700. |
+| `data_dir` | `./data` | SQLite database, blobs and `server.key`. Created with mode 0700; the database files are 0600. |
 | `log_level` | `info` | `debug`, `info`, `warn`, `error`. The server logs no addresses and no share or sync access. |
 
 ## `[domains]`
@@ -26,7 +26,7 @@
 | `listen.https` | `:443` | The SNI router: relay hosts are passed through, other hosts are terminated or forwarded (see `tls.mode`). Required by the relay. Empty to disable. |
 | `listen.http` | empty | Plain HTTP for use behind a reverse proxy that terminates TLS. Serves the API and share hosts by `Host`. |
 | `listen.client_ip_header` | `X-Forwarded-For` | Header that carries the client address when a trusted proxy sits in front. Used only for rate limiting. |
-| `listen.trusted_proxies` | empty | Addresses or CIDR ranges of the proxies allowed to set that header. Only a connection from one of them is believed, and the rightmost hop that is not itself trusted is the client. Empty means the header is never read. |
+| `listen.trusted_proxies` | empty | Addresses or CIDR ranges of the proxies allowed to set that header. Only a connection from one of them is believed, and then only the last address in the header, the one that proxy appended, is the client: entries to its left are never read. Empty means the header is never read. List the proxy's own addresses and not a whole pod or node range: anything inside a listed range that can reach the server directly chooses its own address. |
 | `tls.mode` | `files` | `files`: terminate TLS with the certificates below. `forward`: pass non-relay connections, untouched, to `tls.forward_addr` (a proxy that holds the certificates). |
 | `tls.forward_addr` | empty | `host:port` for `forward`. |
 | `tls.forward_proxy_protocol` | `true` | Send a PROXY protocol v2 header to the proxy so it learns the client's address. The proxy must be set up to read it. |
@@ -47,8 +47,9 @@
 | `github_base_url`, `github_api_url` | github.com | For GitHub Enterprise. |
 | `session_ttl` | `1h` | Lifetime of a bearer token. |
 | `max_devices_per_account` | `10` | |
-| `invite_ttl` | `168h` | Default lifetime of `admin invite` codes. |
-| `device_invite_ttl` | `10m` | Lifetime of a code a signed-in device mints for a new device. |
+| `invite_ttl` | `168h` | Default and maximum lifetime of `admin invite` codes. Must be positive: a code that never expires is not allowed. |
+| `device_invite_ttl` | `10m` | Lifetime of a code a signed-in device mints for a new device. Must be positive. |
+| `revoked_device_retention` | `720h` | How long the row of a revoked device is kept before the sweep deletes it. Must be positive. |
 | `elevation_ttl` | `5m` | How long a session stays elevated after another device approved it or a fresh GitHub sign-in succeeded. |
 | `approval_ttl` | `5m` | How long a request for another device's approval stays open. |
 | `approver_min_age` | `24h` | How long a device must have belonged to the account before its approvals count. `0` turns the wait off and removes the protection that stops a stolen session from approving itself with a device it just added; use it for tests only. Otherwise it must be at least `session_ttl`. |
@@ -82,6 +83,12 @@
 | `allow_never` | `false` | Allow shares that never expire. Intended for self-hosted instances. |
 | `allow_public` | `true` | Allow plaintext public shares. Owners must still choose them explicitly. |
 | `sweep_interval` | `1h` | How often expired shares are removed. |
+
+## `[storage]`
+
+| Key | Default | |
+|---|---|---|
+| `sqlite_journal` | `wal` | SQLite journal mode, `wal` or `delete`; anything else is refused. Use `delete` when `data_dir` is on NFS or any other network filesystem: WAL keeps a shared-memory index that does not work there. `delete` is slower for concurrent writes and needs exactly one server process on the data. Every process that opens the database, including `ostia-server admin`, reads the same setting; the mode is stored in the file, so opening with the other value converts it. |
 
 ## `[sync]`
 

@@ -8,9 +8,10 @@ import (
 )
 
 func (d *DB) CreateInvite(ctx context.Context, codeHash []byte, accountID string, ttl time.Duration, elevated bool) (expiresAt int64, err error) {
-	if ttl > 0 {
-		expiresAt = d.now().Add(ttl).UnixMilli()
+	if ttl <= 0 {
+		return 0, ErrInvalidTTL
 	}
+	expiresAt = d.now().Add(ttl).UnixMilli()
 	var account any
 	if accountID != "" {
 		account = accountID
@@ -31,7 +32,7 @@ func (d *DB) RegisterWithInvite(ctx context.Context, codeHash []byte, nd NewDevi
 		now := d.ms()
 		var boundTo sql.NullString
 		var elevated int
-		err := tx.QueryRowContext(ctx, `SELECT account_id, elevated FROM invites WHERE code_hash = ? AND used_at = 0 AND (expires_at = 0 OR expires_at > ?)`,
+		err := tx.QueryRowContext(ctx, `SELECT account_id, elevated FROM invites WHERE code_hash = ? AND used_at = 0 AND expires_at > ?`,
 			codeHash, now).Scan(&boundTo, &elevated)
 		if err != nil {
 			return notFound(err)
@@ -68,13 +69,13 @@ func (d *DB) RegisterWithInvite(ctx context.Context, codeHash []byte, nd NewDevi
 }
 
 func (d *DB) SweepInvites(ctx context.Context) error {
-	_, err := d.sql.ExecContext(ctx, `DELETE FROM invites WHERE (used_at > 0 AND used_at < ?) OR (expires_at > 0 AND expires_at < ?)`,
+	_, err := d.sql.ExecContext(ctx, `DELETE FROM invites WHERE (used_at > 0 AND used_at < ?) OR expires_at < ?`,
 		d.now().Add(-24*time.Hour).UnixMilli(), d.ms())
 	return err
 }
 
 func (d *DB) LiveInvites(ctx context.Context, accountID string) (int, error) {
 	var n int
-	err := d.sql.QueryRowContext(ctx, `SELECT COUNT(*) FROM invites WHERE account_id = ? AND used_at = 0 AND (expires_at = 0 OR expires_at > ?)`, accountID, d.ms()).Scan(&n)
+	err := d.sql.QueryRowContext(ctx, `SELECT COUNT(*) FROM invites WHERE account_id = ? AND used_at = 0 AND expires_at > ?`, accountID, d.ms()).Scan(&n)
 	return n, err
 }

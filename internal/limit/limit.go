@@ -1,40 +1,55 @@
 package limit
 
 import (
+	"container/list"
 	"sync"
 	"time"
 )
 
+const DefaultMaxKeys = 50000
+
 type Rule struct {
-	Every time.Duration
-	Burst int
+	Every   time.Duration
+	Burst   int
+	MaxKeys int
 }
 
 type bucket struct {
+	key    string
 	tokens float64
 	last   time.Time
 }
 
 type Limiter struct {
-	rule Rule
-	now  func() time.Time
-	mu   sync.Mutex
-	keys map[string]*bucket
+	rule  Rule
+	now   func() time.Time
+	mu    sync.Mutex
+	keys  map[string]*list.Element
+	order *list.List
 }
 
 func New(rule Rule, now func() time.Time) *Limiter {
-	return &Limiter{rule: rule, now: now, keys: map[string]*bucket{}}
+	if rule.MaxKeys <= 0 {
+		rule.MaxKeys = DefaultMaxKeys
+	}
+	return &Limiter{rule: rule, now: now, keys: map[string]*list.Element{}, order: list.New()}
 }
 
 func (l *Limiter) refilled(key string, at time.Time) *bucket {
-	b, ok := l.keys[key]
-	if !ok {
-		b = &bucket{tokens: float64(l.rule.Burst), last: at}
-		l.keys[key] = b
+	if el, ok := l.keys[key]; ok {
+		b := el.Value.(*bucket)
+		b.tokens = min(float64(l.rule.Burst), b.tokens+float64(at.Sub(b.last))/float64(l.rule.Every))
+		b.last = at
+		l.order.MoveToFront(el)
 		return b
 	}
-	b.tokens = min(float64(l.rule.Burst), b.tokens+float64(at.Sub(b.last))/float64(l.rule.Every))
-	b.last = at
+	if len(l.keys) >= l.rule.MaxKeys {
+		oldest := l.order.Back()
+		delete(l.keys, oldest.Value.(*bucket).key)
+		l.order.Remove(oldest)
+	}
+	b := &bucket{key: key, tokens: float64(l.rule.Burst), last: at}
+	l.keys[key] = l.order.PushFront(b)
 	return b
 }
 
@@ -53,10 +68,14 @@ func (l *Limiter) Sweep() {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	at := l.now()
-	for key, b := range l.keys {
+	for el := l.order.Back(); el != nil; {
+		prev := el.Prev()
+		b := el.Value.(*bucket)
 		if b.tokens+float64(at.Sub(b.last))/float64(l.rule.Every) >= float64(l.rule.Burst) {
-			delete(l.keys, key)
+			delete(l.keys, b.key)
+			l.order.Remove(el)
 		}
+		el = prev
 	}
 }
 

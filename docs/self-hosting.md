@@ -83,14 +83,44 @@ Point `data_dir` at `/var/lib/ostia-server` (the unit's `StateDirectory`).
 
 Push is off by default. Turn it on with `modules.push = true` and give the server the credentials of the app build whose phones will register. A phone registers only with a ticket that a signed-in desktop of the same account requested, and the desktop's session is needed to ping: a Firebase service account (`push.fcm.service_account_file`) for Android and an Apple token key (`push.apns.*`) for iOS. A self-hosted server therefore pushes to a phone app you built and signed with your own Firebase project and Apple team; the publisher's hosted instance uses the publisher's credentials. The server sees a handle, a timestamp and a platform, nothing else.
 
+## Network filesystems
+
+SQLite's WAL mode needs shared memory and file locks that NFS and other network filesystems do not provide, so a database there can corrupt. If `data_dir` is on one, set
+
+```toml
+[storage]
+sqlite_journal = "delete"
+```
+
+and run exactly one replica (one server process, with no second instance mounting the same directory; `admin` commands on the same host are fine). If the database already exists in WAL mode, switch it while the data is still on local disk: start the server (or run any `ostia-server admin` command) once with `delete` before moving `data_dir` to the network filesystem. Opening a WAL database on NFS, even to convert it, is the unsafe case this setting exists to avoid. The switch needs the database closed by every other process and waits up to five seconds for them.
+
 ## Backups
 
-Back up `data_dir` as a whole: `ostia.sqlite` (copy it with `sqlite3 ostia.sqlite ".backup backup.sqlite"` while running), `blobs/` and `server.key`. `server.key` seals push tokens and keys the GitHub-id hashes; without it GitHub users would get new accounts and push registrations would stop opening.
+Back up `data_dir` as a whole: the database, `blobs/` and `server.key`. `server.key` seals push tokens and keys the GitHub-id hashes; without it GitHub users would get new accounts and push registrations would stop opening.
+
+Take the database with the server's own command, which copies it consistently while the server runs and encrypts the copy to an [age](https://age-encryption.org) public key. The encrypted file is the only copy that leaves the host:
+
+```
+age-keygen -o backup.key                       # once, keep backup.key off the node
+ostia-server admin backup -recipient age1... -out /backups/ostia-$(date +%F).sqlite.age
+age -d -i backup.key ostia-2026-10-21.sqlite.age > ostia.sqlite     # to restore
+```
+
+`-out` must not exist yet and is created with mode 0600. `-out -` writes to standard output instead (refused on a terminal), which is the way to take a backup from a container with a read-only root filesystem and no `tar`:
+
+```
+kubectl exec -n ostia-server deploy/ostia-server -- ostia-server admin backup -recipient age1... -out - > ostia.sqlite.age
+```
+
+`VACUUM INTO` needs a file, so the command first writes a plaintext copy into a `.backup-scratch-*` directory inside `data_dir` (mode 0700, file mode 0600), encrypts from it and deletes it before returning, also on an error or SIGINT/SIGTERM. A SIGKILL, an out-of-memory kill or a lost `kubectl exec` can leave that directory behind: the server removes any directory with that name prefix in `data_dir` when it starts, and nothing else, so a file you name `backup-<date>.age` there is safe. The freed blocks are not wiped, so the copy is as exposed to the node's disk as the live database is. `blobs/` holds ciphertext only and `server.key` is 32 bytes; copy them with your usual tool, to storage you trust with the key.
+
+Everything the server writes is owner-only (the process sets umask 077, and the database files are forced to 0600 on start). Create `data_dir` mode 0700 as well, so other users on the host cannot list it. The database runs with `secure_delete` on, so deleted rows are overwritten in the database file. In WAL mode the older page images stay in the `-wal` file until a checkpoint; the server truncates the WAL every minute during its sweep and caps it at 4 MiB after a checkpoint (`journal_size_limit`).
 
 ## Administration
 
 ```
 ostia-server admin invite [-ttl 168h]
+ostia-server admin backup -recipient <age1...> -out <file>
 ostia-server admin accounts
 ostia-server admin reports
 ostia-server admin takedown <share-id>
@@ -99,11 +129,11 @@ ostia-server admin enable-publish <account-id>
 ostia-server admin delete-account <account-id>
 ```
 
-These work against the same data directory while the server is running. A reported share is disabled with `takedown`; its content is deleted and the share page says it was removed. Repeat abuse is handled with `disable-publish`.
+`invite` refuses a ttl of zero or below and one longer than `auth.invite_ttl`: a code always expires. These work against the same data directory while the server is running. A reported share is disabled with `takedown`; its content is deleted and the share page says it was removed. Repeat abuse is handled with `disable-publish`.
 
 ## Privacy defaults
 
-No access logs, no addresses or user agents stored, view counts only. Addresses are held in memory for rate limiting and for the lifetime of a relayed connection. Telemetry and analytics do not exist.
+No access logs, no addresses or user agents stored, view counts only. Addresses are held in memory for rate limiting and for the lifetime of a relayed connection. A device's last activity is stored as a day, not a time, and a revoked device is deleted after a retention period. Telemetry and analytics do not exist.
 
 ## Upgrading
 

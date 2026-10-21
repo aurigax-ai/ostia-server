@@ -39,7 +39,7 @@ func (s *Service) elevationStatus(w http.ResponseWriter, _ *http.Request, p Prin
 }
 
 func (s *Service) requestApproval(w http.ResponseWriter, r *http.Request, p Principal) error {
-	if err := s.requireSignedTimestamp(r, p, ElevateContext); err != nil {
+	if err := s.RequireSignedTimestamp(r, p, ElevateContext); err != nil {
 		return err
 	}
 	count, err := s.DB.ActiveDeviceCount(r.Context(), p.AccountID)

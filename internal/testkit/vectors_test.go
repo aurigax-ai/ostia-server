@@ -5,12 +5,16 @@ import (
 	"crypto/ecdh"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/json/v2"
 	"errors"
+	"fmt"
 	"os"
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/aurigax-ai/ostia-server/internal/auth"
 )
 
 type syncVectors struct {
@@ -69,6 +73,15 @@ type authVectors struct {
 	Nonce             string `json:"nonce"`
 	ChallengeMsg      string `json:"challengeMessage"`
 	ChallengeSig      string `json:"challengeSignature"`
+	Timestamp         int64  `json:"timestamp"`
+	WrapSlot          string `json:"wrapSlot"`
+	WrapReadMsg       string `json:"wrapReadMessage"`
+	WrapReadSig       string `json:"wrapReadSignature"`
+	IfMatch           int64  `json:"ifMatch"`
+	ManifestBody      string `json:"manifestBody"`
+	ManifestBodyHash  string `json:"manifestBodyHash"`
+	ManifestPutMsg    string `json:"manifestPutMessage"`
+	ManifestPutSig    string `json:"manifestPutSignature"`
 }
 
 func buildSyncVectors(t *testing.T) syncVectors {
@@ -169,6 +182,16 @@ func buildAuthVectors() authVectors {
 	v.Nonce = b64.EncodeToString(fixedBytes(32, 111))
 	v.ChallengeMsg = challengeContext + "\n" + v.DeviceID + "\n" + v.Nonce
 	v.ChallengeSig = b64.EncodeToString(ed25519.Sign(priv, []byte(v.ChallengeMsg)))
+	v.Timestamp = 1767225600000
+	v.WrapSlot = "passphrase"
+	v.WrapReadMsg = fmt.Sprintf("%s\n%s\n%d\n%s", wrapReadContext, v.DeviceID, v.Timestamp, v.WrapSlot)
+	v.WrapReadSig = b64.EncodeToString(ed25519.Sign(priv, []byte(v.WrapReadMsg)))
+	v.IfMatch = 3
+	v.ManifestBody = `{"blob":"c2VhbGVkIG1hbmlmZXN0"}`
+	bodySum := sha256.Sum256([]byte(v.ManifestBody))
+	v.ManifestBodyHash = b64.EncodeToString(bodySum[:])
+	v.ManifestPutMsg = fmt.Sprintf("%s\n%s\n%d\n%d\n%s", manifestPutContext, v.DeviceID, v.Timestamp, v.IfMatch, v.ManifestBodyHash)
+	v.ManifestPutSig = b64.EncodeToString(ed25519.Sign(priv, []byte(v.ManifestPutMsg)))
 	return v
 }
 
@@ -244,6 +267,16 @@ func TestSyncVectorsAreStableAndOpen(t *testing.T) {
 func TestAuthVectorsAreStable(t *testing.T) {
 	v := buildAuthVectors()
 	checkVectorFile(t, "../../testdata/vectors/auth.json", v)
+
+	if v.WrapReadMsg != string(auth.WrapReadMessage(v.DeviceID, v.Timestamp, v.WrapSlot)) {
+		t.Fatalf("wrap read message differs from the server's: %q", v.WrapReadMsg)
+	}
+	if v.ManifestPutMsg != string(auth.ManifestPutMessage(v.DeviceID, v.Timestamp, v.IfMatch, []byte(v.ManifestBody))) {
+		t.Fatalf("manifest put message differs from the server's: %q", v.ManifestPutMsg)
+	}
+	if v.WrapReadSig == v.ManifestPutSig {
+		t.Fatal("the wrap read and manifest put signatures must not be interchangeable")
+	}
 }
 
 func TestLinkCodeVectorsAreStableAndBindTheBoxKey(t *testing.T) {

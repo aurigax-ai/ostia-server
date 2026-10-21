@@ -89,19 +89,34 @@ func WriteJSON(w http.ResponseWriter, status int, v any) {
 	_, _ = w.Write(body)
 }
 
-func ReadJSON(w http.ResponseWriter, r *http.Request, v any, max int64) error {
-	body := http.MaxBytesReader(w, r.Body, max)
-	if err := json.UnmarshalRead(body, v); err != nil {
+func ReadBody(w http.ResponseWriter, r *http.Request, max int64) ([]byte, error) {
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, max))
+	if err != nil {
 		var tooBig *http.MaxBytesError
 		if errors.As(err, &tooBig) {
-			return ErrTooLarge
+			return nil, ErrTooLarge
 		}
-		if errors.Is(err, io.EOF) {
-			return Errf(http.StatusBadRequest, "bad-request", "empty body")
-		}
+		return nil, Errf(http.StatusBadRequest, "bad-request", "unreadable body")
+	}
+	return body, nil
+}
+
+func DecodeJSON(body []byte, v any) error {
+	if len(body) == 0 {
+		return Errf(http.StatusBadRequest, "bad-request", "empty body")
+	}
+	if err := json.Unmarshal(body, v); err != nil {
 		return Errf(http.StatusBadRequest, "bad-request", "invalid JSON body")
 	}
 	return nil
+}
+
+func ReadJSON(w http.ResponseWriter, r *http.Request, v any, max int64) error {
+	body, err := ReadBody(w, r, max)
+	if err != nil {
+		return err
+	}
+	return DecodeJSON(body, v)
 }
 
 type Proxies struct {
@@ -147,22 +162,19 @@ func (p *Proxies) ClientIP(r *http.Request) string {
 	if p == nil || len(p.prefixes) == 0 || p.header == "" || !p.trusted(remote) {
 		return remote.Unmap().String()
 	}
-	var hops []string
-	for _, value := range r.Header.Values(p.header) {
-		for hop := range strings.SplitSeq(value, ",") {
-			hops = append(hops, strings.TrimSpace(hop))
-		}
+	values := r.Header.Values(p.header)
+	if len(values) == 0 {
+		return remote.Unmap().String()
 	}
-	for i := len(hops) - 1; i >= 0; i-- {
-		addr, err := netip.ParseAddr(hops[i])
-		if err != nil {
-			return remote.Unmap().String()
-		}
-		if !p.trusted(addr) {
-			return addr.Unmap().String()
-		}
+	last := values[len(values)-1]
+	if i := strings.LastIndexByte(last, ','); i >= 0 {
+		last = last[i+1:]
 	}
-	return remote.Unmap().String()
+	addr, err := netip.ParseAddr(strings.TrimSpace(last))
+	if err != nil {
+		return remote.Unmap().String()
+	}
+	return addr.Unmap().String()
 }
 
 type Guard struct {
@@ -223,16 +235,44 @@ func (b *B64) UnmarshalText(text []byte) error {
 	return nil
 }
 
+const (
+	JSONWait = time.Minute
+	BulkWait = 5 * time.Minute
+)
+
+func Deadlines(read, write time.Duration, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rc := http.NewResponseController(w)
+		now := time.Now()
+		_ = rc.SetReadDeadline(now.Add(read))
+		_ = rc.SetWriteDeadline(now.Add(write))
+		next.ServeHTTP(w, r)
+	})
+}
+
 type Mux struct {
 	*http.ServeMux
 	patterns []string
+	bulk     []string
+	jsonWait time.Duration
+	bulkWait time.Duration
 }
 
-func NewMux() *Mux { return &Mux{ServeMux: http.NewServeMux()} }
+func NewMux() *Mux {
+	return &Mux{ServeMux: http.NewServeMux(), jsonWait: JSONWait, bulkWait: BulkWait}
+}
 
 func (m *Mux) Handle(pattern string, handler http.Handler) {
 	m.patterns = append(m.patterns, pattern)
-	m.ServeMux.Handle(pattern, handler)
+	m.ServeMux.Handle(pattern, Deadlines(m.jsonWait, m.jsonWait, handler))
+}
+
+func (m *Mux) HandleBulk(pattern string, handler http.Handler) {
+	m.patterns = append(m.patterns, pattern)
+	m.bulk = append(m.bulk, pattern)
+	m.ServeMux.Handle(pattern, Deadlines(m.bulkWait, m.bulkWait, handler))
 }
 
 func (m *Mux) Patterns() []string { return append([]string(nil), m.patterns...) }
+
+func (m *Mux) BulkPatterns() []string { return append([]string(nil), m.bulk...) }
