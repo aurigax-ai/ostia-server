@@ -79,6 +79,13 @@ func TestAdminIsOffByDefaultAndReadsItsKeys(t *testing.T) {
 	}
 }
 
+func TestAdminGitHubUsersIsAnUnknownKey(t *testing.T) {
+	_, err := Load(write(t, minimal+"\n[admin]\nenabled = true\ngithub_users = [4242]\n"))
+	if err == nil || !strings.Contains(err.Error(), "github_users") {
+		t.Fatalf("GitHub admin sign-in does not exist, so its key must not load: %v", err)
+	}
+}
+
 func TestUnknownKeysAreRefused(t *testing.T) {
 	_, err := Load(write(t, minimal+"\n[relay]\nmax_streams = 4\n"))
 	if err == nil || !strings.Contains(err.Error(), "max_streams") {

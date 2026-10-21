@@ -120,7 +120,7 @@ func (d *DB) AdminInvites(ctx context.Context) (open, used []AdminInvite, err er
 			if len(used) < maxUsedInvitesListed {
 				used = append(used, v)
 			}
-		case v.ExpiresAt == 0 || v.ExpiresAt > now:
+		case v.ExpiresAt > now:
 			open = append(open, v)
 		}
 	}

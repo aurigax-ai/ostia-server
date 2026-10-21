@@ -14,6 +14,7 @@ import (
 	"github.com/aurigax-ai/ostia-server/internal/adminui"
 	"github.com/aurigax-ai/ostia-server/internal/auth"
 	"github.com/aurigax-ai/ostia-server/internal/config"
+	"github.com/aurigax-ai/ostia-server/internal/httpx"
 	"github.com/aurigax-ai/ostia-server/internal/ids"
 	"github.com/aurigax-ai/ostia-server/internal/store"
 )
@@ -232,9 +233,6 @@ func TestSignInPageIsServedWithoutASession(t *testing.T) {
 	body := res.Body.String()
 	if res.Code != http.StatusOK || !strings.Contains(body, "Ostia server · admin") || !strings.Contains(body, "api.test") {
 		t.Fatalf("%d %s", res.Code, body)
-	}
-	if strings.Contains(body, "Sign in with GitHub") {
-		t.Fatal("the GitHub button must be hidden while GitHub sign-in is off")
 	}
 	if res := e.get("/admin", nil); res.Code != http.StatusSeeOther || res.Header().Get("Location") != "/admin/" {
 		t.Fatalf("/admin must lead to /admin/: %d", res.Code)
@@ -786,5 +784,29 @@ func TestInviteLifetimesStayWithinAuthInviteTTL(t *testing.T) {
 	s = e.signIn()
 	if res := e.act(s, "/admin/invites", url.Values{"ttl": {"max"}}); res.Code != http.StatusOK || !strings.Contains(res.Body.String(), "shown once") {
 		t.Fatalf("a short auth.invite_ttl must still allow an invite: %d", res.Code)
+	}
+}
+
+type deadlineRecorder struct {
+	*httptest.ResponseRecorder
+	read, write time.Time
+}
+
+func (d *deadlineRecorder) SetReadDeadline(t time.Time) error  { d.read = t; return nil }
+func (d *deadlineRecorder) SetWriteDeadline(t time.Time) error { d.write = t; return nil }
+
+func TestAdminRequestsGetTheJSONDeadlines(t *testing.T) {
+	e := newAdminEnv(t, nil, Options{})
+	for _, path := range []string{"/admin/", "/admin/assets/admin.css"} {
+		req := httptest.NewRequest("GET", path, nil)
+		req.Host = "api.test"
+		w := &deadlineRecorder{ResponseRecorder: httptest.NewRecorder()}
+		before := time.Now()
+		e.handler.ServeHTTP(w, req)
+		for name, got := range map[string]time.Time{"read": w.read, "write": w.write} {
+			if got.Before(before.Add(httpx.JSONWait)) || got.After(time.Now().Add(httpx.JSONWait)) {
+				t.Errorf("%s: %s deadline %v is not now plus httpx.JSONWait", path, name, got)
+			}
+		}
 	}
 }

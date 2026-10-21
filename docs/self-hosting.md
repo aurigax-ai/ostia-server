@@ -151,7 +151,7 @@ ostia-server admin login
 # kubectl -n <namespace> exec -it deploy/<ostia-server> -- /usr/local/bin/ostia-server admin login
 ```
 
-The command prints the code and the address. Open `https://<domains.api>/admin/`, paste the code. A code works once and for 10 minutes; the session lasts 8 hours. For the deployment at `sync.ostia.apogex.dev` that is <https://sync.ostia.apogex.dev/admin/>; the code comes from `ostia-server admin login` run in that deployment's pod. The route is on the API host only, so it is reachable wherever the API is, and nowhere on the share or relay domains. Behind a proxy that terminates TLS, forward `/admin` like the rest of the API and keep HTTPS: the session cookie is `Secure`.
+The command prints the code and the address. Open `https://<domains.api>/admin/`, paste the code. A code works once and for 10 minutes; the session lasts 8 hours. For the deployment at `sync.ostia.apogex.dev` that is <https://sync.ostia.apogex.dev/admin/>; the code comes from `ostia-server admin login` run in that deployment's pod. The route is on the API host only, so it is reachable wherever the API is, and nowhere on the share or relay domains. Behind a proxy that terminates TLS, forward `/admin` like the rest of the API, keep HTTPS (the session cookie is `Secure`) and list the proxy under `listen.trusted_proxies`. A proxy that is not listed makes every client share the proxy's address, so the per-address sign-in limit below applies to everyone together and even a valid code from that address is refused while it is exhausted.
 
 What protects it:
 

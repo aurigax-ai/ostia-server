@@ -86,8 +86,7 @@ type Auth struct {
 }
 
 type Admin struct {
-	Enabled     bool    `toml:"enabled"`
-	GitHubUsers []int64 `toml:"github_users"`
+	Enabled bool `toml:"enabled"`
 }
 
 type Relay struct {

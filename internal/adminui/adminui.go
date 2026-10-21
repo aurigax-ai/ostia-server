@@ -83,7 +83,7 @@ func (s *Service) Handler() http.Handler {
 	mux.Handle("GET /admin/accounts/{id}/delete", s.authed(s.accounts, false))
 	mux.Handle("POST /admin/accounts/{id}/delete", s.authed(s.deleteAccount, true))
 	limited := s.Guard.PerIP("admin.global", limit.Rule{Every: 50 * time.Millisecond, Burst: 100}, mux)
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return httpx.Deadlines(httpx.JSONWait, httpx.JSONWait, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
 		h.Set("Content-Security-Policy", csp)
 		h.Set("X-Content-Type-Options", "nosniff")
@@ -91,7 +91,7 @@ func (s *Service) Handler() http.Handler {
 		h.Set("Referrer-Policy", "no-referrer")
 		h.Set("Cache-Control", "no-store")
 		limited.ServeHTTP(w, r)
-	})
+	}))
 }
 
 func (s *Service) authed(fn handler, mutating bool) http.Handler {
