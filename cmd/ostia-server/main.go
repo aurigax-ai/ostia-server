@@ -6,11 +6,14 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
+	"github.com/aurigax-ai/ostia-server/internal/adminui"
 	"github.com/aurigax-ai/ostia-server/internal/config"
 	"github.com/aurigax-ai/ostia-server/internal/server"
 )
@@ -92,6 +95,9 @@ func setupLogging(level string) {
 const usage = `ostia-server [-config file]            run the server
 ostia-server admin [-config file] <command>
     invite [-ttl 168h]                 print a one-time sign-in code that creates a new account
+    login                              print a one-time code that signs in to the admin web UI
+    logout-all                         end every admin web UI session
+    audit [-n 50]                      list the latest admin web UI actions
     accounts                           list accounts
     reports                            list reported shares
     takedown <share-id>                disable a share and delete its content
@@ -138,6 +144,34 @@ func admin(args []string) error {
 		}
 		fmt.Printf("%s\nexpires %s\n", code, time.UnixMilli(expires).UTC().Format(time.RFC3339))
 		return nil
+	case "login":
+		code, err := a.LoginCode(ctx)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("%s\nsign in at %s within %s; it works once\n", code, adminURL(cfg), adminui.CodeTTL)
+		return nil
+	case "logout-all":
+		n, err := a.LogoutAll(ctx)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("ended %d admin sessions\n", n)
+		return nil
+	case "audit":
+		sub := flag.NewFlagSet("audit", flag.ContinueOnError)
+		n := sub.Int("n", 50, "how many entries to list")
+		if err := sub.Parse(operands); err != nil {
+			return err
+		}
+		entries, err := a.Audit(ctx, *n)
+		if err != nil {
+			return err
+		}
+		for _, e := range entries {
+			fmt.Printf("%s\t%s\t%s\t%s\n", time.UnixMilli(e.At).UTC().Format(time.RFC3339), e.Admin, e.Action, e.Target)
+		}
+		return nil
 	case "accounts":
 		accounts, err := a.Accounts(ctx)
 		if err != nil {
@@ -165,6 +199,14 @@ func admin(args []string) error {
 		return idCommand(ctx, a, command, operands[0])
 	}
 	return fmt.Errorf("unknown admin command %q\n%s", command, usage)
+}
+
+func adminURL(cfg config.Config) string {
+	host := cfg.Domains.API
+	if cfg.Domains.Port != 443 && cfg.Domains.Scheme == "https" || cfg.Domains.Port != 80 && cfg.Domains.Scheme == "http" {
+		host = net.JoinHostPort(host, strconv.Itoa(cfg.Domains.Port))
+	}
+	return cfg.Domains.Scheme + "://" + host + "/admin/"
 }
 
 func idCommand(ctx context.Context, a *server.Admin, command, id string) error {

@@ -47,12 +47,20 @@
 | `github_base_url`, `github_api_url` | github.com | For GitHub Enterprise. |
 | `session_ttl` | `1h` | Lifetime of a bearer token. |
 | `max_devices_per_account` | `10` | |
-| `invite_ttl` | `168h` | Default and maximum lifetime of `admin invite` codes. Must be positive: a code that never expires is not allowed. |
+| `invite_ttl` | `168h` | Default and maximum lifetime of `admin invite` codes. The admin web UI offers 7 days, 1 day and 1 hour, leaving out any that exceed this. Must be positive: a code that never expires is not allowed. |
 | `device_invite_ttl` | `10m` | Lifetime of a code a signed-in device mints for a new device. Must be positive. |
 | `revoked_device_retention` | `720h` | How long the row of a revoked device is kept before the sweep deletes it. Must be positive. |
 | `elevation_ttl` | `5m` | How long a session stays elevated after another device approved it or a fresh GitHub sign-in succeeded. |
 | `approval_ttl` | `5m` | How long a request for another device's approval stays open. |
 | `approver_min_age` | `24h` | How long a device must have belonged to the account before its approvals count. `0` turns the wait off and removes the protection that stops a stolen session from approving itself with a device it just added; use it for tests only. Otherwise it must be at least `session_ttl`. |
+
+## `[admin]`
+
+The admin web UI at `https://<domains.api>/admin/`. See [Administration](self-hosting.md#admin-web-ui).
+
+| Key | Default | |
+|---|---|---|
+| `enabled` | `false` | Serve the admin UI. Off, `/admin` does not exist (404) and `ostia-server admin login` refuses to print a code. The UI is served on `domains.api` only, never on the share or relay domains. Needs a restart to change. |
 
 ## `[relay]`
 

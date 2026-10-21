@@ -1,0 +1,33 @@
+{{define "doc"}}<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<meta name="robots" content="noindex">
+<title>Ostia server · admin</title>
+<link rel="stylesheet" href="/admin/assets/admin.css">
+</head>
+<body>
+{{template "body" .}}
+</body>
+</html>
+{{end}}
+
+{{define "shell"}}
+<div class="shell">
+<nav>
+<div class="brand">Ostia server<small>{{.Host}}</small></div>
+<a href="/admin/invites"{{if eq .Nav "invites"}} class="on" aria-current="page"{{end}}>Invites</a>
+<a href="/admin/accounts"{{if eq .Nav "accounts"}} class="on" aria-current="page"{{end}}>Accounts</a>
+<div class="grow"></div>
+<form method="post" action="/admin/logout" class="who">
+<input type="hidden" name="csrf" value="{{.CSRF}}">
+<span>{{.Admin}} ·</span> <button class="link">Sign out</button>
+</form>
+</nav>
+<main>
+{{template "content" .}}
+</main>
+</div>
+{{end}}

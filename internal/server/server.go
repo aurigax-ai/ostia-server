@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/aurigax-ai/ostia-server/internal/adminui"
 	"github.com/aurigax-ai/ostia-server/internal/auth"
 	"github.com/aurigax-ai/ostia-server/internal/blob"
 	"github.com/aurigax-ai/ostia-server/internal/config"
@@ -59,6 +60,7 @@ type Server struct {
 	api   http.Handler
 	mux   *httpx.Mux
 	share http.Handler
+	admin http.Handler
 	certs *certSet
 }
 
@@ -134,6 +136,14 @@ func New(cfg config.Config, opts Options) (*Server, error) {
 	})))
 	s.mux = mux
 	s.api = s.apiWrapper(mux)
+	if n, err := db.DeleteAdminSessions(context.Background()); err != nil {
+		return nil, err
+	} else if n > 0 {
+		slog.Info("admin sessions ended by the restart", "count", n)
+	}
+	if cfg.Admin.Enabled {
+		s.admin = (&adminui.Service{DB: db, Auth: s.Auth, Key: key, Guard: s.Guard, Host: cfg.Domains.API, MaxInviteTTL: cfg.Auth.InviteTTL.Std(), Now: now}).Handler()
+	}
 	if cfg.Listen.HTTPS != "" && cfg.TLS.Mode == config.TLSFiles {
 		if s.certs, err = newCertSet(cfg.TLS.Certs); err != nil {
 			return nil, err
@@ -208,6 +218,8 @@ func (s *Server) Handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		host := hostOnly(r.Host)
 		switch {
+		case host == s.Cfg.Domains.API && s.admin != nil && (r.URL.Path == "/admin" || strings.HasPrefix(r.URL.Path, "/admin/")):
+			s.admin.ServeHTTP(w, r)
 		case host == s.Cfg.Domains.API:
 			s.api.ServeHTTP(w, r)
 		case s.share != nil && strings.HasSuffix(host, "."+s.Cfg.Domains.Share):
@@ -394,6 +406,7 @@ func (s *Server) sweep(ctx context.Context) {
 		"revoked devices": func(ctx context.Context) error {
 			return s.DB.SweepRevokedDevices(ctx, s.Cfg.Auth.RevokedDeviceRetention.Std())
 		},
+		"admin": s.DB.SweepAdmin,
 	} {
 		if err := task(ctx); err != nil {
 			slog.Error("sweep "+name, "err", err)

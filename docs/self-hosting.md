@@ -121,6 +121,9 @@ Everything the server writes is owner-only (the process sets umask 077, and the 
 ```
 ostia-server admin invite [-ttl 168h]
 ostia-server admin backup -recipient <age1...> -out <file>
+ostia-server admin login
+ostia-server admin logout-all
+ostia-server admin audit [-n 50]
 ostia-server admin accounts
 ostia-server admin reports
 ostia-server admin takedown <share-id>
@@ -130,6 +133,35 @@ ostia-server admin delete-account <account-id>
 ```
 
 `invite` refuses a ttl of zero or below and one longer than `auth.invite_ttl`: a code always expires. These work against the same data directory while the server is running. A reported share is disabled with `takedown`; its content is deleted and the share page says it was removed. Repeat abuse is handled with `disable-publish`.
+
+### Admin web UI
+
+A small web UI for the operator: create and revoke invites, list accounts, see an account's devices and sizes, delete an account. It shows ids, device names, sizes and times only, never synced content, and it does not remove single devices (that stays with the account's own devices, so signed actions keep their meaning). It is off by default:
+
+```toml
+[admin]
+enabled = true
+```
+
+Restart the server, then get a one-time code on the server and sign in:
+
+```sh
+ostia-server admin login
+# docker compose exec ostia-server /usr/local/bin/ostia-server admin login
+# kubectl -n <namespace> exec -it deploy/<ostia-server> -- /usr/local/bin/ostia-server admin login
+```
+
+The command prints the code and the address. Open `https://<domains.api>/admin/`, paste the code. A code works once and for 10 minutes; the session lasts 8 hours. For the deployment at `sync.ostia.apogex.dev` that is <https://sync.ostia.apogex.dev/admin/>; the code comes from `ostia-server admin login` run in that deployment's pod. The route is on the API host only, so it is reachable wherever the API is, and nowhere on the share or relay domains. Behind a proxy that terminates TLS, forward `/admin` like the rest of the API, keep HTTPS (the session cookie is `Secure`) and list the proxy under `listen.trusted_proxies`. A proxy that is not listed makes every client share the proxy's address, so the per-address sign-in limit below applies to everyone together and even a valid code from that address is refused while it is exhausted.
+
+What protects it:
+
+- The only way in is the login code. It carries 100 bits, is stored hashed, is consumed on first use and is refused after 10 minutes. Attempts are limited per address (five, then one every 12 seconds). Failed attempts are also limited overall (30, then one every 2 seconds); a valid code is never held back by that overall limit, so guessing from many addresses cannot lock the operator out. A refused attempt is logged without the code and without an address.
+- Every `ostia_admin` cookie in a request is checked and the one that matches a live session wins, so a cookie planted from a sibling host cannot sign the admin out.
+- Sessions end at the next server start, and `ostia-server admin logout-all` ends them at any time (it is audited). Use it if a cookie may have leaked.
+- The session is a random token stored hashed, in a cookie that is `HttpOnly; Secure; SameSite=Strict; Path=/admin`. Every state-changing request also needs a CSRF token that belongs to the session. There is no CORS.
+- Pages carry a strict Content-Security-Policy (no inline script or style, no external origin); the assets are embedded in the binary.
+- Every action (code issued, sign-in, sign-out, invite created or revoked, account deleted) is written with its time, who did it (`code:<first four characters of the code used>` or `cli`) and the target id to the `admin_audit` table and to the log. Read it with `ostia-server admin audit`. The row is written after the action; if the database refuses it the action still stands and the failure is logged.
+- Deleting an account removes its devices, sessions, key wraps, sync blobs and manifests, shares and push registrations, and disconnects its relay streams; the blob files are deleted from disk. It cannot be undone.
 
 ## Privacy defaults
 

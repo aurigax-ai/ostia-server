@@ -1,0 +1,14 @@
+{{define "body"}}
+<div class="center">
+<div class="card">
+<h1 class="title">Ostia server · admin</h1>
+<p class="hint">{{.Host}}</p>
+<form method="post" action="/admin/login" class="stack">
+<input class="mono" name="code" placeholder="Admin code" autocomplete="off" autocapitalize="characters" spellcheck="false" autofocus required>
+{{if .Error}}<p class="err" role="alert">{{.Error}}</p>{{end}}
+<button class="btn">Sign in</button>
+</form>
+<p class="hint">Get a one-time code with <span class="mono">ostia-server admin login</span> on the server (kubectl exec). It works once, for 10 minutes; the session lasts 8 hours.</p>
+</div>
+</div>
+{{end}}

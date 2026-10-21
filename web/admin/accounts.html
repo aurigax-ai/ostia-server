@@ -1,0 +1,51 @@
+{{define "body"}}{{template "shell" .}}{{end}}
+
+{{define "content"}}
+<div class="split">
+<section class="list">
+<h1>Accounts</h1>
+<p class="sub">{{len .Accounts}} {{if eq (len .Accounts) 1}}account{{else}}accounts{{end}} · {{size .TotalBytes}} synced</p>
+{{range .Accounts}}
+<a class="row{{if and $.Selected (eq $.Selected.ID .ID)}} sel{{end}}" href="/admin/accounts/{{.ID}}">
+<span class="c1 mono" title="{{.ID}}">{{short .ID}}</span>
+<span class="c2">{{.Devices}} {{if eq .Devices 1}}device{{else}}devices{{end}}</span>
+<span class="c3">{{if .LastSeen}}seen {{ago .LastSeen}}{{else}}never seen{{end}}</span>
+</a>
+{{else}}
+<p class="empty">No accounts yet.</p>
+{{end}}
+</section>
+{{with .Selected}}
+<section class="detail">
+<header class="head">
+<div class="grow">
+<div class="mono strong" title="{{.ID}}">{{short .ID}}</div>
+<div class="hint">{{if .InviteHint}}invite {{hint .InviteHint}} · {{end}}created {{day .CreatedAt}} · {{size .Bytes}}</div>
+</div>
+{{if not $.Confirm}}<a class="quiet danger" href="/admin/accounts/{{.ID}}/delete">Delete account…</a>{{end}}
+</header>
+{{if $.Confirm}}
+<form method="post" action="/admin/accounts/{{.ID}}/delete" class="confirm">
+<input type="hidden" name="csrf" value="{{$.CSRF}}">
+<p><strong>Delete account <span class="mono">{{.ID}}</span>?</strong></p>
+<p class="hint">This removes its {{.Devices}} {{if eq .Devices 1}}device{{else}}devices{{end}}, {{size .Bytes}} of synced data, its shares, key wraps, sessions and push registrations. It cannot be undone.</p>
+<p class="actions"><button class="btn danger-fill">Delete account</button> <a class="quiet" href="/admin/accounts/{{.ID}}">Cancel</a></p>
+</form>
+{{end}}
+<h2 class="lbl">Devices</h2>
+{{range $.DeviceList}}
+<div class="row">
+<span class="c1">{{.Name}}</span>
+<span class="c2">added {{day .CreatedAt}}</span>
+<span class="c3">seen {{ago .LastSeen}}</span>
+</div>
+{{else}}
+<p class="empty">No devices.</p>
+{{end}}
+<p class="hint note">The admin sees ids, device names, sizes and times only: synced data is encrypted on the devices and the server cannot read it. Removing a device is done from the account's own devices, not here.</p>
+</section>
+{{else}}
+<section class="detail empty-pane"><p class="empty">Select an account.</p></section>
+{{end}}
+</div>
+{{end}}
