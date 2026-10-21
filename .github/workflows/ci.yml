@@ -38,7 +38,7 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: 24
-      - run: node --test web/share-shell testdata/vectors
+      - run: node --test 'web/share-shell/*.test.mjs' 'testdata/vectors/*.test.mjs'
 
   image:
     runs-on: ubuntu-latest
