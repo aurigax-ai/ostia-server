@@ -1,6 +1,7 @@
 package store
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -617,23 +618,124 @@ func TestUsedAccountInvitesStayUntilTheAccountIsGone(t *testing.T) {
 	}
 }
 
-func TestAdminCodeWorksOnceAndExpires(t *testing.T) {
-	d, c := open(t)
-	hash := ids.Hash("login")
-	if err := d.CreateAdminCode(t.Context(), hash, "AB12", 10*time.Minute); err != nil {
+func TestSetupCodeClaimsTheFirstAdminOnce(t *testing.T) {
+	d, _ := open(t)
+	hash := ids.Hash("setup")
+	if err := d.CreateSetupCode(t.Context(), hash, "AB12", 10*time.Minute); err != nil {
 		t.Fatal(err)
 	}
-	if hint, err := d.ConsumeAdminCode(t.Context(), hash); err != nil || hint != "AB12" {
+	if err := d.SetupCodeValid(t.Context(), hash); err != nil {
+		t.Fatal(err)
+	}
+	if hint, err := d.ClaimFirstAdmin(t.Context(), hash, 42, "octo"); err != nil || hint != "AB12" {
 		t.Fatalf("%q %v", hint, err)
 	}
-	if _, err := d.ConsumeAdminCode(t.Context(), hash); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("a code was used twice: %v", err)
+	if err := d.SetupCodeValid(t.Context(), hash); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("a spent code still validates: %v", err)
+	}
+	if _, err := d.ClaimFirstAdmin(t.Context(), hash, 43, "other"); !errors.Is(err, ErrAdminExists) {
+		t.Fatalf("a second admin was set up: %v", err)
+	}
+	if err := d.SignInAdmin(t.Context(), 43, "other"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("%v", err)
+	}
+	if err := d.SignInAdmin(t.Context(), 42, "octo-renamed"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSetupCodeIsRefusedOnceUsedOrExpired(t *testing.T) {
+	d, c := open(t)
+	used := ids.Hash("used")
+	_ = d.CreateSetupCode(t.Context(), used, "USED", 10*time.Minute)
+	if _, err := d.ClaimFirstAdmin(t.Context(), used, 1, "a"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := d.ResetAdmins(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.ClaimFirstAdmin(t.Context(), used, 2, "b"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("a spent code was accepted: %v", err)
 	}
 	late := ids.Hash("late")
-	_ = d.CreateAdminCode(t.Context(), late, "LATE", 10*time.Minute)
+	_ = d.CreateSetupCode(t.Context(), late, "LATE", 10*time.Minute)
 	c.t = c.t.Add(11 * time.Minute)
-	if _, err := d.ConsumeAdminCode(t.Context(), late); !errors.Is(err, ErrNotFound) {
+	if _, err := d.ClaimFirstAdmin(t.Context(), late, 2, "b"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("an expired code was accepted: %v", err)
+	}
+	if has, _ := d.HasAdmin(t.Context()); has {
+		t.Fatal("a refused claim left an admin behind")
+	}
+}
+
+func TestSetupCodeCannotBeIssuedWhileAnAdminExistsAndANewOneReplacesTheOld(t *testing.T) {
+	d, _ := open(t)
+	first, second := ids.Hash("first"), ids.Hash("second")
+	_ = d.CreateSetupCode(t.Context(), first, "ONE", time.Minute)
+	_ = d.CreateSetupCode(t.Context(), second, "TWO", time.Minute)
+	if err := d.SetupCodeValid(t.Context(), first); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("an older code survived a new one: %v", err)
+	}
+	if _, err := d.ClaimFirstAdmin(t.Context(), second, 1, "a"); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.CreateSetupCode(t.Context(), ids.Hash("third"), "THREE", time.Minute); !errors.Is(err, ErrAdminExists) {
+		t.Fatalf("%v", err)
+	}
+}
+
+func TestResetAdminsRemovesAdminsSessionsCodesAndPendingSignIns(t *testing.T) {
+	d, _ := open(t)
+	code := ids.Hash("code")
+	_ = d.CreateSetupCode(t.Context(), code, "CODE", time.Hour)
+	_, _ = d.ClaimFirstAdmin(t.Context(), code, 1, "a")
+	_ = d.CreateSetupCode(t.Context(), ids.Hash("other"), "O", time.Hour)
+	_ = d.CreateAdminSession(t.Context(), ids.Hash("s"), "github:a", time.Hour)
+	_ = d.CreateAdminOAuth(t.Context(), ids.Hash("state"), "verifier", nil, time.Hour)
+	admins, sessions, err := d.ResetAdmins(t.Context())
+	if err != nil || admins != 1 || sessions != 1 {
+		t.Fatalf("%d %d %v", admins, sessions, err)
+	}
+	if has, _ := d.HasAdmin(t.Context()); has {
+		t.Fatal("an admin survived the reset")
+	}
+	if _, err := d.AdminSession(t.Context(), ids.Hash("s")); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("%v", err)
+	}
+	if err := d.SetupCodeValid(t.Context(), ids.Hash("other")); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("%v", err)
+	}
+	if _, _, err := d.TakeAdminOAuth(t.Context(), ids.Hash("state")); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("%v", err)
+	}
+}
+
+func TestAdminOAuthStateIsSingleUseAndExpires(t *testing.T) {
+	d, c := open(t)
+	state := ids.Hash("state")
+	if err := d.CreateAdminOAuth(t.Context(), state, "v1", ids.Hash("code"), 10*time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	verifier, code, err := d.TakeAdminOAuth(t.Context(), state)
+	if err != nil || verifier != "v1" || !bytes.Equal(code, ids.Hash("code")) {
+		t.Fatalf("%q %x %v", verifier, code, err)
+	}
+	if _, _, err := d.TakeAdminOAuth(t.Context(), state); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("a state was taken twice: %v", err)
+	}
+	_ = d.CreateAdminOAuth(t.Context(), state, "v2", nil, 10*time.Minute)
+	c.t = c.t.Add(11 * time.Minute)
+	if _, _, err := d.TakeAdminOAuth(t.Context(), state); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("an expired state was accepted: %v", err)
+	}
+	_ = d.CreateAdminOAuth(t.Context(), ids.Hash("old"), "v3", nil, time.Minute)
+	c.t = c.t.Add(time.Hour)
+	if err := d.SweepAdmin(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	var left int
+	if err := d.sql.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM admin_oauth`).Scan(&left); err != nil || left != 0 {
+		t.Fatalf("%d %v", left, err)
 	}
 }
 

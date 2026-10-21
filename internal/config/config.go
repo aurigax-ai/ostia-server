@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -18,6 +19,8 @@ import (
 const (
 	TLSFiles   = "files"
 	TLSForward = "forward"
+
+	AdminSecretEnv = "OSTIA_ADMIN_GITHUB_CLIENT_SECRET"
 )
 
 type Config struct {
@@ -86,7 +89,11 @@ type Auth struct {
 }
 
 type Admin struct {
-	Enabled bool `toml:"enabled"`
+	Enabled                bool   `toml:"enabled"`
+	GitHubClientID         string `toml:"github_client_id"`
+	GitHubClientSecretFile string `toml:"github_client_secret_file"`
+
+	GitHubClientSecret string `toml:"-"`
 }
 
 type Relay struct {
@@ -249,6 +256,9 @@ func Load(path string) (Config, error) {
 		return Config{}, fmt.Errorf("%s: %w", path, err)
 	}
 	cfg.normalize()
+	if err := cfg.loadAdminSecret(); err != nil {
+		return Config{}, fmt.Errorf("%s: %w", path, err)
+	}
 	if err := cfg.Validate(); err != nil {
 		return Config{}, fmt.Errorf("%s: %w", path, err)
 	}
@@ -262,6 +272,34 @@ func (c *Config) normalize() {
 	if c.Domains.Port == 0 {
 		c.Domains.Port = defaultPort(c.Domains.Scheme)
 	}
+}
+
+func (c *Config) loadAdminSecret() error {
+	if !c.Admin.Enabled {
+		return nil
+	}
+	fromEnv := strings.TrimSpace(os.Getenv(AdminSecretEnv))
+	switch {
+	case fromEnv != "" && c.Admin.GitHubClientSecretFile != "":
+		return fmt.Errorf("set the admin GitHub client secret in %s or admin.github_client_secret_file, not both", AdminSecretEnv)
+	case fromEnv != "":
+		c.Admin.GitHubClientSecret = fromEnv
+	case c.Admin.GitHubClientSecretFile != "":
+		raw, err := os.ReadFile(c.Admin.GitHubClientSecretFile)
+		if err != nil {
+			return fmt.Errorf("admin.github_client_secret_file: %w", err)
+		}
+		c.Admin.GitHubClientSecret = strings.TrimSpace(string(raw))
+	}
+	return nil
+}
+
+func (c Config) APIOrigin() string {
+	host := c.Domains.API
+	if c.Domains.Port != defaultPort(c.Domains.Scheme) {
+		host = net.JoinHostPort(host, strconv.Itoa(c.Domains.Port))
+	}
+	return c.Domains.Scheme + "://" + host
 }
 
 func (c Config) Validate() error {
@@ -321,6 +359,11 @@ func (c Config) Validate() error {
 	need(c.Auth.DeviceInviteTTL.Std() > 0, "auth.device_invite_ttl must be positive, an invite code that never expires is not allowed")
 	need(c.Auth.RevokedDeviceRetention.Std() > 0, "auth.revoked_device_retention must be positive")
 	need(c.Auth.ApproverMinAge == 0 || c.Auth.ApproverMinAge >= c.Auth.SessionTTL, "auth.approver_min_age must be 0 or at least auth.session_ttl, otherwise a stolen session outlives the wait")
+	if c.Admin.Enabled {
+		need(c.Admin.GitHubClientID != "", "admin.github_client_id is required when admin.enabled is on")
+		need(c.Admin.GitHubClientSecret != "", "the admin GitHub client secret is required when admin.enabled is on: set "+AdminSecretEnv+" or admin.github_client_secret_file")
+		need(c.Auth.GitHubBaseURL != "" && c.Auth.GitHubAPIURL != "", "auth.github_base_url and auth.github_api_url are required when admin.enabled is on")
+	}
 	need(c.Publish.MaxExpiry >= c.Publish.DefaultExpiry, "publish.max_expiry must not be below publish.default_expiry")
 	return errors.Join(errs...)
 }

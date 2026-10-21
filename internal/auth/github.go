@@ -93,31 +93,72 @@ func (g GitHub) Poll(ctx context.Context, deviceCode string) (token string, resu
 	return "", PollPending, fmt.Errorf("%w: %s", errGitHub, out.Error)
 }
 
+func (g GitHub) AuthorizeURL(redirectURI, state, challenge string) string {
+	q := url.Values{
+		"client_id":             {g.ClientID},
+		"redirect_uri":          {redirectURI},
+		"state":                 {state},
+		"code_challenge":        {challenge},
+		"code_challenge_method": {"S256"},
+		"allow_signup":          {"false"},
+	}
+	return strings.TrimRight(g.BaseURL, "/") + "/login/oauth/authorize?" + q.Encode()
+}
+
+func (g GitHub) Exchange(ctx context.Context, secret, code, redirectURI, verifier string) (string, error) {
+	var out struct {
+		AccessToken string `json:"access_token"`
+		Error       string `json:"error"`
+	}
+	err := g.post(ctx, "/login/oauth/access_token", url.Values{
+		"client_id":     {g.ClientID},
+		"client_secret": {secret},
+		"code":          {code},
+		"redirect_uri":  {redirectURI},
+		"code_verifier": {verifier},
+	}, &out)
+	if err != nil {
+		return "", err
+	}
+	if out.AccessToken == "" {
+		return "", fmt.Errorf("%w: %s", errGitHub, out.Error)
+	}
+	return out.AccessToken, nil
+}
+
 func (g GitHub) UserID(ctx context.Context, token string) (int64, error) {
+	user, err := g.User(ctx, token)
+	return user.ID, err
+}
+
+type GitHubUser struct {
+	ID    int64  `json:"id"`
+	Login string `json:"login"`
+}
+
+func (g GitHub) User(ctx context.Context, token string) (GitHubUser, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(g.APIURL, "/")+"/user", nil)
 	if err != nil {
-		return 0, err
+		return GitHubUser{}, err
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", "application/vnd.github+json")
 	res, err := g.Client.Do(req)
 	if err != nil {
-		return 0, fmt.Errorf("%w: %v", errGitHub, err)
+		return GitHubUser{}, fmt.Errorf("%w: %v", errGitHub, err)
 	}
 	defer res.Body.Close()
 	if res.StatusCode != http.StatusOK {
-		return 0, fmt.Errorf("%w: user status %d", errGitHub, res.StatusCode)
+		return GitHubUser{}, fmt.Errorf("%w: user status %d", errGitHub, res.StatusCode)
 	}
-	var out struct {
-		ID int64 `json:"id"`
-	}
+	var out GitHubUser
 	if err := json.UnmarshalRead(res.Body, &out); err != nil {
-		return 0, err
+		return GitHubUser{}, err
 	}
 	if out.ID == 0 {
-		return 0, fmt.Errorf("%w: no user id", errGitHub)
+		return GitHubUser{}, fmt.Errorf("%w: no user id", errGitHub)
 	}
-	return out.ID, nil
+	return out, nil
 }
 
 func pollInterval(seconds int) time.Duration {

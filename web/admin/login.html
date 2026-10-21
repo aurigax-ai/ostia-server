@@ -3,12 +3,20 @@
 <div class="card">
 <h1 class="title">Ostia server · admin</h1>
 <p class="hint">{{.Host}}</p>
-<form method="post" action="/admin/login" class="stack">
-<input class="mono" name="code" placeholder="Admin code" autocomplete="off" autocapitalize="characters" spellcheck="false" autofocus required>
+{{if .Setup}}
+<form method="post" action="/admin/github/start" class="stack">
+<p class="strong">Set up admin</p>
+<input class="mono" name="code" placeholder="Setup code" autocomplete="off" autocapitalize="characters" spellcheck="false" autofocus required>
 {{if .Error}}<p class="err" role="alert">{{.Error}}</p>{{end}}
-<button class="btn">Sign in</button>
+<button class="btn">Continue with GitHub</button>
 </form>
-<p class="hint">Get a one-time code with <span class="mono">ostia-server admin login</span> on the server (kubectl exec). It works once, for 10 minutes; the session lasts 8 hours.</p>
+<p class="hint">The GitHub account that finishes this setup becomes the admin. The code works once.</p>
+{{else}}
+<form method="post" action="/admin/github/start" class="stack">
+{{if .Error}}<p class="err" role="alert">{{.Error}}</p>{{end}}
+<button class="btn" autofocus>Sign in with GitHub</button>
+</form>
+{{end}}
 </div>
 </div>
 {{end}}

@@ -44,6 +44,10 @@ type Service struct {
 	MaxInviteTTL time.Duration
 	Now          func() time.Time
 
+	GitHub       auth.GitHub
+	ClientSecret string
+	RedirectURI  string
+
 	pages    map[string]*template.Template
 	loginAll *limit.Limiter
 }
@@ -56,13 +60,13 @@ type session struct {
 
 type handler func(w http.ResponseWriter, r *http.Request, sess session) error
 
-func IssueCode(ctx context.Context, db *store.DB) (string, error) {
+func IssueSetupCode(ctx context.Context, db *store.DB) (string, error) {
 	code := auth.FormatCode(ids.New()[:20])
 	hint := strings.ToUpper(auth.NormalizeCode(code)[:4])
-	if err := db.CreateAdminCode(ctx, ids.Hash(auth.NormalizeCode(code)), hint, CodeTTL); err != nil {
+	if err := db.CreateSetupCode(ctx, ids.Hash(auth.NormalizeCode(code)), hint, CodeTTL); err != nil {
 		return "", err
 	}
-	return code, db.AddAudit(ctx, "cli", "login-code", hint)
+	return code, db.AddAudit(ctx, "cli", "setup-code", hint)
 }
 
 func (s *Service) Handler() http.Handler {
@@ -72,8 +76,9 @@ func (s *Service) Handler() http.Handler {
 	mux.HandleFunc("GET /admin", func(w http.ResponseWriter, r *http.Request) { http.Redirect(w, r, "/admin/", http.StatusSeeOther) })
 	mux.HandleFunc("GET /admin/{$}", s.home)
 	mux.HandleFunc("GET /admin/assets/{name}", s.asset)
-	slow := limit.Rule{Every: 12 * time.Second, Burst: 5}
-	mux.Handle("POST /admin/login", s.Guard.PerIP("admin.login", slow, http.HandlerFunc(s.login)))
+	mux.Handle("POST /admin/github/start", s.Guard.PerIP("admin.github.start", startRule, http.HandlerFunc(s.start)))
+	mux.Handle("GET "+CallbackPath, s.Guard.PerIP("admin.github.return", returnRule, http.HandlerFunc(s.callback)))
+	mux.Handle("GET "+finishPath, s.Guard.PerIP("admin.github.return", returnRule, http.HandlerFunc(s.finish)))
 	mux.Handle("POST /admin/logout", s.authed(s.logout, true))
 	mux.Handle("GET /admin/invites", s.authed(s.invites, false))
 	mux.Handle("POST /admin/invites", s.authed(s.createInvite, true))
@@ -134,13 +139,13 @@ func (s *Service) session(r *http.Request) (session, bool) {
 	return session{}, false
 }
 
-func (s *Service) startSession(w http.ResponseWriter, r *http.Request, admin string) error {
+func (s *Service) startSession(w http.ResponseWriter, r *http.Request, admin, action, target string) error {
 	token := ids.Token()
 	if err := s.DB.CreateAdminSession(r.Context(), ids.Hash(token), admin, SessionTTL); err != nil {
 		return err
 	}
 	http.SetCookie(w, &http.Cookie{Name: cookieName, Value: token, Path: "/admin", MaxAge: int(SessionTTL / time.Second), HttpOnly: true, Secure: true, SameSite: http.SameSiteStrictMode})
-	s.audit(r.Context(), admin, "login", "")
+	s.audit(r.Context(), admin, action, target)
 	http.Redirect(w, r, "/admin/invites", http.StatusSeeOther)
 	return nil
 }

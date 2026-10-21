@@ -123,6 +123,17 @@ CREATE TABLE admin_codes (
 	expires_at INTEGER NOT NULL,
 	used_at INTEGER NOT NULL DEFAULT 0
 );
+CREATE TABLE admins (
+	github_id INTEGER PRIMARY KEY,
+	login TEXT NOT NULL,
+	created_at INTEGER NOT NULL
+);
+CREATE TABLE admin_oauth (
+	state_hash BLOB PRIMARY KEY,
+	verifier TEXT NOT NULL,
+	code_hash BLOB,
+	expires_at INTEGER NOT NULL
+);
 CREATE TABLE admin_sessions (
 	token_hash BLOB PRIMARY KEY,
 	admin TEXT NOT NULL,

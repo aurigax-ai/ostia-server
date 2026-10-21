@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/hex"
+	"errors"
 	"strings"
 	"time"
 )
@@ -35,14 +36,105 @@ type AccountSummary struct {
 
 const maxUsedInvitesListed = 50
 
-func (d *DB) CreateAdminCode(ctx context.Context, hash []byte, hint string, ttl time.Duration) error {
-	_, err := d.sql.ExecContext(ctx, `INSERT INTO admin_codes (code_hash, hint, expires_at) VALUES (?, ?, ?)`, hash, hint, d.now().Add(ttl).UnixMilli())
+var ErrAdminExists = errors.New("an admin already exists")
+
+func (d *DB) HasAdmin(ctx context.Context) (bool, error) {
+	var n int
+	err := d.sql.QueryRowContext(ctx, `SELECT COUNT(*) FROM admins`).Scan(&n)
+	return n > 0, err
+}
+
+func (d *DB) CreateSetupCode(ctx context.Context, hash []byte, hint string, ttl time.Duration) error {
+	return d.tx(ctx, func(tx *sql.Tx) error {
+		if exists, err := adminExists(ctx, tx); err != nil {
+			return err
+		} else if exists {
+			return ErrAdminExists
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM admin_codes`); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx, `INSERT INTO admin_codes (code_hash, hint, expires_at) VALUES (?, ?, ?)`, hash, hint, d.now().Add(ttl).UnixMilli())
+		return err
+	})
+}
+
+func (d *DB) SetupCodeValid(ctx context.Context, hash []byte) error {
+	var one int
+	err := d.sql.QueryRowContext(ctx, `SELECT 1 FROM admin_codes WHERE code_hash = ? AND used_at = 0 AND expires_at > ?`, hash, d.ms()).Scan(&one)
+	return notFound(err)
+}
+
+func (d *DB) ClaimFirstAdmin(ctx context.Context, codeHash []byte, githubID int64, login string) (hint string, err error) {
+	err = d.tx(ctx, func(tx *sql.Tx) error {
+		if exists, err := adminExists(ctx, tx); err != nil {
+			return err
+		} else if exists {
+			return ErrAdminExists
+		}
+		err := tx.QueryRowContext(ctx, `UPDATE admin_codes SET used_at = ? WHERE code_hash = ? AND used_at = 0 AND expires_at > ? RETURNING hint`, d.ms(), codeHash, d.ms()).Scan(&hint)
+		if err != nil {
+			return notFound(err)
+		}
+		_, err = tx.ExecContext(ctx, `INSERT INTO admins (github_id, login, created_at) VALUES (?, ?, ?)`, githubID, login, d.ms())
+		return err
+	})
+	return hint, err
+}
+
+func adminExists(ctx context.Context, tx *sql.Tx) (bool, error) {
+	var n int
+	err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM admins`).Scan(&n)
+	return n > 0, err
+}
+
+func (d *DB) SignInAdmin(ctx context.Context, githubID int64, login string) error {
+	res, err := d.sql.ExecContext(ctx, `UPDATE admins SET login = ? WHERE github_id = ?`, login, githubID)
+	if err != nil {
+		return err
+	}
+	if n, err := res.RowsAffected(); err != nil {
+		return err
+	} else if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (d *DB) ResetAdmins(ctx context.Context) (admins, sessions int64, err error) {
+	err = d.tx(ctx, func(tx *sql.Tx) error {
+		for _, step := range []struct {
+			query string
+			n     *int64
+		}{
+			{`DELETE FROM admins`, &admins},
+			{`DELETE FROM admin_sessions`, &sessions},
+			{`DELETE FROM admin_codes`, nil},
+			{`DELETE FROM admin_oauth`, nil},
+		} {
+			res, err := tx.ExecContext(ctx, step.query)
+			if err != nil {
+				return err
+			}
+			if step.n != nil {
+				if *step.n, err = res.RowsAffected(); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	})
+	return admins, sessions, err
+}
+
+func (d *DB) CreateAdminOAuth(ctx context.Context, stateHash []byte, verifier string, codeHash []byte, ttl time.Duration) error {
+	_, err := d.sql.ExecContext(ctx, `INSERT INTO admin_oauth (state_hash, verifier, code_hash, expires_at) VALUES (?, ?, ?, ?)`, stateHash, verifier, codeHash, d.now().Add(ttl).UnixMilli())
 	return err
 }
 
-func (d *DB) ConsumeAdminCode(ctx context.Context, hash []byte) (hint string, err error) {
-	err = d.sql.QueryRowContext(ctx, `UPDATE admin_codes SET used_at = ? WHERE code_hash = ? AND used_at = 0 AND expires_at > ? RETURNING hint`, d.ms(), hash, d.ms()).Scan(&hint)
-	return hint, notFound(err)
+func (d *DB) TakeAdminOAuth(ctx context.Context, stateHash []byte) (verifier string, codeHash []byte, err error) {
+	err = d.sql.QueryRowContext(ctx, `DELETE FROM admin_oauth WHERE state_hash = ? AND expires_at > ? RETURNING verifier, code_hash`, stateHash, d.ms()).Scan(&verifier, &codeHash)
+	return verifier, codeHash, notFound(err)
 }
 
 func (d *DB) CreateAdminSession(ctx context.Context, tokenHash []byte, admin string, ttl time.Duration) error {
@@ -71,6 +163,9 @@ func (d *DB) DeleteAdminSessions(ctx context.Context) (int64, error) {
 func (d *DB) SweepAdmin(ctx context.Context) error {
 	return d.tx(ctx, func(tx *sql.Tx) error {
 		if _, err := tx.ExecContext(ctx, `DELETE FROM admin_sessions WHERE expires_at <= ?`, d.ms()); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM admin_oauth WHERE expires_at <= ?`, d.ms()); err != nil {
 			return err
 		}
 		_, err := tx.ExecContext(ctx, `DELETE FROM admin_codes WHERE expires_at <= ?`, d.ms())
