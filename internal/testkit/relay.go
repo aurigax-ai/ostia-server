@@ -98,6 +98,7 @@ type RelayDesktop struct {
 	Gateway *FakeGateway
 	Label   string
 	Host    string
+	Port    int
 
 	cancel  context.CancelFunc
 	wg      sync.WaitGroup
@@ -111,7 +112,7 @@ type RelayDesktop struct {
 func (d *RelayDesktop) Prepare(t testing.TB) {
 	t.Helper()
 	m := d.API.Must(t, http.StatusOK, "POST", "/v1/relay/label", nil).Map(t)
-	d.Label, d.Host = m["label"].(string), m["host"].(string)
+	d.Label, d.Host, d.Port = m["label"].(string), m["host"].(string), int(m["port"].(float64))
 }
 
 func (d *RelayDesktop) dial(ctx context.Context, path string) (*websocket.Conn, error) {

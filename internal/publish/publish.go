@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -45,10 +46,10 @@ type Service struct {
 }
 
 func (s *Service) authority(host string) string {
-	if s.Port == 0 || (s.Scheme == "https" && s.Port == 443) || (s.Scheme == "http" && s.Port == 80) {
+	if (s.Scheme == "https" && s.Port == 443) || (s.Scheme == "http" && s.Port == 80) {
 		return host
 	}
-	return host + ":" + strconv.Itoa(s.Port)
+	return net.JoinHostPort(host, strconv.Itoa(s.Port))
 }
 
 func (s *Service) shareURL(id string) string {

@@ -520,3 +520,27 @@ func TestListenerEndsWhenTheDeviceLogsOut(t *testing.T) {
 		return err != nil
 	})
 }
+
+func TestRelayLabelCarriesThePublicPort(t *testing.T) {
+	e := newEnv(t, "")
+	api := e.user(t, "desktop")
+	label := api.Must(t, http.StatusOK, "POST", "/v1/relay/label", nil).Map(t)
+	if label["port"].(float64) != 443 {
+		t.Fatalf("default port: %v", label)
+	}
+
+	pki := testkit.NewPKI(t, t.TempDir(), apiHost, "*."+shareHost)
+	proc := testkit.StartProcess(t, serverBinary, testkit.Config{
+		APIDomain: apiHost, ShareDomain: shareHost, RelayDomain: relayHost, CertFile: pki.CertFile, KeyFile: pki.KeyFile, Port: 8443,
+	})
+	mapped := &env{proc: proc, net: testkit.Net{HTTPSAddr: proc.HTTPSAddr, Roots: pki.Roots, APIHost: apiHost}, accounts: map[string][]*testkit.API{}, joined: map[string]time.Time{}}
+	other := mapped.user(t, "desktop")
+	label = other.Must(t, http.StatusOK, "POST", "/v1/relay/label", nil).Map(t)
+	if label["port"].(float64) != 8443 {
+		t.Fatalf("a server reached on a mapped port must say so: %v", label)
+	}
+	sh := other.PublishHTML(t, testkit.ShareOptions{Mode: "link", HTML: artifactHTML})
+	if !strings.HasPrefix(sh.URL, "https://"+sh.ID+"."+shareHost+":8443/") {
+		t.Fatalf("share URL: %s", sh.URL)
+	}
+}

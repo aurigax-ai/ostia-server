@@ -22,6 +22,7 @@ type Config struct {
 	KeyFile        string
 	Extra          string
 	HTTP           string
+	Port           int
 	ForwardAddr    string
 	ClientIPHeader string
 	TrustedProxies []string
@@ -72,6 +73,10 @@ func (c Config) TOML(dataDir string) string {
 	if modules == "" {
 		modules = "relay = true\npublish = true\nsync = true\npush = false\n"
 	}
+	portLine := ""
+	if c.Port != 0 {
+		portLine = fmt.Sprintf("port = %d\n", c.Port)
+	}
 	listen := "https = \"127.0.0.1:0\"\n"
 	if c.HTTP != "" {
 		listen += fmt.Sprintf("http = %q\n", c.HTTP)
@@ -97,7 +102,7 @@ log_level = "debug"
 api = %q
 share = %q
 relay = %q
-
+%s
 [listen]
 %s
 [tls]
@@ -105,7 +110,7 @@ relay = %q
 [modules]
 %s
 %s
-`, dataDir, c.APIDomain, c.ShareDomain, c.RelayDomain, listen, tlsConfig, modules, c.Extra)
+`, dataDir, c.APIDomain, c.ShareDomain, c.RelayDomain, portLine, listen, tlsConfig, modules, c.Extra)
 }
 
 var (

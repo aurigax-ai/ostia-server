@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"strings"
 	"time"
@@ -164,7 +165,7 @@ func Default() Config {
 	return Config{
 		DataDir:  "./data",
 		LogLevel: "info",
-		Domains:  Domains{Scheme: "https", Port: 443},
+		Domains:  Domains{Scheme: "https"},
 		Listen:   Listen{HTTPS: ":443", ClientIPHeader: "X-Forwarded-For"},
 		TLS:      TLS{Mode: TLSFiles, ForwardProxyProtocol: true},
 		Modules:  Modules{Relay: true, Publish: true, Sync: true},
@@ -242,6 +243,9 @@ func (c *Config) normalize() {
 	c.Domains.API = strings.ToLower(strings.TrimSpace(c.Domains.API))
 	c.Domains.Share = strings.ToLower(strings.TrimSpace(c.Domains.Share))
 	c.Domains.Relay = strings.ToLower(strings.TrimSpace(c.Domains.Relay))
+	if c.Domains.Port == 0 {
+		c.Domains.Port = defaultPort(c.Domains.Scheme)
+	}
 }
 
 func (c Config) Validate() error {
@@ -254,6 +258,9 @@ func (c Config) Validate() error {
 	need(c.DataDir != "", "data_dir is required")
 	need(c.Domains.Scheme == "https" || c.Domains.Scheme == "http", "domains.scheme must be https or http")
 	need(c.Domains.Port >= 1 && c.Domains.Port <= 65535, "domains.port must be a port number")
+	for name, host := range map[string]string{"api": c.Domains.API, "share": c.Domains.Share, "relay": c.Domains.Relay} {
+		need(host == "" || net.ParseIP(host) == nil, "domains."+name+" must be a host name, not an IP address")
+	}
 	need(c.Domains.API != "", "domains.api is required")
 	if c.Modules.Relay {
 		need(c.Domains.Relay != "", "domains.relay is required when modules.relay is on")
@@ -296,6 +303,13 @@ func (c Config) Validate() error {
 	need(c.Auth.ApproverMinAge == 0 || c.Auth.ApproverMinAge >= c.Auth.SessionTTL, "auth.approver_min_age must be 0 or at least auth.session_ttl, otherwise a stolen session outlives the wait")
 	need(c.Publish.MaxExpiry >= c.Publish.DefaultExpiry, "publish.max_expiry must not be below publish.default_expiry")
 	return errors.Join(errs...)
+}
+
+func defaultPort(scheme string) int {
+	if scheme == "http" {
+		return 80
+	}
+	return 443
 }
 
 func site(host string) string {
