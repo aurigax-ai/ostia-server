@@ -2,7 +2,6 @@ package sni
 
 import (
 	"errors"
-	"log/slog"
 	"net"
 	"sync"
 	"time"
@@ -110,11 +109,5 @@ func (r *Router) handle(conn net.Conn, ip string) {
 		r.OnRelay(conn, label, hello, deadline)
 	default:
 		r.OnOther(NewPrefixConn(conn, hello))
-	}
-}
-
-func LogServeError(err error) {
-	if err != nil {
-		slog.Error("sni router stopped", "err", err)
 	}
 }
