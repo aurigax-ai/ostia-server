@@ -40,7 +40,7 @@ func TestShellRendersTheArtifactInASandboxedFrameWithoutSameOrigin(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(shell), `"connect-src 'none'"`) || !strings.Contains(string(shell), "doc.head.prepend(policy)") {
+	if !strings.Contains(string(shell), `"connect-src 'none'; form-action 'none'; base-uri 'none'"`) || !strings.Contains(string(shell), "doc.head.prepend(policy)") {
 		t.Fatal("the artifact document must get its own policy that blocks connections to the share host")
 	}
 	if !strings.Contains(shellContentSecurityPolicy, "default-src 'none'") || !strings.Contains(shellContentSecurityPolicy, "frame-ancestors 'none'") {
@@ -105,5 +105,46 @@ func TestOnlyTheOperatorControlsTheWarning(t *testing.T) {
 		if !strings.Contains(permissionsPolicy, feature) {
 			t.Errorf("Permissions-Policy lacks %s", feature)
 		}
+	}
+}
+
+func TestTheSharedPageCannotLeaveForAnotherHost(t *testing.T) {
+	if !strings.Contains(shellContentSecurityPolicy, "frame-src 'none'") || strings.Contains(shellContentSecurityPolicy, "frame-src blob:") {
+		t.Fatalf("the shell must refuse every frame navigation: %q", shellContentSecurityPolicy)
+	}
+	shell, err := fs.ReadFile(shareshell.Files, "shell.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	js := string(shell)
+	for _, want := range []string{"connect-src 'none'", "form-action 'none'", "base-uri 'none'"} {
+		if !strings.Contains(js, want) {
+			t.Errorf("the artifact policy lacks %s", want)
+		}
+	}
+	if !strings.Contains(js, "sandbox: 'allow-scripts',") {
+		t.Error("the sandbox token list must be exactly allow-scripts")
+	}
+	for _, banned := range []string{"allow-top-navigation", "allow-popups", "allow-forms", "allow-downloads", "allow-modals", "allow-pointer-lock", "allow-same-origin", "allow-presentation", "allow-orientation-lock"} {
+		if strings.Contains(js, banned) {
+			t.Errorf("the sandbox grants %s", banned)
+		}
+	}
+	for _, want := range []string{
+		"event.source !== artifactFrame.contentWindow",
+		"value.length > MAX_LINK_LENGTH",
+		"'http:'",
+		"'https:'",
+		"url.username || url.password",
+		"This link leaves the shared page: ${url.host}",
+		"window.open(url.href, '_blank', 'noopener,noreferrer')",
+		"const MAX_LINK_LENGTH = 2048",
+	} {
+		if !strings.Contains(js, want) {
+			t.Errorf("shell.js lacks %q", want)
+		}
+	}
+	if strings.Count(js, "window.open(") != 1 || strings.Contains(js, "location.href =") || strings.Contains(js, "location.assign") || strings.Contains(js, "location.replace") {
+		t.Error("the only navigation the shell performs is the confirmed window.open")
 	}
 }

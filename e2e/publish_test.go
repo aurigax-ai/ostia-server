@@ -145,7 +145,7 @@ func TestShareHostSendsStrictHeadersAndNoCookies(t *testing.T) {
 	}
 	shell := e.net.ShareGet(t, shareHost, sh.ID, "/")
 	csp := shell.Header.Get("Content-Security-Policy")
-	for _, directive := range []string{"default-src 'none'", "connect-src 'self'", "frame-src blob:", "frame-ancestors 'none'", "base-uri 'none'"} {
+	for _, directive := range []string{"default-src 'none'", "connect-src 'self'", "frame-src 'none'", "frame-ancestors 'none'", "base-uri 'none'"} {
 		if !strings.Contains(csp, directive) {
 			t.Errorf("shell CSP lacks %q: %s", directive, csp)
 		}
@@ -510,6 +510,18 @@ func TestShareWarningIsAServerSettingThatNoShareCanChange(t *testing.T) {
 		shell := e.net.ShareGet(t, shareHost, sh.ID, "/")
 		if !strings.Contains(shell.Header.Get("Content-Security-Policy"), "frame-ancestors 'none'") || strings.Contains(string(shell.Body), artifactHTML) {
 			t.Fatalf("the shell stays whatever the setting: %s", shell)
+		}
+	}
+}
+
+func TestShareHostNeverRedirectsToACallerSuppliedURL(t *testing.T) {
+	e := newEnv(t, "")
+	owner := e.user(t, "desktop")
+	sh := owner.PublishHTML(t, testkit.ShareOptions{Mode: "public", HTML: artifactHTML})
+	for _, path := range []string{"//evil.example/", "/%2f%2fevil.example/", "/../evil.example", "/?next=https://evil.example", "/blob?url=https://evil.example", "/meta?redirect=//evil.example", "/report?to=https://evil.example"} {
+		res := e.net.ShareGet(t, shareHost, sh.ID, path)
+		if loc := res.Header.Get("Location"); loc != "" || res.Status >= 300 && res.Status < 400 {
+			t.Fatalf("%s: status %d Location %q", path, res.Status, loc)
 		}
 	}
 }

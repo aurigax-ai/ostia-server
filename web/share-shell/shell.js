@@ -43,7 +43,8 @@ async function fetchBlob() {
   return new Uint8Array(await response.arrayBuffer())
 }
 
-const ARTIFACT_POLICY = "connect-src 'none'"
+const ARTIFACT_POLICY = "connect-src 'none'; form-action 'none'; base-uri 'none'"
+const MAX_LINK_LENGTH = 2048
 
 function withArtifactPolicy(html) {
   const doc = new DOMParser().parseFromString(html, 'text/html')
@@ -58,8 +59,50 @@ function withArtifactPolicy(html) {
 function renderDocument(html) {
   const frame = element('iframe', { sandbox: 'allow-scripts', title: 'Shared artifact', class: 'artifact' })
   frame.srcdoc = withArtifactPolicy(html)
+  artifactFrame = frame
   root.replaceChildren(frame)
 }
+
+let artifactFrame = null
+let linkConfirm = null
+
+function parseLink(value) {
+  if (typeof value !== 'string' || value.length > MAX_LINK_LENGTH) return null
+  let url
+  try {
+    url = new URL(value)
+  } catch {
+    return null
+  }
+  if ((url.protocol !== 'http:' && url.protocol !== 'https:') || url.username || url.password) return null
+  return url
+}
+
+function confirmLink(url) {
+  linkConfirm?.remove()
+  const open = element('button', { type: 'button' }, 'Open')
+  const cancel = element('button', { type: 'button' }, 'Cancel')
+  const box = element('div', { class: 'confirm', role: 'alertdialog', 'aria-label': 'Leaving the shared page' })
+  box.append(element('span', {}, `This link leaves the shared page: ${url.host}`), open, cancel)
+  const close = () => {
+    box.remove()
+    linkConfirm = null
+  }
+  open.addEventListener('click', () => {
+    window.open(url.href, '_blank', 'noopener,noreferrer')
+    close()
+  })
+  cancel.addEventListener('click', close)
+  linkConfirm = box
+  root.before(box)
+  cancel.focus()
+}
+
+window.addEventListener('message', (event) => {
+  if (!artifactFrame || event.source !== artifactFrame.contentWindow) return
+  const url = parseLink(event.data?.ostiaOpen)
+  if (url) confirmLink(url)
+})
 
 let warning = true
 

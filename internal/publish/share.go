@@ -15,11 +15,11 @@ import (
 )
 
 const (
-	shellContentSecurityPolicy = "default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src data: blob:; font-src data:; media-src data: blob:; connect-src 'self'; frame-src blob:; form-action 'none'; base-uri 'none'; frame-ancestors 'none'"
+	shellContentSecurityPolicy = "default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src data: blob:; font-src data:; media-src data: blob:; connect-src 'self'; frame-src 'none'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'"
 	dataContentSecurityPolicy  = "default-src 'none'; sandbox"
 )
 
-const permissionsPolicy = "fullscreen=(), camera=(), microphone=(), geolocation=(), payment=(), usb=(), serial=(), bluetooth=(), clipboard-read=(), clipboard-write=(), display-capture=(), screen-wake-lock=(), web-share=()"
+const permissionsPolicy = "fullscreen=(), camera=(), microphone=(), geolocation=(), payment=(), usb=(), serial=(), clipboard-read=(), clipboard-write=(), display-capture=(), screen-wake-lock=()"
 
 var staticAssets = map[string]string{
 	"/shell.js":  "text/javascript; charset=utf-8",

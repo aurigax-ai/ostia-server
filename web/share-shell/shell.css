@@ -11,3 +11,4 @@ body { display: flex; flex-direction: column; }
 .link { background: none; border: 0; padding: 0; color: inherit; text-decoration: underline; cursor: pointer; font: inherit; }
 .notice { margin: auto; display: grid; gap: 1rem; justify-items: center; padding: 2rem; max-width: 28rem; text-align: center; }
 .notice p { margin: 0; }
+.confirm { flex: none; display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; padding: 0.4rem 0.75rem; font-size: 0.85rem; border-bottom: 1px solid rgba(128, 128, 128, 0.35); }
