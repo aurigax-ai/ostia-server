@@ -15,7 +15,7 @@ This is the contract between ostia-server and its clients (the Ostia desktop app
 | Route | Answer |
 |---|---|
 | `GET /healthz` | `{"ok": true}` |
-| `GET /v1/info` | `{api, modules: {relay, publish, sync, push}, auth: {invite, github}, approverMinAgeSeconds, relayDomain, syncGCBound, limits}`; the modules are booleans; `approverMinAgeSeconds` is `auth.approver_min_age` in seconds and is informational, see Client rules for device wraps; `syncGCBound: true` means `POST /v1/sync/gc` is bound to the manifest version and signed, and a client runs garbage collection only when it is present |
+| `GET /v1/info` | `{api, modules: {relay, publish, sync, push}, auth: {invite, github}, approverMinAgeSeconds, relayDomain, syncGCBound, deviceInactiveAfterSeconds, limits}`; the modules are booleans; `approverMinAgeSeconds` is `auth.approver_min_age` in seconds and is informational, see Client rules for device wraps; `deviceInactiveAfterSeconds` is `devices.inactive_after`; `syncGCBound: true` means `POST /v1/sync/gc` is bound to the manifest version and signed, and a client runs garbage collection only when it is present |
 
 A disabled module's routes do not exist (`404`).
 
@@ -77,7 +77,8 @@ A nonce is single use and lives 60 seconds. A device holds at most five open non
 ### Devices and accounts
 
 ```
-GET    /v1/devices               {devices: [{id, name, signPub, boxPub, createdAt, lastSeen, current?}]}   `lastSeen` is the start of the UTC day of the device's last activity, in Unix milliseconds: the server keeps no finer time
+GET    /v1/devices               {devices: [{id, name, signPub, boxPub, createdAt, lastSeenAt, removeAt, current?}]}   `lastSeenAt` is the device's last activity in Unix milliseconds, updated by any authenticated request at most once an hour; `removeAt` is `lastSeenAt` plus `devices.inactive_after`, when the server removes the device if it stays silent
+POST   /v1/devices/heartbeat     204   no body; checks the device in so an idle client is not removed for inactivity (any other authenticated request does the same, at most once an hour)
 POST   /v1/devices/invite        201 {code, expiresAt}      one-time code for a new device of this account, valid 10 minutes by default (every code has an expiry); an elevated session once the account has two or more devices
 DELETE /v1/devices/{id}          204   signed with the device key and a timestamp (`revoke/v2`); revokes sessions, the relay label and the device's key wrap; open relay streams close. When it was the account's last device, the account's sync data (manifests, blobs, key wraps), push registrations and unused device invites are deleted, and the account itself unless it still has shares
 DELETE /v1/account               204   removes every row and blob, push handles included, and closes the relay listener (elevated session)
@@ -103,7 +104,7 @@ The timestamp counter is one per device, shared by every action in the table: a 
 
 ### Revoking devices
 
-Revoking another device or the account normally needs an elevated session. Exceptions, so an owner can always remove an intruder: a device may revoke a device that is still younger than `auth.approver_min_age` (probation) and was added after it, without elevation, and a device may always revoke itself without elevation (it still needs its own signature, which a stolen token does not give). A device that leaves takes its server data with it: when the last device of an account leaves, the account's sync data is deleted, and the account too if it holds no shares. `DELETE /v1/auth/session` (sign out) is always free. The row of a revoked device is deleted `auth.revoked_device_retention` (30 days) after the revocation. A relay listener receives `{"t": "device-added", "deviceId", "name", "createdAt"}` when a device joins an account that already had one; it is sent once, to listeners connected at that moment. An hourly sweep also purges accounts that have no active device (a purge that failed after a revoke is retried there), and deletes such an account when none of its shares is live (removed or expired shares do not count).
+Revoking another device or the account normally needs an elevated session. Exceptions, so an owner can always remove an intruder: a device may revoke a device that is still younger than `auth.approver_min_age` (probation) and was added after it, without elevation, and a device may always revoke itself without elevation (it still needs its own signature, which a stolen token does not give). A device that leaves takes its server data with it: when the last device of an account leaves, the account's sync data is deleted, and the account too if it holds no shares. `DELETE /v1/auth/session` (sign out) is always free. The row of a revoked device is deleted `auth.revoked_device_retention` (30 days) after the revocation. A relay listener receives `{"t": "device-added", "deviceId", "name", "createdAt"}` when a device joins an account that already had one; it is sent once, to listeners connected at that moment. An hourly sweep first revokes every device whose `lastSeenAt` is older than `devices.inactive_after` (90 days by default; sessions, relay label and open streams end exactly as for a revoke) and then purges accounts that have no active device (a purge that failed after a revoke is retried there), and deletes such an account when none of its shares is live (removed or expired shares do not count).
 
 ### Elevated sessions
 

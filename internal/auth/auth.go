@@ -65,14 +65,16 @@ type Principal struct {
 }
 
 type Service struct {
-	DB     *store.DB
-	Blobs  blob.Store
-	Key    *serverkey.Key
-	Cfg    config.Auth
-	Now    func() time.Time
-	GitHub *GitHub
-	Guard  *httpx.Guard
-	Hooks  Hooks
+	DB    *store.DB
+	Blobs blob.Store
+	Key   *serverkey.Key
+	Cfg   config.Auth
+	Now   func() time.Time
+
+	InactiveAfter time.Duration
+	GitHub        *GitHub
+	Guard         *httpx.Guard
+	Hooks         Hooks
 
 	mu           sync.Mutex
 	challenges   map[string]challenge
@@ -111,6 +113,7 @@ func (s *Service) Mount(mux *httpx.Mux) {
 	mux.Handle("DELETE /v1/auth/session", s.Authed(s.logout))
 	mux.Handle("GET /v1/devices", s.Authed(s.listDevices))
 	mux.Handle("POST /v1/devices/invite", s.Authed(s.deviceInvite))
+	mux.Handle("POST /v1/devices/heartbeat", s.Authed(s.heartbeat))
 	mux.Handle("DELETE /v1/devices/{id}", s.Authed(s.revokeDevice))
 	mux.Handle("DELETE /v1/account", s.Authed(s.deleteAccount))
 	s.mountElevation(mux)
@@ -141,7 +144,7 @@ func (s *Service) Authenticate(r *http.Request) (Principal, error) {
 		return Principal{}, httpx.ErrUnauthorized
 	}
 	dev := sess.Device
-	if s.Now().UnixMilli()-dev.LastSeen >= 24*time.Hour.Milliseconds() {
+	if s.Now().UnixMilli()-dev.LastSeenAt >= time.Hour.Milliseconds() {
 		_ = s.DB.TouchDevice(r.Context(), dev.ID)
 	}
 	return Principal{DeviceID: dev.ID, AccountID: dev.AccountID, TokenHash: hash, ElevatedUntil: sess.ElevatedUntil}, nil
@@ -368,13 +371,36 @@ func (s *Service) logout(w http.ResponseWriter, r *http.Request, p Principal) er
 }
 
 type deviceView struct {
-	ID        string    `json:"id"`
-	Name      string    `json:"name"`
-	SignPub   httpx.B64 `json:"signPub"`
-	BoxPub    httpx.B64 `json:"boxPub"`
-	CreatedAt int64     `json:"createdAt"`
-	LastSeen  int64     `json:"lastSeen"`
-	Current   bool      `json:"current,omitzero"`
+	ID         string    `json:"id"`
+	Name       string    `json:"name"`
+	SignPub    httpx.B64 `json:"signPub"`
+	BoxPub     httpx.B64 `json:"boxPub"`
+	CreatedAt  int64     `json:"createdAt"`
+	LastSeenAt int64     `json:"lastSeenAt"`
+	RemoveAt   int64     `json:"removeAt"`
+	Current    bool      `json:"current,omitzero"`
+}
+
+func (s *Service) heartbeat(w http.ResponseWriter, r *http.Request, p Principal) error {
+	w.WriteHeader(http.StatusNoContent)
+	return nil
+}
+
+func (s *Service) RevokeInactive(ctx context.Context) error {
+	devices, err := s.DB.InactiveDevices(ctx, s.InactiveAfter)
+	if err != nil {
+		return err
+	}
+	for _, d := range devices {
+		if _, err := s.DB.RevokeDevice(ctx, d.AccountID, d.ID); err != nil && !errors.Is(err, store.ErrNotFound) {
+			slog.Error("revoke an inactive device", "err", err)
+			continue
+		}
+		if s.Hooks.DeviceRevoked != nil {
+			s.Hooks.DeviceRevoked(d.ID)
+		}
+	}
+	return nil
 }
 
 func (s *Service) listDevices(w http.ResponseWriter, r *http.Request, p Principal) error {
@@ -384,7 +410,7 @@ func (s *Service) listDevices(w http.ResponseWriter, r *http.Request, p Principa
 	}
 	out := make([]deviceView, 0, len(devices))
 	for _, d := range devices {
-		out = append(out, deviceView{ID: d.ID, Name: d.Name, SignPub: d.SignPub, BoxPub: d.BoxPub, CreatedAt: d.CreatedAt, LastSeen: d.LastSeen, Current: d.ID == p.DeviceID})
+		out = append(out, deviceView{ID: d.ID, Name: d.Name, SignPub: d.SignPub, BoxPub: d.BoxPub, CreatedAt: d.CreatedAt, LastSeenAt: d.LastSeenAt, RemoveAt: d.LastSeenAt + s.InactiveAfter.Milliseconds(), Current: d.ID == p.DeviceID})
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"devices": out})
 	return nil

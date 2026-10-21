@@ -66,29 +66,44 @@ func TestDeletedRowsAreOverwrittenOnDisk(t *testing.T) {
 	}
 }
 
-func TestLastSeenIsStoredAsTheDayOnly(t *testing.T) {
+func TestLastSeenMovesAtMostOncePerHour(t *testing.T) {
 	d, c := open(t)
 	c.t = time.Date(2026, 10, 21, 15, 42, 7, 0, time.UTC)
 	_, dev := register(t, d, "github", "h")
-	midnight := time.Date(2026, 10, 21, 0, 0, 0, 0, time.UTC).UnixMilli()
-	if dev.LastSeen != midnight {
-		t.Fatalf("a new device's last seen carries the time of day: %d", dev.LastSeen)
+	start := c.t.UnixMilli()
+	if dev.LastSeenAt != start {
+		t.Fatalf("a new device was last seen when it joined: %d, want %d", dev.LastSeenAt, start)
 	}
-	c.t = c.t.Add(3 * time.Hour)
+	c.t = c.t.Add(30 * time.Minute)
 	if err := d.TouchDevice(t.Context(), dev.ID); err != nil {
 		t.Fatal(err)
 	}
 	got, _ := d.Device(t.Context(), dev.ID)
-	if got.LastSeen != midnight {
-		t.Fatalf("a touch later the same day moved last seen: %d", got.LastSeen)
+	if got.LastSeenAt != start {
+		t.Fatalf("a touch within the hour moved last seen: %d", got.LastSeenAt)
 	}
-	c.t = time.Date(2026, 10, 23, 1, 2, 3, 0, time.UTC)
+	c.t = c.t.Add(31 * time.Minute)
 	if err := d.TouchDevice(t.Context(), dev.ID); err != nil {
 		t.Fatal(err)
 	}
 	got, _ = d.Device(t.Context(), dev.ID)
-	if want := time.Date(2026, 10, 23, 0, 0, 0, 0, time.UTC).UnixMilli(); got.LastSeen != want {
-		t.Fatalf("last seen %d, want %d", got.LastSeen, want)
+	if got.LastSeenAt != c.t.UnixMilli() {
+		t.Fatalf("last seen %d, want %d", got.LastSeenAt, c.t.UnixMilli())
+	}
+}
+
+func TestInactiveDevicesAreThoseSilentPastTheLimit(t *testing.T) {
+	d, c := open(t)
+	a, old := register(t, d, "github", "h")
+	c.t = c.t.Add(80 * 24 * time.Hour)
+	fresh, err := d.AddDevice(t.Context(), a.ID, newDevice("fresh"), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.t = c.t.Add(11 * 24 * time.Hour)
+	silent, err := d.InactiveDevices(t.Context(), 90*24*time.Hour)
+	if err != nil || len(silent) != 1 || silent[0].ID != old.ID {
+		t.Fatalf("%v %v (fresh %s)", silent, err, fresh.ID)
 	}
 }
 

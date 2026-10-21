@@ -10,14 +10,14 @@ import (
 )
 
 type Device struct {
-	ID        string
-	AccountID string
-	Name      string
-	SignPub   []byte
-	BoxPub    []byte
-	CreatedAt int64
-	LastSeen  int64
-	RevokedAt int64
+	ID         string
+	AccountID  string
+	Name       string
+	SignPub    []byte
+	BoxPub     []byte
+	CreatedAt  int64
+	LastSeenAt int64
+	RevokedAt  int64
 }
 
 type NewDevice struct {
@@ -26,11 +26,11 @@ type NewDevice struct {
 	BoxPub  []byte
 }
 
-const deviceColumns = `id, account_id, name, sign_pub, box_pub, created_at, last_seen, revoked_at`
+const deviceColumns = `id, account_id, name, sign_pub, box_pub, created_at, last_seen_at, revoked_at`
 
 func scanDevice(row interface{ Scan(...any) error }) (Device, error) {
 	var v Device
-	err := row.Scan(&v.ID, &v.AccountID, &v.Name, &v.SignPub, &v.BoxPub, &v.CreatedAt, &v.LastSeen, &v.RevokedAt)
+	err := row.Scan(&v.ID, &v.AccountID, &v.Name, &v.SignPub, &v.BoxPub, &v.CreatedAt, &v.LastSeenAt, &v.RevokedAt)
 	return v, notFound(err)
 }
 
@@ -55,11 +55,28 @@ func (d *DB) DevicesOf(ctx context.Context, accountID string) ([]Device, error) 
 	return out, rows.Err()
 }
 
-func startOfDay(ms int64) int64 { return ms - ms%dayMillis }
+const touchEvery = time.Hour
 
 func (d *DB) TouchDevice(ctx context.Context, id string) error {
-	_, err := d.sql.ExecContext(ctx, `UPDATE devices SET last_seen = ? WHERE id = ? AND last_seen < ?`, startOfDay(d.ms()), id, startOfDay(d.ms()))
+	_, err := d.sql.ExecContext(ctx, `UPDATE devices SET last_seen_at = ? WHERE id = ? AND last_seen_at <= ?`, d.ms(), id, d.now().Add(-touchEvery).UnixMilli())
 	return err
+}
+
+func (d *DB) InactiveDevices(ctx context.Context, inactiveAfter time.Duration) ([]Device, error) {
+	rows, err := d.sql.QueryContext(ctx, `SELECT `+deviceColumns+` FROM devices WHERE revoked_at = 0 AND last_seen_at < ?`, d.now().Add(-inactiveAfter).UnixMilli())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Device
+	for rows.Next() {
+		v, err := scanDevice(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, v)
+	}
+	return out, rows.Err()
 }
 
 func (d *DB) SweepRevokedDevices(ctx context.Context, retention time.Duration) error {
@@ -75,9 +92,9 @@ func addDevice(ctx context.Context, tx *sql.Tx, now int64, accountID string, nd 
 	if maxDevices > 0 && count >= maxDevices {
 		return Device{}, ErrLimit
 	}
-	dev := Device{ID: ids.New(), AccountID: accountID, Name: nd.Name, SignPub: nd.SignPub, BoxPub: nd.BoxPub, CreatedAt: now, LastSeen: startOfDay(now)}
+	dev := Device{ID: ids.New(), AccountID: accountID, Name: nd.Name, SignPub: nd.SignPub, BoxPub: nd.BoxPub, CreatedAt: now, LastSeenAt: now}
 	_, err := tx.ExecContext(ctx, `INSERT INTO devices (`+deviceColumns+`) VALUES (?, ?, ?, ?, ?, ?, ?, 0)`,
-		dev.ID, dev.AccountID, dev.Name, dev.SignPub, dev.BoxPub, dev.CreatedAt, dev.LastSeen)
+		dev.ID, dev.AccountID, dev.Name, dev.SignPub, dev.BoxPub, dev.CreatedAt, dev.LastSeenAt)
 	return dev, err
 }
 

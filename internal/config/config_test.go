@@ -280,6 +280,23 @@ func TestTheShareDomainKeyIsGone(t *testing.T) {
 	}
 }
 
+func TestDeviceInactivityHasADefaultAndAlwaysALimit(t *testing.T) {
+	cfg, err := Load(write(t, minimal))
+	if err != nil || cfg.Devices.InactiveAfter.Std() != 90*24*time.Hour {
+		t.Fatalf("default: %v %v", cfg.Devices.InactiveAfter, err)
+	}
+	for _, zero := range []string{"0s", "-1h"} {
+		body := minimal + "\n[devices]\ninactive_after = \"" + zero + "\"\n"
+		if _, err := Load(write(t, body)); err == nil || !strings.Contains(err.Error(), "devices.inactive_after") {
+			t.Fatalf("%s must be refused: %v", zero, err)
+		}
+	}
+	cfg, err = Load(write(t, minimal+"\n[devices]\ninactive_after = \"720h\"\n"))
+	if err != nil || cfg.Devices.InactiveAfter.Std() != 720*time.Hour {
+		t.Fatalf("%v %v", cfg.Devices.InactiveAfter, err)
+	}
+}
+
 func TestPortDefaultsFollowTheScheme(t *testing.T) {
 	cfg, err := Load(write(t, minimal))
 	if err != nil || cfg.Domains.Port != 443 {

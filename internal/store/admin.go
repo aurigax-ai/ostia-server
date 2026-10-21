@@ -36,7 +36,7 @@ type AccountSummary struct {
 	ID         string
 	CreatedAt  int64
 	Devices    int
-	LastSeen   int64
+	LastSeenAt int64
 	Bytes      int64
 	InviteHint string
 }
@@ -263,7 +263,7 @@ func (d *DB) AccountSummaries(ctx context.Context) ([]AccountSummary, error) {
 	rows, err := d.sql.QueryContext(ctx, `
 		SELECT a.id, a.created_at,
 			(SELECT COUNT(*) FROM devices v WHERE v.account_id = a.id AND v.revoked_at = 0),
-			(SELECT COALESCE(MAX(v.last_seen), 0) FROM devices v WHERE v.account_id = a.id AND v.revoked_at = 0),
+			(SELECT COALESCE(MAX(v.last_seen_at), 0) FROM devices v WHERE v.account_id = a.id AND v.revoked_at = 0),
 			(SELECT COALESCE(SUM(b.size), 0) FROM sync_blobs b WHERE b.account_id = a.id),
 			COALESCE((SELECT i.hint FROM invites i WHERE i.created_account = a.id), '')
 		FROM accounts a ORDER BY 4 DESC, a.created_at DESC`)
@@ -274,7 +274,7 @@ func (d *DB) AccountSummaries(ctx context.Context) ([]AccountSummary, error) {
 	var out []AccountSummary
 	for rows.Next() {
 		var s AccountSummary
-		if err := rows.Scan(&s.ID, &s.CreatedAt, &s.Devices, &s.LastSeen, &s.Bytes, &s.InviteHint); err != nil {
+		if err := rows.Scan(&s.ID, &s.CreatedAt, &s.Devices, &s.LastSeenAt, &s.Bytes, &s.InviteHint); err != nil {
 			return nil, err
 		}
 		out = append(out, s)

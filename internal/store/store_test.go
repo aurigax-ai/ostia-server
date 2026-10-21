@@ -972,11 +972,15 @@ func TestADatabaseAtSchemaV1UpgradesToV2(t *testing.T) {
 		t.Fatalf("a deployed V1 database must open: %v", err)
 	}
 	defer d.Close()
-	var version, seen, devices int
+	var version, seen, devices, backfilled int
 	_ = d.sql.QueryRowContext(t.Context(), `PRAGMA user_version`).Scan(&version)
 	_ = d.sql.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM sqlite_master WHERE name = 'device_seen'`).Scan(&seen)
 	_ = d.sql.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM devices`).Scan(&devices)
+	_ = d.sql.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM devices WHERE last_seen_at = ?`, c.t.UnixMilli()).Scan(&backfilled)
 	if version != 2 || seen != 0 || devices != 2 {
 		t.Fatalf("version %d, device_seen tables %d, devices %d", version, seen, devices)
+	}
+	if backfilled != 2 {
+		t.Fatalf("existing devices must start their inactivity clock at the upgrade, not at their old last seen: %d of 2", backfilled)
 	}
 }

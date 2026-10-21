@@ -4038,6 +4038,34 @@
           "Shares"
         ]
       }
+    },
+    "/v1/devices/heartbeat": {
+      "post": {
+        "summary": "Check in so the device is not removed for inactivity (no body)",
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Checked in"
+          },
+          "401": {
+            "description": "unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "Accounts"
+        ]
+      }
     }
   },
   "components": {
@@ -4103,9 +4131,13 @@
             "type": "integer",
             "description": "Unix milliseconds"
           },
-          "lastSeen": {
+          "lastSeenAt": {
             "type": "integer",
-            "description": "Unix milliseconds, the start of the UTC day of the device's last activity"
+            "description": "Unix milliseconds of the device's last activity, updated at most once an hour"
+          },
+          "removeAt": {
+            "type": "integer",
+            "description": "Unix milliseconds when the server removes the device if it stays silent: lastSeenAt plus the inactivity limit"
           },
           "current": {
             "type": "boolean"
@@ -4209,6 +4241,10 @@
           "syncGCBound": {
             "type": "boolean",
             "description": "POST /v1/sync/gc is bound to the manifest version; run GC only when this is true"
+          },
+          "deviceInactiveAfterSeconds": {
+            "type": "integer",
+            "description": "devices.inactive_after: a device silent this long is removed"
           }
         }
       }

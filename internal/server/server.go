@@ -104,7 +104,7 @@ func New(cfg config.Config, opts Options) (*Server, error) {
 	}
 	s.proxies = proxies
 	s.Guard = &httpx.Guard{IP: proxies.ClientIP, Now: now}
-	s.Auth = &auth.Service{DB: db, Blobs: blobs, Key: key, Cfg: cfg.Auth, Now: now, Guard: s.Guard}
+	s.Auth = &auth.Service{DB: db, Blobs: blobs, Key: key, Cfg: cfg.Auth, Now: now, Guard: s.Guard, InactiveAfter: cfg.Devices.InactiveAfter.Std()}
 	if cfg.Auth.GitHubClientID != "" {
 		s.Auth.GitHub = &auth.GitHub{ClientID: cfg.Auth.GitHubClientID, BaseURL: cfg.Auth.GitHubBaseURL, APIURL: cfg.Auth.GitHubAPIURL, Client: opts.client()}
 	}
@@ -187,10 +187,11 @@ func (s *Server) info(w http.ResponseWriter, r *http.Request) error {
 			"sync":    s.Cfg.SyncEnabled(),
 			"push":    s.Cfg.PushEnabled(),
 		},
-		"auth":                  map[string]bool{"invite": true, "github": s.Auth.GitHub != nil},
-		"approverMinAgeSeconds": int64(s.Cfg.Auth.ApproverMinAge.Std() / time.Second),
-		"relayDomain":           s.Cfg.Domains.Relay,
-		"syncGCBound":           true,
+		"auth":                       map[string]bool{"invite": true, "github": s.Auth.GitHub != nil},
+		"approverMinAgeSeconds":      int64(s.Cfg.Auth.ApproverMinAge.Std() / time.Second),
+		"relayDomain":                s.Cfg.Domains.Relay,
+		"syncGCBound":                true,
+		"deviceInactiveAfterSeconds": int64(s.Cfg.Devices.InactiveAfter.Std() / time.Second),
 		"limits": map[string]any{
 			"shareMaxBytes":  s.Cfg.Publish.MaxFileBytes,
 			"allowPublic":    s.Cfg.Publish.AllowPublic,
@@ -435,11 +436,18 @@ func (s *Server) sweep(ctx context.Context) {
 		"revoked devices": func(ctx context.Context) error {
 			return s.DB.SweepRevokedDevices(ctx, s.Cfg.Auth.RevokedDeviceRetention.Std())
 		},
-		"admin":              s.DB.SweepAdmin,
-		"abandoned accounts": s.Auth.PurgeAbandoned,
+		"admin": s.DB.SweepAdmin,
 	} {
 		if err := task(ctx); err != nil {
 			slog.Error("sweep "+name, "err", err)
+		}
+	}
+	for _, step := range []struct {
+		name string
+		run  func(context.Context) error
+	}{{"inactive devices", s.Auth.RevokeInactive}, {"abandoned accounts", s.Auth.PurgeAbandoned}} {
+		if err := step.run(ctx); err != nil {
+			slog.Error("sweep "+step.name, "err", err)
 		}
 	}
 	s.Auth.SweepChallenges()

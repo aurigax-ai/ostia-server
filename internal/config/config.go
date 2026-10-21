@@ -30,12 +30,17 @@ type Config struct {
 	TLS      TLS     `toml:"tls"`
 	Modules  Modules `toml:"modules"`
 	Auth     Auth    `toml:"auth"`
+	Devices  Devices `toml:"devices"`
 	Admin    Admin   `toml:"admin"`
 	Relay    Relay   `toml:"relay"`
 	Publish  Publish `toml:"publish"`
 	Sync     Sync    `toml:"sync"`
 	Storage  Storage `toml:"storage"`
 	Push     Push    `toml:"push"`
+}
+
+type Devices struct {
+	InactiveAfter Duration `toml:"inactive_after"`
 }
 
 type Domains struct {
@@ -218,6 +223,7 @@ func Default() Config {
 			MaxPendingHellos:                    1024,
 			MaxPendingHellosPerIP:               16,
 		},
+		Devices: Devices{InactiveAfter: Duration(90 * 24 * time.Hour)},
 		Publish: Publish{
 			MaxFileBytes:        16 * MiB,
 			MaxSharesPerAccount: 100,
@@ -321,6 +327,7 @@ func (c Config) Validate() error {
 		}
 	}
 	need(c.DataDir != "", "data_dir is required")
+	need(c.Devices.InactiveAfter.Std() > 0, "devices.inactive_after must be positive: a device that never checks in is always removed eventually")
 	need(c.Domains.Scheme == "https" || c.Domains.Scheme == "http", "domains.scheme must be https or http")
 	need(c.Domains.Port >= 1 && c.Domains.Port <= 65535, "domains.port must be a port number")
 	for name, host := range map[string]string{"api": c.Domains.API, "relay": c.Domains.Relay} {
