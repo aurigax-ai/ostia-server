@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"testing"
@@ -231,5 +232,165 @@ func TestRouterRefusesBeyondMaxPending(t *testing.T) {
 		t.Fatalf("second connection beyond the cap must be closed at once, got %v", err)
 	} else if ne, ok := err.(net.Error); ok && ne.Timeout() {
 		t.Fatalf("second connection was held instead of closed: %v", err)
+	}
+}
+
+type fakeAddrConn struct {
+	net.Conn
+	remote net.Addr
+}
+
+func (c fakeAddrConn) RemoteAddr() net.Addr { return c.remote }
+
+type fakeListener struct {
+	conns  chan net.Conn
+	closed chan struct{}
+}
+
+func newFakeListener() *fakeListener {
+	return &fakeListener{conns: make(chan net.Conn, 64), closed: make(chan struct{})}
+}
+
+func (l *fakeListener) Accept() (net.Conn, error) {
+	select {
+	case c := <-l.conns:
+		return c, nil
+	case <-l.closed:
+		return nil, net.ErrClosed
+	}
+}
+
+func (l *fakeListener) Close() error   { close(l.closed); return nil }
+func (l *fakeListener) Addr() net.Addr { return &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)} }
+
+func (l *fakeListener) dial(ip string) net.Conn {
+	client, server := net.Pipe()
+	l.conns <- fakeAddrConn{Conn: server, remote: &net.TCPAddr{IP: net.ParseIP(ip), Port: 1234}}
+	return client
+}
+
+func closedWithin(c net.Conn, d time.Duration) bool {
+	_ = c.SetReadDeadline(time.Now().Add(d))
+	_, err := c.Read(make([]byte, 1))
+	ne, timeout := err.(net.Error)
+	return err != nil && !(timeout && ne.Timeout())
+}
+
+func TestOneAddressCannotUseUpTheHelloPool(t *testing.T) {
+	ln := newFakeListener()
+	defer ln.Close()
+	router := &Router{
+		HelloTimeout:    3 * time.Second,
+		MaxPending:      8,
+		MaxPendingPerIP: 2,
+		Classify:        func(string) (Kind, string) { return Other, "" },
+		OnRelay:         func(net.Conn, string, []byte, time.Time) {},
+		OnOther:         func(c net.Conn) { _ = c.Close() },
+	}
+	go func() { _ = router.Serve(ln) }()
+
+	var flood []net.Conn
+	for range 6 {
+		flood = append(flood, ln.dial("198.51.100.1"))
+	}
+	defer func() {
+		for _, c := range flood {
+			_ = c.Close()
+		}
+	}()
+	time.Sleep(100 * time.Millisecond)
+	refused := 0
+	for _, c := range flood {
+		if closedWithin(c, 50*time.Millisecond) {
+			refused++
+		}
+	}
+	if refused != 4 {
+		t.Fatalf("a single address may hold 2 pending hellos, so 4 of 6 must be closed at once, got %d", refused)
+	}
+
+	hello := clientHello(t, "api.test")
+	other := ln.dial("203.0.113.7")
+	defer other.Close()
+	done := make(chan struct{})
+	go func() {
+		_, _ = other.Write(hello)
+		_ = other.SetReadDeadline(time.Now().Add(2 * time.Second))
+		_, _ = other.Read(make([]byte, 1))
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("another address was not served while one address flooded")
+	}
+}
+
+func TestNonTLSConnectionsAreNotHeldWhenThePoolIsNearlyFull(t *testing.T) {
+	ln := newFakeListener()
+	defer ln.Close()
+	router := &Router{
+		HelloTimeout:    2 * time.Second,
+		MaxPending:      8,
+		MaxPendingPerIP: 8,
+		Classify:        func(string) (Kind, string) { return Other, "" },
+		OnRelay:         func(net.Conn, string, []byte, time.Time) {},
+		OnOther:         func(c net.Conn) { _ = c.Close() },
+	}
+	go func() { _ = router.Serve(ln) }()
+	var idle []net.Conn
+	for i := range 7 {
+		idle = append(idle, ln.dial(fmt.Sprintf("198.51.100.%d", i+1)))
+	}
+	defer func() {
+		for _, c := range idle {
+			_ = c.Close()
+		}
+	}()
+	time.Sleep(100 * time.Millisecond)
+	garbage := ln.dial("203.0.113.9")
+	defer garbage.Close()
+	start := time.Now()
+	go func() { _, _ = garbage.Write([]byte("GET / HTTP/1.1\r\n\r\n")) }()
+	if !closedWithin(garbage, time.Second) || time.Since(start) > time.Second {
+		t.Fatal("a non-TLS connection was held instead of closed while the pool was nearly full")
+	}
+}
+
+func TestAddressesInOneIPv6PrefixShareThePerAddressCap(t *testing.T) {
+	ln := newFakeListener()
+	defer ln.Close()
+	router := &Router{
+		HelloTimeout:    3 * time.Second,
+		MaxPending:      32,
+		MaxPendingPerIP: 2,
+		Classify:        func(string) (Kind, string) { return Other, "" },
+		OnRelay:         func(net.Conn, string, []byte, time.Time) {},
+		OnOther:         func(c net.Conn) { _ = c.Close() },
+	}
+	go func() { _ = router.Serve(ln) }()
+	var held []net.Conn
+	for i := range 8 {
+		held = append(held, ln.dial(fmt.Sprintf("2001:db8:1:2::%x", i+1)))
+	}
+	defer func() {
+		for _, c := range held {
+			_ = c.Close()
+		}
+	}()
+	time.Sleep(100 * time.Millisecond)
+	refused := 0
+	for _, c := range held {
+		if closedWithin(c, 50*time.Millisecond) {
+			refused++
+		}
+	}
+	if refused != 6 {
+		t.Fatalf("a host that owns a /64 must not get a cap per address: %d of 8 refused", refused)
+	}
+	other := ln.dial("2001:db8:1:3::1")
+	defer other.Close()
+	if closedWithin(other, 50*time.Millisecond) {
+		t.Fatal("a different /64 was refused")
 	}
 }

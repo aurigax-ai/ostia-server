@@ -1,10 +1,14 @@
 package e2e
 
 import (
+	"crypto/tls"
+	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/http/httputil"
 	"net/url"
+	"slices"
 	"testing"
 
 	"github.com/aurigax-ai/ostia-server/internal/testkit"
@@ -14,7 +18,7 @@ func TestPlainHTTPListenerServesAPIAndShareHostsForAReverseProxy(t *testing.T) {
 	pki := testkit.NewPKI(t, t.TempDir(), apiHost)
 	proc := testkit.StartProcess(t, serverBinary, testkit.Config{
 		APIDomain: apiHost, ShareDomain: shareHost, RelayDomain: relayHost, CertFile: pki.CertFile, KeyFile: pki.KeyFile,
-		HTTP: "127.0.0.1:0", ClientIPHeader: "X-Forwarded-For",
+		HTTP: "127.0.0.1:0", ClientIPHeader: "X-Forwarded-For", TrustedProxies: []string{"127.0.0.1"},
 	})
 	plain := testkit.Net{HTTPSAddr: proc.HTTPAddr, APIHost: apiHost, Plain: true}
 	owner := testkit.NewAPI(plain, testkit.NewIdentity("desktop"))
@@ -45,6 +49,28 @@ func TestPlainHTTPListenerServesAPIAndShareHostsForAReverseProxy(t *testing.T) {
 	}
 }
 
+func TestForgedForwardedHeadersAreIgnoredWithoutTrustedProxies(t *testing.T) {
+	pki := testkit.NewPKI(t, t.TempDir(), apiHost)
+	proc := testkit.StartProcess(t, serverBinary, testkit.Config{
+		APIDomain: apiHost, ShareDomain: shareHost, RelayDomain: relayHost, CertFile: pki.CertFile, KeyFile: pki.KeyFile,
+		HTTP: "127.0.0.1:0", ClientIPHeader: "X-Forwarded-For",
+	})
+	anon := testkit.NewAPI(testkit.Net{HTTPSAddr: proc.HTTPAddr, APIHost: apiHost, Plain: true}, testkit.NewIdentity("anon"))
+	body := anon.ID.Registration()
+	body["code"] = "nope"
+	limited := false
+	for i := range 40 {
+		res := anon.Do(t, "POST", "/v1/auth/invite", body, "X-Forwarded-For", fmt.Sprintf("198.51.100.%d", i+1))
+		if res.Status == http.StatusTooManyRequests {
+			limited = true
+			break
+		}
+	}
+	if !limited {
+		t.Fatal("rotating a forged X-Forwarded-For escaped the rate limit")
+	}
+}
+
 func cutLine(s string) (string, string, bool) {
 	for i := range len(s) {
 		if s[i] == '\n' {
@@ -62,13 +88,15 @@ func TestForwardModePassesNonRelayTrafficToAProxyAndStillRelays(t *testing.T) {
 		target, _ := url.Parse("http://" + upstream)
 		httputil.NewSingleHostReverseProxy(target).ServeHTTP(w, r)
 	}))
+	sources := &testkit.ProxyProtocolListener{Listener: proxy.Listener}
+	proxy.Listener = sources
 	proxy.TLS = pki.ServerConfig(t)
 	proxy.StartTLS()
 	t.Cleanup(proxy.Close)
 
 	proc := testkit.StartProcess(t, serverBinary, testkit.Config{
 		APIDomain: apiHost, ShareDomain: shareHost, RelayDomain: relayHost, CertFile: pki.CertFile, KeyFile: pki.KeyFile,
-		HTTP: "127.0.0.1:0", ForwardAddr: proxy.Listener.Addr().String(),
+		HTTP: "127.0.0.1:0", ForwardAddr: proxy.Listener.Addr().String(), TrustedProxies: []string{"127.0.0.1"}, ClientIPHeader: "X-Forwarded-For",
 	})
 	upstream = proc.HTTPAddr
 	n := testkit.Net{HTTPSAddr: proc.HTTPSAddr, Roots: pki.Roots, APIHost: apiHost}
@@ -83,7 +111,7 @@ func TestForwardModePassesNonRelayTrafficToAProxyAndStillRelays(t *testing.T) {
 	desktop.Prepare(t)
 	desktop.Listen(t)
 	waitUntil(t, "relay through the forwarding server", func() bool {
-		conn, err := testkit.DialPhone(t.Context(), n, desktop.Host, cert.Fingerprint)
+		conn, err := testkit.DialAuthed(t.Context(), n, desktop.Host, cert.Fingerprint, gateway.Token)
 		if err != nil {
 			return false
 		}
@@ -95,5 +123,19 @@ func TestForwardModePassesNonRelayTrafficToAProxyAndStillRelays(t *testing.T) {
 	sh := api.PublishHTML(t, testkit.ShareOptions{Mode: "link", HTML: artifactHTML})
 	if html, err := n.OpenShare(t, shareHost, sh); err != nil || html != artifactHTML {
 		t.Fatalf("share through the proxy: %q %v", html, err)
+	}
+
+	raw, err := n.Dial(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	conn := tls.Client(raw, &tls.Config{ServerName: apiHost, RootCAs: pki.Roots, MinVersion: tls.VersionTLS12})
+	if err := conn.HandshakeContext(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	local := raw.LocalAddr().(*net.TCPAddr).AddrPort()
+	if !slices.Contains(sources.Sources(), local) {
+		t.Fatalf("the proxy must be told the client's address with PROXY protocol: wanted %s in %v", local, sources.Sources())
 	}
 }

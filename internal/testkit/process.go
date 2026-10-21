@@ -24,6 +24,7 @@ type Config struct {
 	HTTP           string
 	ForwardAddr    string
 	ClientIPHeader string
+	TrustedProxies []string
 	Modules        string
 }
 
@@ -78,6 +79,13 @@ func (c Config) TOML(dataDir string) string {
 	if c.ClientIPHeader != "" {
 		listen += fmt.Sprintf("client_ip_header = %q\n", c.ClientIPHeader)
 	}
+	if len(c.TrustedProxies) > 0 {
+		quoted := make([]string, len(c.TrustedProxies))
+		for i, p := range c.TrustedProxies {
+			quoted[i] = fmt.Sprintf("%q", p)
+		}
+		listen += "trusted_proxies = [" + strings.Join(quoted, ", ") + "]\n"
+	}
 	tlsConfig := fmt.Sprintf("mode = \"files\"\n[[tls.certs]]\ncert = %q\nkey = %q\n", c.CertFile, c.KeyFile)
 	if c.ForwardAddr != "" {
 		tlsConfig = fmt.Sprintf("mode = \"forward\"\nforward_addr = %q\n", c.ForwardAddr)
@@ -105,8 +113,23 @@ var (
 	listeningHTTP  = regexp.MustCompile(`listening http=(\S+)`)
 )
 
+func WithKey(extra, table, key, value string) string {
+	if extra != "" && !strings.HasSuffix(extra, "\n") {
+		extra += "\n"
+	}
+	if strings.Contains(extra, key+" ") {
+		return extra
+	}
+	line := key + " = " + value + "\n"
+	if strings.Contains(extra, table+"\n") {
+		return strings.Replace(extra, table+"\n", table+"\n"+line, 1)
+	}
+	return extra + table + "\n" + line
+}
+
 func StartProcess(t testing.TB, binary string, cfg Config) *Process {
 	t.Helper()
+	cfg.Extra = WithKey(cfg.Extra, "[auth]", "approver_min_age", `"0s"`)
 	dir := t.TempDir()
 	dataDir := filepath.Join(dir, "data")
 	cfgPath := filepath.Join(dir, "ostia-server.toml")

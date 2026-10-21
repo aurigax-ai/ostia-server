@@ -51,7 +51,7 @@ func (d *DB) ManifestVersions(ctx context.Context, accountID string) ([]Manifest
 	return out, rows.Err()
 }
 
-func putManifestTx(ctx context.Context, tx *sql.Tx, now int64, accountID string, ifMatch int64, blob []byte, history int) (int64, error) {
+func putManifestTx(ctx context.Context, tx *sql.Tx, now int64, accountID string, ifMatch int64, blob []byte, keep Retention) (int64, error) {
 	var current int64
 	err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(version), 0) FROM sync_manifests WHERE account_id = ?`, accountID).Scan(&current)
 	if err != nil {
@@ -64,19 +64,19 @@ func putManifestTx(ctx context.Context, tx *sql.Tx, now int64, accountID string,
 	if _, err := tx.ExecContext(ctx, `INSERT INTO sync_manifests (account_id, version, blob, updated_at) VALUES (?, ?, ?, ?)`, accountID, next, blob, now); err != nil {
 		return 0, err
 	}
-	if history > 0 {
-		if _, err := tx.ExecContext(ctx, `DELETE FROM sync_manifests WHERE account_id = ? AND version <= ?`, accountID, next-int64(history)); err != nil {
+	if keep.Versions > 0 {
+		if err := pruneManifests(ctx, tx, now, accountID, keep); err != nil {
 			return 0, err
 		}
 	}
 	return next, nil
 }
 
-func (d *DB) PutManifest(ctx context.Context, accountID string, ifMatch int64, blob []byte, history int) (int64, error) {
+func (d *DB) PutManifest(ctx context.Context, accountID string, ifMatch int64, blob []byte, keep Retention) (int64, error) {
 	var next int64
 	err := d.tx(ctx, func(tx *sql.Tx) error {
 		var err error
-		next, err = putManifestTx(ctx, tx, d.ms(), accountID, ifMatch, blob, history)
+		next, err = putManifestTx(ctx, tx, d.ms(), accountID, ifMatch, blob, keep)
 		return err
 	})
 	return next, err
@@ -87,7 +87,7 @@ type Rotation struct {
 	Manifest    []byte
 	Wraps       map[string][]byte
 	DeleteSlots []string
-	History     int
+	Retention   Retention
 }
 
 func (d *DB) Rotate(ctx context.Context, accountID string, r Rotation) (int64, error) {
@@ -95,7 +95,7 @@ func (d *DB) Rotate(ctx context.Context, accountID string, r Rotation) (int64, e
 	err := d.tx(ctx, func(tx *sql.Tx) error {
 		now := d.ms()
 		var err error
-		next, err = putManifestTx(ctx, tx, now, accountID, r.IfMatch, r.Manifest, r.History)
+		next, err = putManifestTx(ctx, tx, now, accountID, r.IfMatch, r.Manifest, r.Retention)
 		if err != nil {
 			return err
 		}
@@ -119,4 +119,47 @@ func CurrentOf(err error) (int64, bool) {
 		return mismatch.Current, true
 	}
 	return 0, false
+}
+
+const dayMillis = 24 * 60 * 60 * 1000
+
+type Retention struct {
+	Versions       int
+	CheckpointDays int
+}
+
+func pruneManifests(ctx context.Context, tx *sql.Tx, now int64, accountID string, keep Retention) error {
+	rows, err := tx.QueryContext(ctx, `SELECT version, updated_at FROM sync_manifests WHERE account_id = ? ORDER BY version DESC`, accountID)
+	if err != nil {
+		return err
+	}
+	var drop []int64
+	days := map[int64]bool{}
+	index := 0
+	for rows.Next() {
+		var version, updatedAt int64
+		if err := rows.Scan(&version, &updatedAt); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		day := updatedAt / dayMillis
+		switch {
+		case index < keep.Versions:
+			days[day] = true
+		case now-updatedAt <= int64(keep.CheckpointDays)*dayMillis && !days[day]:
+			days[day] = true
+		default:
+			drop = append(drop, version)
+		}
+		index++
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, version := range drop {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM sync_manifests WHERE account_id = ? AND version = ?`, accountID, version); err != nil {
+			return err
+		}
+	}
+	return nil
 }

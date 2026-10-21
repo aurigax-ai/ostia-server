@@ -17,21 +17,39 @@ CREATE TABLE devices (
 	box_pub BLOB NOT NULL,
 	created_at INTEGER NOT NULL,
 	last_seen INTEGER NOT NULL,
-	revoked_at INTEGER NOT NULL DEFAULT 0
+	revoked_at INTEGER NOT NULL DEFAULT 0,
+	last_signed_ms INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX devices_account ON devices(account_id);
 CREATE TABLE sessions (
 	token_hash BLOB PRIMARY KEY,
 	device_id TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
-	expires_at INTEGER NOT NULL
+	expires_at INTEGER NOT NULL,
+	elevated_until INTEGER NOT NULL DEFAULT 0
 );
+CREATE TABLE approvals (
+	id TEXT PRIMARY KEY,
+	account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+	requester_device_id TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+	requester_token_hash BLOB NOT NULL,
+	created_at INTEGER NOT NULL,
+	expires_at INTEGER NOT NULL,
+	approved_at INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX approvals_account ON approvals(account_id);
 CREATE INDEX sessions_device ON sessions(device_id);
 CREATE TABLE invites (
 	code_hash BLOB PRIMARY KEY,
 	account_id TEXT REFERENCES accounts(id) ON DELETE CASCADE,
 	created_at INTEGER NOT NULL,
 	expires_at INTEGER NOT NULL,
-	used_at INTEGER NOT NULL DEFAULT 0
+	used_at INTEGER NOT NULL DEFAULT 0,
+	elevated INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE device_seen (
+	viewer_device_id TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+	device_id TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+	PRIMARY KEY (viewer_device_id, device_id)
 );
 CREATE TABLE key_wraps (
 	account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
@@ -85,8 +103,15 @@ CREATE TABLE reports (
 CREATE INDEX reports_share ON reports(share_id);
 CREATE TABLE push_handles (
 	handle TEXT PRIMARY KEY,
+	account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
 	platform TEXT NOT NULL,
 	token_sealed BLOB NOT NULL,
 	created_at INTEGER NOT NULL
+);
+CREATE INDEX push_handles_account ON push_handles(account_id);
+CREATE TABLE push_tickets (
+	hash BLOB PRIMARY KEY,
+	account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+	expires_at INTEGER NOT NULL
 );
 `

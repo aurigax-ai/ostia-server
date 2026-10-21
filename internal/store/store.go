@@ -18,6 +18,7 @@ var (
 	ErrQuota           = errors.New("quota exceeded")
 	ErrLimit           = errors.New("limit reached")
 	ErrGone            = errors.New("gone")
+	ErrRequesterTooNew = errors.New("requester too new")
 )
 
 var migrations = []string{schemaV1}

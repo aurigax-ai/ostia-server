@@ -93,7 +93,11 @@ func New(cfg config.Config, opts Options) (*Server, error) {
 		return nil, err
 	}
 	s := &Server{Cfg: cfg, DB: db, Blobs: blobs, Key: key, Now: now}
-	s.Guard = &httpx.Guard{IP: func(r *http.Request) string { return httpx.ClientIP(r, cfg.Listen.ClientIPHeader) }, Now: now}
+	proxies, err := httpx.ParseProxies(cfg.Listen.TrustedProxies, cfg.Listen.ClientIPHeader)
+	if err != nil {
+		return nil, err
+	}
+	s.Guard = &httpx.Guard{IP: proxies.ClientIP, Now: now}
 	s.Auth = &auth.Service{DB: db, Blobs: blobs, Key: key, Cfg: cfg.Auth, Now: now, Guard: s.Guard}
 	if cfg.Auth.GitHubClientID != "" {
 		s.Auth.GitHub = &auth.GitHub{ClientID: cfg.Auth.GitHubClientID, BaseURL: cfg.Auth.GitHubBaseURL, APIURL: cfg.Auth.GitHubAPIURL, Client: opts.client()}
@@ -102,7 +106,7 @@ func New(cfg config.Config, opts Options) (*Server, error) {
 	s.Auth.Mount(mux)
 	if cfg.RelayEnabled() {
 		s.Relay = relay.New(db, s.Auth, cfg.Relay, cfg.Domains.Relay, now)
-		s.Auth.Hooks = auth.Hooks{DeviceRevoked: s.Relay.KickDevice, AccountDeleted: s.Relay.KickDevices}
+		s.Auth.Hooks = auth.Hooks{DeviceAdded: s.Relay.NotifyDeviceAdded, SessionEnded: s.Relay.KickSession, DeviceRevoked: s.Relay.KickDevice, AccountDeleted: s.Relay.KickDevices}
 		s.Relay.Mount(mux)
 	}
 	if cfg.PublishEnabled() {
@@ -119,7 +123,7 @@ func New(cfg config.Config, opts Options) (*Server, error) {
 		if err != nil {
 			return nil, err
 		}
-		s.Push = &push.Service{DB: db, Key: key, Guard: s.Guard, Now: now, MaxHandles: cfg.Push.MaxHandles, Sender: sender}
+		s.Push = &push.Service{DB: db, Key: key, Auth: s.Auth, Guard: s.Guard, Now: now, MaxHandles: cfg.Push.MaxHandles, MaxHandlesPerAccount: cfg.Push.MaxHandlesPerAccount, TicketTTL: cfg.Push.TicketTTL.Std(), TicketBurst: cfg.Push.TicketBurst, Sender: sender}
 		s.Push.Mount(mux)
 	}
 	mux.Handle("GET /v1/info", s.Guard.PerIP("info", limit.Rule{Every: time.Second, Burst: 30}, httpx.Handle(s.info)))
@@ -300,6 +304,7 @@ func (s *Server) maintain(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			s.sweep(ctx)
 			s.Guard.Sweep()
 			if s.Push != nil {
 				s.Push.Sweep()
@@ -310,8 +315,9 @@ func (s *Server) maintain(ctx context.Context) {
 
 func (s *Server) router(terminated *connListener) *sni.Router {
 	r := &sni.Router{
-		HelloTimeout: s.Cfg.Relay.HelloTimeout.Std(),
-		MaxPending:   s.Cfg.Relay.MaxPendingHellos,
+		HelloTimeout:    s.Cfg.Relay.HelloTimeout.Std(),
+		MaxPending:      s.Cfg.Relay.MaxPendingHellos,
+		MaxPendingPerIP: s.Cfg.Relay.MaxPendingHellosPerIP,
 		Classify: func(name string) (sni.Kind, string) {
 			if s.Relay != nil {
 				if label, ok := s.Relay.Classify(name); ok {
@@ -322,7 +328,7 @@ func (s *Server) router(terminated *connListener) *sni.Router {
 		},
 		OnOther: func(conn net.Conn) {
 			if s.Cfg.TLS.Mode == config.TLSForward {
-				forwardTo(s.Cfg.TLS.ForwardAddr, conn)
+				forwardTo(s.Cfg.TLS.ForwardAddr, s.Cfg.TLS.ForwardProxyProtocol, conn)
 				return
 			}
 			secured := tls.Server(conn, s.certs.config())
@@ -343,11 +349,18 @@ func (s *Server) router(terminated *connListener) *sni.Router {
 	return r
 }
 
-func forwardTo(addr string, conn net.Conn) {
+func forwardTo(addr string, proxyProtocol bool, conn net.Conn) {
 	upstream, err := net.DialTimeout("tcp", addr, httpTimeout)
 	if err != nil {
 		_ = conn.Close()
 		return
+	}
+	if proxyProtocol {
+		if err := sni.WriteProxyV2(upstream, conn.RemoteAddr(), conn.LocalAddr()); err != nil {
+			_ = upstream.Close()
+			_ = conn.Close()
+			return
+		}
 	}
 	done := make(chan struct{}, 2)
 	go func() { _, _ = io.Copy(upstream, conn); done <- struct{}{} }()
@@ -355,4 +368,18 @@ func forwardTo(addr string, conn net.Conn) {
 	<-done
 	_ = conn.Close()
 	_ = upstream.Close()
+}
+
+func (s *Server) sweep(ctx context.Context) {
+	for name, task := range map[string]func(context.Context) error{
+		"sessions":     s.DB.SweepSessions,
+		"invites":      s.DB.SweepInvites,
+		"approvals":    s.DB.SweepApprovals,
+		"push tickets": s.DB.SweepPushTickets,
+	} {
+		if err := task(ctx); err != nil {
+			slog.Error("sweep "+name, "err", err)
+		}
+	}
+	s.Auth.SweepChallenges()
 }

@@ -129,7 +129,7 @@ func (s *Service) putManifest(w http.ResponseWriter, r *http.Request, p auth.Pri
 	if len(in.Blob) == 0 || int64(len(in.Blob)) > s.Cfg.MaxManifestBytes {
 		return httpx.Errf(http.StatusRequestEntityTooLarge, "too-large", "manifest size is outside the allowed range")
 	}
-	version, err := s.DB.PutManifest(r.Context(), p.AccountID, expected, in.Blob, s.Cfg.ManifestHistory)
+	version, err := s.DB.PutManifest(r.Context(), p.AccountID, expected, in.Blob, s.retention())
 	if versionMismatch(w, err) {
 		return nil
 	}
@@ -268,6 +268,11 @@ func (s *Service) putWrap(w http.ResponseWriter, r *http.Request, p auth.Princip
 	if err := s.validSlot(r.Context(), p.AccountID, slot); err != nil {
 		return err
 	}
+	if _, err := s.DB.Wrap(r.Context(), p.AccountID, slot); err == nil {
+		if err := s.Auth.NeedElevation(p); err != nil {
+			return err
+		}
+	}
 	var in struct {
 		Blob httpx.B64 `json:"blob"`
 	}
@@ -285,6 +290,9 @@ func (s *Service) putWrap(w http.ResponseWriter, r *http.Request, p auth.Princip
 }
 
 func (s *Service) deleteWrap(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
+	if err := s.Auth.NeedElevation(p); err != nil {
+		return err
+	}
 	if err := s.DB.DeleteWrap(r.Context(), p.AccountID, r.PathValue("slot")); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			return httpx.ErrNotFound
@@ -296,6 +304,9 @@ func (s *Service) deleteWrap(w http.ResponseWriter, r *http.Request, p auth.Prin
 }
 
 func (s *Service) rotate(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
+	if err := s.Auth.NeedElevation(p); err != nil {
+		return err
+	}
 	var in struct {
 		IfMatch     int64                `json:"ifMatch"`
 		Manifest    httpx.B64            `json:"manifest"`
@@ -308,7 +319,7 @@ func (s *Service) rotate(w http.ResponseWriter, r *http.Request, p auth.Principa
 	if len(in.Manifest) == 0 || int64(len(in.Manifest)) > s.Cfg.MaxManifestBytes || in.IfMatch < 0 {
 		return httpx.Errf(http.StatusBadRequest, "bad-request", "manifest size is outside the allowed range")
 	}
-	rotation := store.Rotation{IfMatch: in.IfMatch, Manifest: in.Manifest, Wraps: map[string][]byte{}, DeleteSlots: in.DeleteSlots, History: s.Cfg.ManifestHistory}
+	rotation := store.Rotation{IfMatch: in.IfMatch, Manifest: in.Manifest, Wraps: map[string][]byte{}, DeleteSlots: in.DeleteSlots, Retention: s.retention()}
 	for slot, wrap := range in.Wraps {
 		if err := s.validSlot(r.Context(), p.AccountID, slot); err != nil {
 			return err
@@ -330,6 +341,9 @@ func (s *Service) rotate(w http.ResponseWriter, r *http.Request, p auth.Principa
 }
 
 func (s *Service) gc(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
+	if err := s.Auth.NeedElevation(p); err != nil {
+		return err
+	}
 	var in struct {
 		Keep []string `json:"keep"`
 	}
@@ -366,4 +380,8 @@ func (s *Service) usage(w http.ResponseWriter, r *http.Request, p auth.Principal
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"blobs": count, "bytes": bytes, "quotaBytes": s.Cfg.QuotaBytes})
 	return nil
+}
+
+func (s *Service) retention() store.Retention {
+	return store.Retention{Versions: s.Cfg.ManifestHistory, CheckpointDays: s.Cfg.ManifestCheckpointDays}
 }

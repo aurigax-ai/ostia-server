@@ -96,7 +96,7 @@ func (f *FCM) accessToken(ctx context.Context) (string, error) {
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	res, err := f.client.Do(req)
 	if err != nil {
-		return "", err
+		return "", scrubURL(err)
 	}
 	defer res.Body.Close()
 	if res.StatusCode != http.StatusOK {
@@ -135,7 +135,7 @@ func (f *FCM) Send(ctx context.Context, platform, token string) error {
 	req.Header.Set("Authorization", "Bearer "+access)
 	res, err := f.client.Do(req)
 	if err != nil {
-		return err
+		return scrubURL(err)
 	}
 	defer res.Body.Close()
 	raw, _ := io.ReadAll(io.LimitReader(res.Body, fcmMaxResponseLen))

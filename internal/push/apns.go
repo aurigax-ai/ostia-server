@@ -99,7 +99,7 @@ func (a *APNs) Send(ctx context.Context, platform, token string) error {
 	req.Header.Set("apns-priority", "10")
 	res, err := a.client.Do(req)
 	if err != nil {
-		return err
+		return scrubURL(err)
 	}
 	defer res.Body.Close()
 	raw, _ := io.ReadAll(io.LimitReader(res.Body, fcmMaxResponseLen))

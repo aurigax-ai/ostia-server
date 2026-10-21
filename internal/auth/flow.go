@@ -9,27 +9,47 @@ import (
 
 	"github.com/aurigax-ai/ostia-server/internal/httpx"
 	"github.com/aurigax-ai/ostia-server/internal/ids"
+	"github.com/aurigax-ai/ostia-server/internal/netkey"
 	"github.com/aurigax-ai/ostia-server/internal/store"
 )
 
+type flowOwner struct {
+	accountID string
+	tokenHash []byte
+}
+
 type flow struct {
 	mu         sync.Mutex
+	owner      flowOwner
+	ip         string
 	deviceCode string
 	expires    time.Time
 	nextPoll   time.Time
 	interval   time.Duration
 }
 
-func (s *Service) githubStart(w http.ResponseWriter, r *http.Request) error {
+func (o flowOwner) is(other flowOwner) bool {
+	return o.accountID == other.accountID && ids.Equal(o.tokenHash, other.tokenHash)
+}
+
+func (s *Service) startFlow(w http.ResponseWriter, r *http.Request, owner flowOwner) error {
+	ip := netkey.Of(s.Guard.IP(r))
 	s.mu.Lock()
+	inFlight := 0
 	for id, f := range s.flows {
 		if s.Now().After(f.expires) {
 			delete(s.flows, id)
+		} else if f.ip == ip {
+			inFlight++
 		}
 	}
-	full := len(s.flows) >= maxFlows
+	total := len(s.flows)
 	s.mu.Unlock()
-	if full {
+	if inFlight >= maxFlowsPerIP {
+		w.Header().Set("Retry-After", "60")
+		return httpx.ErrRateLimited
+	}
+	if total >= maxFlows {
 		return httpx.Err(http.StatusServiceUnavailable, "busy")
 	}
 	code, err := s.GitHub.Start(r.Context())
@@ -37,7 +57,7 @@ func (s *Service) githubStart(w http.ResponseWriter, r *http.Request) error {
 		return httpx.Errf(http.StatusBadGateway, "github-unavailable", "could not start the GitHub device flow")
 	}
 	interval := pollInterval(code.Interval)
-	f := &flow{deviceCode: code.DeviceCode, expires: s.Now().Add(time.Duration(code.ExpiresIn) * time.Second), interval: interval, nextPoll: s.Now().Add(interval)}
+	f := &flow{owner: owner, ip: ip, deviceCode: code.DeviceCode, expires: s.Now().Add(time.Duration(code.ExpiresIn) * time.Second), interval: interval, nextPoll: s.Now().Add(interval)}
 	flowID := ids.Token()
 	s.mu.Lock()
 	s.flows[flowID] = f
@@ -52,6 +72,54 @@ func (s *Service) githubStart(w http.ResponseWriter, r *http.Request) error {
 	return nil
 }
 
+func (s *Service) githubStart(w http.ResponseWriter, r *http.Request) error {
+	return s.startFlow(w, r, flowOwner{})
+}
+
+func (s *Service) advanceFlow(w http.ResponseWriter, r *http.Request, flowID string, owner flowOwner) (userID int64, finished bool, err error) {
+	s.mu.Lock()
+	f := s.flows[flowID]
+	s.mu.Unlock()
+	if f == nil || !f.owner.is(owner) {
+		return 0, false, httpx.Errf(http.StatusNotFound, "unknown-flow", "start the sign-in again")
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	now := s.Now()
+	if now.After(f.expires) {
+		s.dropFlow(flowID)
+		return 0, false, httpx.Errf(http.StatusGone, "expired", "the sign-in code expired")
+	}
+	if now.Before(f.nextPoll) {
+		return 0, false, writePending(w, f.interval)
+	}
+	token, result, err := s.GitHub.Poll(r.Context(), f.deviceCode)
+	if err != nil {
+		return 0, false, httpx.Errf(http.StatusBadGateway, "github-unavailable", "could not reach GitHub")
+	}
+	f.nextPoll = now.Add(f.interval)
+	switch result {
+	case PollPending:
+		return 0, false, writePending(w, f.interval)
+	case PollSlowDown:
+		f.interval += 5 * time.Second
+		f.nextPoll = now.Add(f.interval)
+		return 0, false, writePending(w, f.interval)
+	case PollExpired:
+		s.dropFlow(flowID)
+		return 0, false, httpx.Errf(http.StatusGone, "expired", "the sign-in code expired")
+	case PollDenied:
+		s.dropFlow(flowID)
+		return 0, false, httpx.Errf(http.StatusForbidden, "denied", "the sign-in was denied")
+	}
+	userID, err = s.GitHub.UserID(r.Context(), token)
+	if err != nil {
+		return 0, false, httpx.Errf(http.StatusBadGateway, "github-unavailable", "could not read the GitHub user")
+	}
+	s.dropFlow(flowID)
+	return userID, true, nil
+}
+
 func (s *Service) githubPoll(w http.ResponseWriter, r *http.Request) error {
 	var in struct {
 		registration
@@ -64,55 +132,24 @@ func (s *Service) githubPoll(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	s.mu.Lock()
-	f := s.flows[in.FlowID]
-	s.mu.Unlock()
-	if f == nil {
-		return httpx.Errf(http.StatusNotFound, "unknown-flow", "start the sign-in again")
+	userID, finished, err := s.advanceFlow(w, r, in.FlowID, flowOwner{})
+	if err != nil || !finished {
+		return err
 	}
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	now := s.Now()
-	if now.After(f.expires) {
-		s.dropFlow(in.FlowID)
-		return httpx.Errf(http.StatusGone, "expired", "the sign-in code expired")
-	}
-	if now.Before(f.nextPoll) {
-		return writePending(w, f.interval)
-	}
-	token, result, err := s.GitHub.Poll(r.Context(), f.deviceCode)
-	if err != nil {
-		return httpx.Errf(http.StatusBadGateway, "github-unavailable", "could not reach GitHub")
-	}
-	f.nextPoll = now.Add(f.interval)
-	switch result {
-	case PollPending:
-		return writePending(w, f.interval)
-	case PollSlowDown:
-		f.interval += 5 * time.Second
-		f.nextPoll = now.Add(f.interval)
-		return writePending(w, f.interval)
-	case PollExpired:
-		s.dropFlow(in.FlowID)
-		return httpx.Errf(http.StatusGone, "expired", "the sign-in code expired")
-	case PollDenied:
-		s.dropFlow(in.FlowID)
-		return httpx.Errf(http.StatusForbidden, "denied", "the sign-in was denied")
-	}
-	userID, err := s.GitHub.UserID(r.Context(), token)
-	if err != nil {
-		return httpx.Errf(http.StatusBadGateway, "github-unavailable", "could not read the GitHub user")
-	}
-	s.dropFlow(in.FlowID)
-	acct, dev, err := s.DB.RegisterProvider(r.Context(), providerGitHub, s.providerHash(providerGitHub, strconv.FormatInt(userID, 10)), nd, s.Cfg.MaxDevices)
+	acct, dev, err := s.DB.RegisterProvider(r.Context(), providerGitHub, s.providerHashOf(userID), nd, s.Cfg.MaxDevices)
 	if errors.Is(err, store.ErrLimit) {
 		return httpx.Errf(http.StatusConflict, "device-limit", "the account has reached its device limit")
 	}
 	if err != nil {
 		return err
 	}
+	s.announceDevice(r, acct.ID, dev)
 	httpx.WriteJSON(w, http.StatusCreated, registered{AccountID: acct.ID, DeviceID: dev.ID, Provider: acct.Provider})
 	return nil
+}
+
+func (s *Service) providerHashOf(userID int64) string {
+	return s.providerHash(providerGitHub, strconv.FormatInt(userID, 10))
 }
 
 func (s *Service) dropFlow(id string) {

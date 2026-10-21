@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -16,6 +17,7 @@ import (
 	"github.com/aurigax-ai/ostia-server/internal/httpx"
 	"github.com/aurigax-ai/ostia-server/internal/ids"
 	"github.com/aurigax-ai/ostia-server/internal/limit"
+	"github.com/aurigax-ai/ostia-server/internal/netkey"
 	"github.com/aurigax-ai/ostia-server/internal/serverkey"
 	"github.com/aurigax-ai/ostia-server/internal/store"
 )
@@ -23,26 +25,39 @@ import (
 const (
 	RegisterContext  = "ostia-server/register/v1"
 	ChallengeContext = "ostia-server/auth/v1"
+	SeenContext      = "ostia-server/seen/v1"
+	InviteContext    = "ostia-server/invite/v1"
+	ElevateContext   = "ostia-server/elevate/v1"
+	RevokeContext    = "ostia-server/revoke/v1"
+	ApproveContext   = "ostia-server/approve/v1"
+	signatureHeader  = "X-Device-Signature"
+	timestampHeader  = "X-Device-Timestamp"
+	signatureSkew    = 2 * time.Minute
 
-	keySize           = 32
-	maxNameLength     = 64
-	challengeTTL      = time.Minute
-	maxChallenges     = 20000
-	maxFlows          = 2000
-	smallBody         = 4 << 10
-	providerGitHub    = "github"
-	providerIDPurpose = "provider-id"
+	keySize                = 32
+	maxNameLength          = 64
+	challengeTTL           = time.Minute
+	maxChallenges          = 100000
+	maxChallengesPerDevice = 5
+	maxFlowsPerIP          = 5
+	maxFlows               = 2000
+	smallBody              = 4 << 10
+	providerGitHub         = "github"
+	providerIDPurpose      = "provider-id"
 )
 
 type Hooks struct {
+	SessionEnded   func(tokenHash []byte)
+	DeviceAdded    func(accountID string, device store.Device)
 	DeviceRevoked  func(deviceID string)
 	AccountDeleted func(deviceIDs []string)
 }
 
 type Principal struct {
-	DeviceID  string
-	AccountID string
-	TokenHash []byte
+	DeviceID      string
+	AccountID     string
+	TokenHash     []byte
+	ElevatedUntil int64
 }
 
 type Service struct {
@@ -55,10 +70,11 @@ type Service struct {
 	Guard  *httpx.Guard
 	Hooks  Hooks
 
-	mu          sync.Mutex
-	challenges  map[string]challenge
-	flows       map[string]*flow
-	deviceLimit *limit.Limiter
+	mu           sync.Mutex
+	challenges   map[string]challenge
+	challengesOf map[string][]string
+	flows        map[string]*flow
+	deviceLimit  *limit.Limiter
 }
 
 type challenge struct {
@@ -71,6 +87,7 @@ func (s *Service) init() {
 	defer s.mu.Unlock()
 	if s.challenges == nil {
 		s.challenges = map[string]challenge{}
+		s.challengesOf = map[string][]string{}
 		s.flows = map[string]*flow{}
 		s.deviceLimit = limit.New(limit.Rule{Every: 50 * time.Millisecond, Burst: 100}, s.Now)
 	}
@@ -90,8 +107,10 @@ func (s *Service) Mount(mux *httpx.Mux) {
 	mux.Handle("DELETE /v1/auth/session", s.Authed(s.logout))
 	mux.Handle("GET /v1/devices", s.Authed(s.listDevices))
 	mux.Handle("POST /v1/devices/invite", s.Authed(s.deviceInvite))
+	mux.Handle("POST /v1/devices/{id}/seen", s.Authed(s.markSeen))
 	mux.Handle("DELETE /v1/devices/{id}", s.Authed(s.revokeDevice))
 	mux.Handle("DELETE /v1/account", s.Authed(s.deleteAccount))
+	s.mountElevation(mux)
 }
 
 func (s *Service) Authed(fn func(w http.ResponseWriter, r *http.Request, p Principal) error) http.Handler {
@@ -114,14 +133,15 @@ func (s *Service) Authenticate(r *http.Request) (Principal, error) {
 		return Principal{}, httpx.ErrUnauthorized
 	}
 	hash := ids.Hash(token)
-	dev, err := s.DB.SessionDevice(r.Context(), hash)
+	sess, err := s.DB.LookupSession(r.Context(), hash)
 	if err != nil {
 		return Principal{}, httpx.ErrUnauthorized
 	}
+	dev := sess.Device
 	if s.Now().UnixMilli()-dev.LastSeen > time.Minute.Milliseconds() {
 		_ = s.DB.TouchDevice(r.Context(), dev.ID)
 	}
-	return Principal{DeviceID: dev.ID, AccountID: dev.AccountID, TokenHash: hash}, nil
+	return Principal{DeviceID: dev.ID, AccountID: dev.AccountID, TokenHash: hash, ElevatedUntil: sess.ElevatedUntil}, nil
 }
 
 type registration struct {
@@ -177,13 +197,23 @@ func (s *Service) registerInvite(w http.ResponseWriter, r *http.Request) error {
 	default:
 		return err
 	}
+	s.announceDevice(r, acct.ID, dev)
 	httpx.WriteJSON(w, http.StatusCreated, registered{AccountID: acct.ID, DeviceID: dev.ID, Provider: acct.Provider})
 	return nil
 }
 
-func (s *Service) CreateInvite(ctx context.Context, accountID string, ttl time.Duration) (code string, expiresAt int64, err error) {
+func (s *Service) announceDevice(r *http.Request, accountID string, dev store.Device) {
+	if s.Hooks.DeviceAdded == nil {
+		return
+	}
+	if count, err := s.DB.ActiveDeviceCount(r.Context(), accountID); err == nil && count >= 2 {
+		s.Hooks.DeviceAdded(accountID, dev)
+	}
+}
+
+func (s *Service) CreateInvite(ctx context.Context, accountID string, ttl time.Duration, elevated bool) (code string, expiresAt int64, err error) {
 	code = formatCode(ids.New()[:20])
-	expiresAt, err = s.DB.CreateInvite(ctx, ids.Hash(normalizeCode(code)), accountID, ttl)
+	expiresAt, err = s.DB.CreateInvite(ctx, ids.Hash(normalizeCode(code)), accountID, ttl, elevated)
 	return code, expiresAt, err
 }
 
@@ -204,22 +234,33 @@ func normalizeCode(code string) string {
 	}, code)
 }
 
-func (s *Service) newChallenge(deviceID string) (string, error) {
+func (s *Service) newChallenge(deviceID, ip string, registered bool) (string, error) {
+	key := deviceID + "|" + ip
+	nonce := ids.Token()
+	if !registered {
+		return nonce, nil
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := s.Now()
 	if len(s.challenges) >= maxChallenges {
-		for nonce, c := range s.challenges {
-			if now.After(c.expires) {
-				delete(s.challenges, nonce)
-			}
-		}
-		if len(s.challenges) >= maxChallenges {
-			return "", httpx.Err(http.StatusServiceUnavailable, "busy")
+		return "", httpx.Err(http.StatusServiceUnavailable, "busy")
+	}
+	live := s.challengesOf[key][:0]
+	for _, older := range s.challengesOf[key] {
+		c, ok := s.challenges[older]
+		if ok && now.Before(c.expires) {
+			live = append(live, older)
+		} else {
+			delete(s.challenges, older)
 		}
 	}
-	nonce := ids.Token()
+	for len(live) >= maxChallengesPerDevice {
+		delete(s.challenges, live[0])
+		live = live[1:]
+	}
 	s.challenges[nonce] = challenge{deviceID: deviceID, expires: now.Add(challengeTTL)}
+	s.challengesOf[key] = append(live, nonce)
 	return nonce, nil
 }
 
@@ -231,6 +272,35 @@ func (s *Service) takeChallenge(nonce, deviceID string) bool {
 	return ok && c.deviceID == deviceID && !s.Now().After(c.expires)
 }
 
+func (s *Service) SweepChallenges() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := s.Now()
+	for nonce, c := range s.challenges {
+		if now.After(c.expires) {
+			delete(s.challenges, nonce)
+		}
+	}
+	for deviceID, nonces := range s.challengesOf {
+		live := nonces[:0]
+		for _, nonce := range nonces {
+			if _, ok := s.challenges[nonce]; ok {
+				live = append(live, nonce)
+			}
+		}
+		if len(live) == 0 {
+			delete(s.challengesOf, deviceID)
+		} else {
+			s.challengesOf[deviceID] = live
+		}
+	}
+	for id, f := range s.flows {
+		if now.After(f.expires) {
+			delete(s.flows, id)
+		}
+	}
+}
+
 func (s *Service) challenge(w http.ResponseWriter, r *http.Request) error {
 	var in struct {
 		DeviceID string `json:"deviceId"`
@@ -238,7 +308,9 @@ func (s *Service) challenge(w http.ResponseWriter, r *http.Request) error {
 	if err := httpx.ReadJSON(w, r, &in, smallBody); err != nil {
 		return err
 	}
-	nonce, err := s.newChallenge(in.DeviceID)
+	dev, err := s.DB.Device(r.Context(), in.DeviceID)
+	registered := err == nil && dev.RevokedAt == 0
+	nonce, err := s.newChallenge(in.DeviceID, netkey.Of(s.Guard.IP(r)), registered)
 	if err != nil {
 		return err
 	}
@@ -280,6 +352,9 @@ func (s *Service) logout(w http.ResponseWriter, r *http.Request, p Principal) er
 	if err := s.DB.DeleteSession(r.Context(), p.TokenHash); err != nil {
 		return err
 	}
+	if s.Hooks.SessionEnded != nil {
+		s.Hooks.SessionEnded(p.TokenHash)
+	}
 	w.WriteHeader(http.StatusNoContent)
 	return nil
 }
@@ -292,6 +367,7 @@ type deviceView struct {
 	CreatedAt int64     `json:"createdAt"`
 	LastSeen  int64     `json:"lastSeen"`
 	Current   bool      `json:"current,omitzero"`
+	New       bool      `json:"new,omitzero"`
 }
 
 func (s *Service) listDevices(w http.ResponseWriter, r *http.Request, p Principal) error {
@@ -299,16 +375,42 @@ func (s *Service) listDevices(w http.ResponseWriter, r *http.Request, p Principa
 	if err != nil {
 		return err
 	}
+	viewer, err := s.DB.Device(r.Context(), p.DeviceID)
+	if err != nil {
+		return err
+	}
+	unseen, err := s.DB.UnseenDevices(r.Context(), viewer)
+	if err != nil {
+		return err
+	}
 	out := make([]deviceView, 0, len(devices))
 	for _, d := range devices {
-		out = append(out, deviceView{ID: d.ID, Name: d.Name, SignPub: d.SignPub, BoxPub: d.BoxPub, CreatedAt: d.CreatedAt, LastSeen: d.LastSeen, Current: d.ID == p.DeviceID})
+		out = append(out, deviceView{ID: d.ID, Name: d.Name, SignPub: d.SignPub, BoxPub: d.BoxPub, CreatedAt: d.CreatedAt, LastSeen: d.LastSeen, Current: d.ID == p.DeviceID, New: unseen[d.ID]})
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"devices": out})
 	return nil
 }
 
 func (s *Service) deviceInvite(w http.ResponseWriter, r *http.Request, p Principal) error {
-	code, expires, err := s.CreateInvite(r.Context(), p.AccountID, s.Cfg.DeviceInviteTTL.Std())
+	if err := s.requireSignedTimestamp(r, p, InviteContext); err != nil {
+		return err
+	}
+	active, err := s.DB.ActiveDeviceCount(r.Context(), p.AccountID)
+	if err != nil {
+		return err
+	}
+	live, err := s.DB.LiveInvites(r.Context(), p.AccountID)
+	if err != nil {
+		return err
+	}
+	elevated := false
+	if active+live >= 2 {
+		if err := s.NeedElevation(p); err != nil {
+			return err
+		}
+		elevated = true
+	}
+	code, expires, err := s.CreateInvite(r.Context(), p.AccountID, s.Cfg.DeviceInviteTTL.Std(), elevated)
 	if err != nil {
 		return err
 	}
@@ -316,8 +418,130 @@ func (s *Service) deviceInvite(w http.ResponseWriter, r *http.Request, p Princip
 	return nil
 }
 
+func StampedMessage(context, deviceID string, ms int64) []byte {
+	return []byte(context + "\n" + deviceID + "\n" + strconv.FormatInt(ms, 10))
+}
+
+func InviteMessage(deviceID string, ms int64) []byte {
+	return StampedMessage(InviteContext, deviceID, ms)
+}
+
+func ElevateMessage(deviceID string, ms int64) []byte {
+	return StampedMessage(ElevateContext, deviceID, ms)
+}
+
+func (s *Service) requireSignedTimestamp(r *http.Request, p Principal, context string) error {
+	stamp, err := strconv.ParseInt(r.Header.Get(timestampHeader), 10, 64)
+	if err != nil {
+		return httpx.Errf(http.StatusForbidden, "device-signature-required", "send X-Device-Timestamp (milliseconds) and sign it with the device key")
+	}
+	if skew := s.Now().Sub(time.UnixMilli(stamp)); skew > signatureSkew || skew < -signatureSkew {
+		return httpx.Errf(http.StatusForbidden, "stale-signature", "the signed timestamp is too far from the server's clock")
+	}
+	if err := s.requireDeviceSignature(r, p, StampedMessage(context, p.DeviceID, stamp)); err != nil {
+		return err
+	}
+	fresh, err := s.DB.AdvanceSigningCounter(r.Context(), p.DeviceID, stamp)
+	if err != nil {
+		return err
+	}
+	if !fresh {
+		return httpx.Errf(http.StatusForbidden, "stale-signature", "a signed request cannot be replayed")
+	}
+	return nil
+}
+
+func RevokeMessage(signerID, targetID string) []byte {
+	return []byte(RevokeContext + "\n" + signerID + "\n" + targetID)
+}
+
+func ApproveMessage(approverID, approvalID, requesterID string) []byte {
+	return []byte(ApproveContext + "\n" + approverID + "\n" + approvalID + "\n" + requesterID)
+}
+
+func (s *Service) requireDeviceSignature(r *http.Request, p Principal, message []byte) error {
+	signature, err := httpx.DecodeB64(r.Header.Get(signatureHeader))
+	if err != nil || len(signature) == 0 {
+		return httpx.Errf(http.StatusForbidden, "device-signature-required", "this action must be signed with the device's key; a session token alone is not enough")
+	}
+	device, err := s.DB.Device(r.Context(), p.DeviceID)
+	if err != nil {
+		return err
+	}
+	if !ed25519.Verify(ed25519.PublicKey(device.SignPub), message, signature) {
+		return httpx.Errf(http.StatusForbidden, "bad-signature", "the device signature does not match")
+	}
+	return nil
+}
+
+func SeenMessage(viewerID, targetID string) []byte {
+	return []byte(SeenContext + "\n" + viewerID + "\n" + targetID)
+}
+
+func (s *Service) markSeen(w http.ResponseWriter, r *http.Request, p Principal) error {
+	var in struct {
+		Sig httpx.B64 `json:"sig"`
+	}
+	if err := httpx.ReadJSON(w, r, &in, smallBody); err != nil {
+		return err
+	}
+	target, err := s.DB.Device(r.Context(), r.PathValue("id"))
+	if err != nil || target.AccountID != p.AccountID {
+		return httpx.ErrNotFound
+	}
+	if target.ID == p.DeviceID {
+		return httpx.Errf(http.StatusBadRequest, "bad-request", "a device does not acknowledge itself")
+	}
+	viewer, err := s.DB.Device(r.Context(), p.DeviceID)
+	if err != nil {
+		return err
+	}
+	if !ed25519.Verify(ed25519.PublicKey(viewer.SignPub), SeenMessage(viewer.ID, target.ID), in.Sig) {
+		return httpx.Errf(http.StatusForbidden, "bad-signature", "acknowledging a device needs a signature from this device's key, which a session token alone does not give")
+	}
+	if err := s.DB.MarkSeen(r.Context(), p.DeviceID, target.ID); err != nil {
+		return err
+	}
+	w.WriteHeader(http.StatusNoContent)
+	return nil
+}
+
+func (s *Service) needsElevationToRevoke(r *http.Request, p Principal, id string) (bool, error) {
+	self, err := s.DB.Device(r.Context(), p.DeviceID)
+	if err != nil {
+		return false, err
+	}
+	if id == p.DeviceID {
+		older, err := s.DB.OlderActiveDevices(r.Context(), self)
+		return older == 0, err
+	}
+	min := s.Cfg.ApproverMinAge.Std()
+	if min <= 0 {
+		return true, nil
+	}
+	target, err := s.DB.Device(r.Context(), id)
+	if err != nil || target.AccountID != p.AccountID {
+		return true, nil
+	}
+	older := self.CreatedAt < target.CreatedAt || (self.CreatedAt == target.CreatedAt && self.ID < target.ID)
+	probation := s.Now().Sub(time.UnixMilli(target.CreatedAt)) < min
+	return !(older && probation), nil
+}
+
 func (s *Service) revokeDevice(w http.ResponseWriter, r *http.Request, p Principal) error {
 	id := r.PathValue("id")
+	if err := s.requireDeviceSignature(r, p, RevokeMessage(p.DeviceID, id)); err != nil {
+		return err
+	}
+	needs, err := s.needsElevationToRevoke(r, p, id)
+	if err != nil {
+		return err
+	}
+	if needs {
+		if err := s.NeedElevation(p); err != nil {
+			return err
+		}
+	}
 	if _, err := s.DB.RevokeDevice(r.Context(), p.AccountID, id); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			return httpx.ErrNotFound
@@ -332,6 +556,9 @@ func (s *Service) revokeDevice(w http.ResponseWriter, r *http.Request, p Princip
 }
 
 func (s *Service) deleteAccount(w http.ResponseWriter, r *http.Request, p Principal) error {
+	if err := s.NeedElevation(p); err != nil {
+		return err
+	}
 	return s.DeleteAccount(r.Context(), p.AccountID, w)
 }
 

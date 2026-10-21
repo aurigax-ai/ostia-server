@@ -19,6 +19,7 @@ import (
 	"github.com/aurigax-ai/ostia-server/internal/httpx"
 	"github.com/aurigax-ai/ostia-server/internal/ids"
 	"github.com/aurigax-ai/ostia-server/internal/limit"
+	"github.com/aurigax-ai/ostia-server/internal/netkey"
 	"github.com/aurigax-ai/ostia-server/internal/store"
 )
 
@@ -38,6 +39,8 @@ type Hub struct {
 
 	byIP    *limit.Limiter
 	byLabel *limit.Limiter
+	opens   *limit.Limiter
+	opensBy *limit.Limiter
 	holds   chan struct{}
 	meters  *meters
 
@@ -45,14 +48,18 @@ type Hub struct {
 	listeners map[string]*listener
 	pending   map[string]*pendingStream
 	streams   map[*stream]struct{}
+	byID      map[string]*stream
 	closed    bool
 }
 
 type controlMessage struct {
-	Type   string `json:"t"`
-	Stream string `json:"stream,omitzero"`
-	Peer   string `json:"peer,omitzero"`
-	Family int    `json:"family,omitzero"`
+	Type      string `json:"t"`
+	Stream    string `json:"stream,omitzero"`
+	Peer      string `json:"peer,omitzero"`
+	Family    int    `json:"family,omitzero"`
+	DeviceID  string `json:"deviceId,omitzero"`
+	Name      string `json:"name,omitzero"`
+	CreatedAt int64  `json:"createdAt,omitzero"`
 }
 
 type listener struct {
@@ -60,10 +67,55 @@ type listener struct {
 	deviceID  string
 	accountID string
 	ws        *websocket.Conn
-	streams   atomic.Int32
+	tokenHash []byte
+	mu        sync.Mutex
+	unconf    map[string]unconfirmedEntry
+	conf      map[string]struct{}
+	seq       uint64
 	lastSeen  atomic.Int64
 	done      chan struct{}
 	closeOnce sync.Once
+}
+
+type unconfirmedEntry struct {
+	seq  uint64
+	kill func()
+}
+
+func (l *listener) admit(id string, limit int, kill func()) (evict func()) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if len(l.unconf) >= max(limit, 1) {
+		oldest, oldestSeq := "", uint64(0)
+		for other, entry := range l.unconf {
+			if oldest == "" || entry.seq < oldestSeq {
+				oldest, oldestSeq = other, entry.seq
+			}
+		}
+		evict = l.unconf[oldest].kill
+		delete(l.unconf, oldest)
+	}
+	l.seq++
+	l.unconf[id] = unconfirmedEntry{seq: l.seq, kill: kill}
+	return evict
+}
+
+func (l *listener) promote(id string, limit int) (found, within bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if _, ok := l.unconf[id]; !ok {
+		return false, false
+	}
+	delete(l.unconf, id)
+	l.conf[id] = struct{}{}
+	return true, len(l.conf) <= limit
+}
+
+func (l *listener) finish(id string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	delete(l.unconf, id)
+	delete(l.conf, id)
 }
 
 func (l *listener) close(code websocket.StatusCode, reason string) {
@@ -92,9 +144,13 @@ type pendingStream struct {
 }
 
 type stream struct {
-	deviceID string
-	phone    net.Conn
-	desktop  net.Conn
+	id               string
+	deviceID         string
+	listener         *listener
+	phone            net.Conn
+	desktop          net.Conn
+	confirmed        atomic.Bool
+	unconfirmedBytes atomic.Int64
 }
 
 func (s *stream) close() {
@@ -107,11 +163,14 @@ func New(db *store.DB, authSvc *auth.Service, cfg config.Relay, domain string, n
 		DB: db, Auth: authSvc, Cfg: cfg, Domain: domain, Now: now,
 		byIP:      limit.New(limit.Rule{Every: time.Minute / time.Duration(max(cfg.ConnectionsPerMinutePerIP, 1)), Burst: max(cfg.ConnectionsPerMinutePerIP, 1)}, now),
 		byLabel:   limit.New(limit.Rule{Every: time.Minute / time.Duration(max(cfg.ConnectionsPerMinute, 1)), Burst: max(cfg.ConnectionsPerMinute, 1)}, now),
+		opens:     limit.New(limit.Rule{Every: time.Minute / time.Duration(max(cfg.UnconfirmedOpensPerMinute, 1)), Burst: max(cfg.UnconfirmedOpensPerMinute, 1)}, now),
+		opensBy:   limit.New(limit.Rule{Every: time.Minute / time.Duration(max(cfg.UnconfirmedOpensPerMinutePerAddress, 1)), Burst: max(cfg.UnconfirmedOpensPerMinutePerAddress, 1)}, now),
 		holds:     make(chan struct{}, max(cfg.MaxPendingHellos, 1)),
 		meters:    newMeters(db, now),
 		listeners: map[string]*listener{},
 		pending:   map[string]*pendingStream{},
 		streams:   map[*stream]struct{}{},
+		byID:      map[string]*stream{},
 	}
 	return h
 }
@@ -142,6 +201,10 @@ func (h *Hub) label(w http.ResponseWriter, r *http.Request, p auth.Principal) er
 }
 
 func (h *Hub) hold(conn net.Conn, deadline time.Time) {
+	if len(h.holds) > cap(h.holds)*3/4 {
+		_ = conn.Close()
+		return
+	}
 	select {
 	case h.holds <- struct{}{}:
 		time.Sleep(time.Until(deadline))
@@ -165,7 +228,7 @@ func peerOf(conn net.Conn) (peer string, family int, ip string) {
 
 func (h *Hub) HandlePhone(conn net.Conn, label string, hello []byte, deadline time.Time) {
 	peer, family, ip := peerOf(conn)
-	if !h.byIP.Allow(ip) {
+	if !h.byIP.Allow(netkey.Of(ip)) {
 		_ = conn.Close()
 		return
 	}
@@ -180,15 +243,12 @@ func (h *Hub) HandlePhone(conn net.Conn, label string, hello []byte, deadline ti
 		_ = conn.Close()
 		return
 	}
-	if !h.byLabel.Allow(label) || h.meters.over(owner.AccountID, h.Cfg.MonthlyBytesPerAccount) {
+	if !h.opensBy.Allow(label+"|"+netkey.Of(ip)) || !h.opens.Allow(label) || h.meters.over(owner.AccountID, h.Cfg.MonthlyBytesPerAccount) {
 		_ = conn.Close()
 		return
 	}
 	l := h.listenerFor(label)
-	if l == nil || int(l.streams.Add(1)) > h.Cfg.MaxStreamsPerLabel {
-		if l != nil {
-			l.streams.Add(-1)
-		}
+	if l == nil {
 		_ = conn.Close()
 		return
 	}
@@ -198,12 +258,14 @@ func (h *Hub) HandlePhone(conn net.Conn, label string, hello []byte, deadline ti
 	if h.closed {
 		h.mu.Unlock()
 		p.timer.Stop()
-		l.streams.Add(-1)
 		_ = conn.Close()
 		return
 	}
 	h.pending[p.id] = p
 	h.mu.Unlock()
+	if evict := l.admit(p.id, h.Cfg.MaxUnconfirmedPerLabel, func() { h.kill(p.id) }); evict != nil {
+		evict()
+	}
 	if err := l.send(controlMessage{Type: "incoming", Stream: p.id, Peer: peer, Family: family}); err != nil {
 		h.dropPending(p.id)
 	}
@@ -229,7 +291,17 @@ func (h *Hub) takePending(id string) *pendingStream {
 func (h *Hub) dropPending(id string) {
 	if p := h.takePending(id); p != nil {
 		_ = p.conn.Close()
-		p.listener.streams.Add(-1)
+		p.listener.finish(id)
+	}
+}
+
+func (h *Hub) kill(id string) {
+	h.dropPending(id)
+	h.mu.Lock()
+	s := h.byID[id]
+	h.mu.Unlock()
+	if s != nil {
+		s.close()
 	}
 }
 
@@ -243,13 +315,14 @@ func (h *Hub) serveListen(w http.ResponseWriter, r *http.Request, p auth.Princip
 		return nil
 	}
 	ws.SetReadLimit(controlReadLimit)
-	l := &listener{label: label, deviceID: p.DeviceID, accountID: p.AccountID, ws: ws, done: make(chan struct{})}
+	l := &listener{label: label, deviceID: p.DeviceID, accountID: p.AccountID, tokenHash: p.TokenHash, ws: ws, done: make(chan struct{}), unconf: map[string]unconfirmedEntry{}, conf: map[string]struct{}{}}
 	l.lastSeen.Store(h.Now().UnixNano())
 	if !h.register(l) {
 		l.close(websocket.StatusGoingAway, "server shutting down")
 		return nil
 	}
 	defer h.unregister(l)
+	h.replayDeviceAdded(l)
 
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
@@ -268,9 +341,36 @@ func (h *Hub) serveListen(w http.ResponseWriter, r *http.Request, p auth.Princip
 			return nil
 		}
 		var msg controlMessage
-		if json.Unmarshal(data, &msg) == nil && msg.Type == "pong" {
-			l.lastSeen.Store(h.Now().UnixNano())
+		if json.Unmarshal(data, &msg) != nil {
+			continue
 		}
+		switch msg.Type {
+		case "pong":
+			l.lastSeen.Store(h.Now().UnixNano())
+		case "confirm":
+			h.confirm(l, msg.Stream)
+		}
+	}
+}
+
+func (h *Hub) confirm(l *listener, streamID string) {
+	h.mu.Lock()
+	s := h.byID[streamID]
+	h.mu.Unlock()
+	if s == nil || s.listener != l || s.confirmed.Load() {
+		return
+	}
+	if !h.byLabel.Allow(l.label) {
+		s.close()
+		return
+	}
+	found, within := l.promote(streamID, h.Cfg.MaxStreamsPerLabel)
+	if !found {
+		return
+	}
+	s.confirmed.Store(true)
+	if !within {
+		s.close()
 	}
 }
 
@@ -288,6 +388,10 @@ func (h *Hub) keepAlive(ctx context.Context, l *listener) {
 			}
 			if _, err := h.DB.LabelOwner(ctx, l.label); errors.Is(err, store.ErrNotFound) {
 				l.close(websocket.StatusPolicyViolation, "device removed")
+				return
+			}
+			if _, err := h.DB.SessionDevice(ctx, l.tokenHash); err != nil {
+				l.close(websocket.StatusPolicyViolation, "session ended")
 				return
 			}
 			if err := l.send(controlMessage{Type: "ping"}); err != nil {
@@ -346,13 +450,63 @@ func (h *Hub) serveAccept(w http.ResponseWriter, r *http.Request, p auth.Princip
 	ws, err := websocket.Accept(w, r, nil)
 	if err != nil {
 		_ = pending.conn.Close()
-		pending.listener.streams.Add(-1)
+		pending.listener.finish(pending.id)
 		return nil
 	}
 	ws.SetReadLimit(-1)
 	desktop := websocket.NetConn(context.Background(), ws, websocket.MessageBinary)
 	h.splice(pending, desktop, p)
 	return nil
+}
+
+func (h *Hub) replayDeviceAdded(l *listener) {
+	ctx, cancel := context.WithTimeout(context.Background(), controlWriteWait)
+	defer cancel()
+	viewer, err := h.DB.Device(ctx, l.deviceID)
+	if err != nil {
+		return
+	}
+	unseen, err := h.DB.UnseenDevices(ctx, viewer)
+	if err != nil {
+		return
+	}
+	devices, err := h.DB.DevicesOf(ctx, l.accountID)
+	if err != nil {
+		return
+	}
+	for _, dev := range devices {
+		if unseen[dev.ID] {
+			_ = l.send(controlMessage{Type: "device-added", DeviceID: dev.ID, Name: dev.Name, CreatedAt: dev.CreatedAt})
+		}
+	}
+}
+
+func (h *Hub) NotifyDeviceAdded(accountID string, device store.Device) {
+	h.mu.Lock()
+	var ls []*listener
+	for _, l := range h.listeners {
+		if l.accountID == accountID && l.deviceID != device.ID {
+			ls = append(ls, l)
+		}
+	}
+	h.mu.Unlock()
+	for _, l := range ls {
+		_ = l.send(controlMessage{Type: "device-added", DeviceID: device.ID, Name: device.Name, CreatedAt: device.CreatedAt})
+	}
+}
+
+func (h *Hub) KickSession(tokenHash []byte) {
+	h.mu.Lock()
+	var ls []*listener
+	for _, l := range h.listeners {
+		if ids.Equal(l.tokenHash, tokenHash) {
+			ls = append(ls, l)
+		}
+	}
+	h.mu.Unlock()
+	for _, l := range ls {
+		l.close(websocket.StatusPolicyViolation, "session ended")
+	}
 }
 
 func (h *Hub) KickDevice(deviceID string) {

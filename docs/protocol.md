@@ -70,16 +70,56 @@ DELETE /v1/auth/session                          204
 ostia-server/auth/v1\n<deviceId>\n<nonce>
 ```
 
-A nonce is single use and lives 60 seconds. `challenge` answers the same way for unknown devices. The token is valid for `auth.session_ttl` (default one hour). Keep the token and the private keys in the main process only.
+A nonce is single use and lives 60 seconds. A device holds at most five open nonces. `challenge` answers the same way for unknown devices, but keeps nothing for them. The token is valid for `auth.session_ttl` (default one hour). Keep the token and the private keys in the main process only.
+
+**Why a bearer token and not a signature on every request.** All traffic is TLS to a known host, so the transport already authenticates the server and hides the token. A per-request signature would add a signed body-hash format, a replay window and clock handling, and it does not fit the WebSocket upgrade or streaming uploads, while protecting against little: the signing key lives in the same process as the token. What matters instead is how little a stolen token can do. It lives one hour, the server stores only its hash, and the destructive actions below need an elevated session that a token alone cannot obtain.
 
 ### Devices and accounts
 
 ```
-GET    /v1/devices               {devices: [{id, name, signPub, boxPub, createdAt, lastSeen, current?}]}
-POST   /v1/devices/invite        201 {code, expiresAt}      one-time code for a new device of this account, valid 10 minutes by default
+GET    /v1/devices               {devices: [{id, name, signPub, boxPub, createdAt, lastSeen, current?, new?}]}   `new`: added after the calling device and not yet acknowledged
+POST   /v1/devices/invite        201 {code, expiresAt}      one-time code for a new device of this account, valid 10 minutes by default; an elevated session once the account has two or more devices
+POST   /v1/devices/{id}/seen     {sig} → 204   the person has seen this device on the calling device; clears its `new` flag. `sig` is the calling device's Ed25519 signature over `ostia-server/seen/v1\n<calling device id>\n<target device id>`: a stolen session token does not hold that key and cannot silence the warning
 DELETE /v1/devices/{id}          204   revokes sessions, the relay label and the device's key wrap; open relay streams close
-DELETE /v1/account               204   removes every row and blob and closes the relay listener
+DELETE /v1/account               204   removes every row and blob, push handles included, and closes the relay listener (elevated session)
 ```
+
+### Actions that need the device key
+
+Some actions change who belongs to the account, so a bearer token alone is not enough: the request must also be signed with the calling device's Ed25519 key (the key registered with the device). The signature goes in `X-Device-Signature` (unpadded base64url) over a prefixed message that names the device and the target:
+
+| Action | Message |
+|---|---|
+| `POST /v1/devices/invite` | `ostia-server/invite/v1\n<device id>\n<timestamp>`; also send `X-Device-Timestamp` (milliseconds, within two minutes of the server clock, and larger than the device's previous one, so a captured request cannot be replayed) |
+| `POST /v1/auth/elevation/approval` | `ostia-server/elevate/v1\n<device id>\n<timestamp>`, with `X-Device-Timestamp` as for invites |
+| `DELETE /v1/devices/{id}` | `ostia-server/revoke/v1\n<device id>\n<target id>` |
+| `POST /v1/auth/approvals/{id}/approve` | `ostia-server/approve/v1\n<approver id>\n<approval id>\n<requester id>` |
+| `POST /v1/devices/{id}/seen` | body `{sig}` over `ostia-server/seen/v1\n<viewer id>\n<target id>` |
+
+A missing signature answers `403 device-signature-required`, a wrong one `403 bad-signature`, an old or reused timestamp `403 stale-signature`. A stolen session token therefore cannot add, remove or approve devices. An approval is also refused (`403 requester-too-new`) when the device asking for elevation has not belonged to the account for `auth.approver_min_age`, whoever approves.
+
+### Revoking devices
+
+Revoking another device or the account normally needs an elevated session. Exceptions, so an owner can always remove an intruder: a device may revoke a device that is still younger than `auth.approver_min_age` (probation) and was added after it, without elevation, and a device may revoke itself without elevation only while an older active device remains (a token alone cannot remove an account's oldest device, even when the account is new). `DELETE /v1/auth/session` (sign out) is always free. A client should show every device with `new: true` to the person and keep asking until they acknowledge it; a relay listener receives `{"t": "device-added", "deviceId", "name", "createdAt"}` when a device joins an account that already had one, and again for every unacknowledged device each time it connects (so a listener that was replaced or offline still learns of it).
+
+### Elevated sessions
+
+A stolen bearer token must not be able to destroy an account. These actions need a session that was elevated within the last `auth.elevation_ttl` (five minutes), otherwise they answer `403 elevation-required`: revoking another device, deleting the account, deleting a sync wrap, replacing the passphrase or recovery wrap, `POST /v1/sync/gc` and `POST /v1/sync/rotate`. A session is elevated one of two ways, per session and never for the approving device. Adding a device must not be a way around this, so `POST /v1/devices/invite` also needs an elevated session once the account has two or more devices **counting invites that are still open** (one stolen token cannot mint several invites while the count is one), and an invite minted without elevation stops working if the account has grown to two devices before it is redeemed, and a device may approve only after it has been part of the account for `auth.approver_min_age` (24 hours, longer than a session lives): a stolen token that adds a device of its own cannot use that device to approve itself (`403 device-too-new`).
+
+```
+GET  /v1/auth/elevation                          {elevatedUntil}              0 when not elevated
+
+POST /v1/auth/elevation/approval                 201 {approvalId, expiresAt}  409 no-second-device with one device; signed with the device key
+GET  /v1/auth/approvals                          {approvals: [{id, deviceId, deviceName, deviceCreatedAt, createdAt, expiresAt}]}   requests from the account's other devices
+POST /v1/auth/approvals/{id}/approve             204   403 for the requesting device itself
+GET  /v1/auth/approvals/{id}                     {status: "pending"|"approved", elevatedUntil?}   the requester polls
+DELETE /v1/auth/approvals/{id}                   204   only the requesting device may cancel its own request; an approver who does not want to approve simply lets it expire
+
+POST /v1/auth/elevation/github                   like /v1/auth/github/device, for a GitHub account; 409 not-a-github-account
+POST /v1/auth/elevation/github/poll {flowId}     200 {elevatedUntil} | 202 pending | 403 wrong-account
+```
+
+The approving device must show who is asking (`deviceName`) and how long that device has existed (`deviceCreatedAt`, "added 3 minutes ago"), and approve only on the person's click. A client should also tell the person on every device when `GET /v1/devices` shows a device it has not seen before.
 
 ## Relay
 
@@ -94,16 +134,18 @@ The label is a random 128-bit value (26 characters, `a-z2-7`), stable per device
 ### Desktop side
 
 1. `GET /v1/relay/listen` (WebSocket, `Authorization` header). A newer connection for the same device replaces the older one.
-2. The server sends JSON text frames: `{"t": "ping"}` every `relay.ping_interval` and `{"t": "incoming", "stream": "<id>", "peer": "ip:port", "family": 4|6}` per phone connection. The desktop answers pings with `{"t": "pong"}`. A listener that stays silent for 2.5 intervals is dropped.
+2. The listener lives as long as the session that opened it: when the session expires, is ended with `DELETE /v1/auth/session`, or the device is revoked, the server closes it at once. Open a new session and connect again before the old one expires; a newer listener replaces the older at once. The server sends JSON text frames: `{"t": "ping"}` every `relay.ping_interval` and `{"t": "incoming", "stream": "<id>", "peer": "ip:port", "family": 4|6}` per phone connection. The desktop answers pings with `{"t": "pong"}`. A listener that stays silent for 2.5 intervals is dropped.
 3. For each `incoming` the desktop opens `GET /v1/relay/accept/<stream>` (WebSocket, same bearer) within `relay.accept_timeout` (10 seconds). A stream id works once and only for the device it was offered to.
 4. Binary frames on the accept socket carry the phone's TCP stream in both directions. The first bytes the desktop receives are the phone's TLS ClientHello, then the rest of the stream.
 
 The Ostia desktop writes `PROXY TCP4|TCP6 <peer ip> 127.0.0.1 <port> <port>\r\n` followed by those bytes into its loopback gateway listener, so pairing limits and the audit log see the phone's address.
 
+**Confirming a stream.** Anyone who knows a label can open a connection to it, so a stream starts unconfirmed. The desktop confirms it with `{"t": "confirm", "stream": "<id>"}` on the control socket once the gateway has accepted the phone: a hello that carried a valid device token, or a pairing request that carried a live pairing code. An unconfirmed stream is closed after `relay.unconfirmed_timeout` (15 seconds) or after 32 KiB (a TLS handshake and a hello fit comfortably), counts against `relay.max_unconfirmed_per_label` instead of the confirmed limit, and is not billed to the account's byte quota. A confirmed stream counts against `relay.max_streams_per_label` and the quota.
+
 ### Phone side and limits
 
 - The server reads only the SNI of the ClientHello. A known label with no desktop listening is reset at once. An unknown label, a non-TLS first message, or a stalled handshake is held for `relay.hello_timeout` (5 seconds) and closed without a reply, so scanning learns nothing.
-- Per label: `relay.max_streams_per_label` concurrent streams and `relay.connections_per_minute` new connections. Per source address: `relay.connections_per_minute_per_ip`. Per account: `relay.monthly_bytes_per_account`, counted in memory and flushed every 10 seconds. A stream with no bytes for `relay.idle_timeout` is closed.
+- Per label: `relay.max_streams_per_label` confirmed streams and `relay.connections_per_minute` confirmations a minute; `relay.max_unconfirmed_per_label` unconfirmed streams, where a new connection evicts the oldest unconfirmed one when the pool is full (squatting on a label cannot lock out the real phone), `relay.unconfirmed_opens_per_minute_per_address` and `relay.unconfirmed_opens_per_minute` new connections per source address and per label. Per source address: `relay.connections_per_minute_per_ip`. Per account: `relay.monthly_bytes_per_account`, counted in memory and flushed every 10 seconds. A stream with no bytes for `relay.idle_timeout` is closed.
 - There is no presence endpoint: nothing tells a third party whether a desktop is online.
 
 ## Publish
@@ -172,10 +214,12 @@ Only the relay uses WebSocket. Control frames are JSON text; relayed bytes are b
 |---|---|---|
 | `/v1/relay/listen` | server to desktop | `{"t": "ping"}` |
 | `/v1/relay/listen` | server to desktop | `{"t": "incoming", "stream": string, "peer": "ip:port", "family": 4 or 6}` |
+| `/v1/relay/listen` | server to desktop | `{"t": "device-added", "deviceId": string, "name": string, "createdAt": ms}` |
 | `/v1/relay/listen` | desktop to server | `{"t": "pong"}` |
+| `/v1/relay/listen` | desktop to server | `{"t": "confirm", "stream": string}` |
 | `/v1/relay/accept/{stream}` | both | binary frames: the phone's TCP stream |
 
-Close codes: 1008 when a newer listener replaced this one, the device was removed, or the pongs stopped; 1001 when the server shuts down.
+Close codes: 1008 when a newer listener replaced this one, the device was removed, the session ended, or the pongs stopped; 1001 when the server shuts down.
 
 ## Sync
 
@@ -207,7 +251,7 @@ The manifest is JSON, sealed with `manifestKey` and AAD `ostia-sync/manifest/v1`
 {"counter": 7, "files": {"settings.json": {"blobId": "…", "hash": "…"}}, "devices": [{"id": "…", "name": "…"}]}
 ```
 
-The server stores sealed manifests with a monotonically increasing `version`, and keeps the last `sync.manifest_history`.
+The server stores sealed manifests with a monotonically increasing `version`. It keeps the newest `sync.manifest_history`, plus the last version of each of the previous `sync.manifest_checkpoint_days` days, so a flood of writes from a stolen token cannot push every earlier version out of the history.
 
 **Rollback guard.** Each device remembers the highest `counter` it has seen and refuses a manifest with a lower one (`stale-manifest`). A server that serves an old manifest is caught as soon as a device has seen a newer one.
 
@@ -231,7 +275,7 @@ GET  /v1/sync/blobs/{blobId}          raw bytes
 PUT  /v1/sync/blobs/{blobId}          raw bytes → 201 created | 200 identical | 409 | 413 | 507
 GET  /v1/sync/wraps                   {wraps: [{slot, updatedAt}]}
 GET  /v1/sync/wraps/{slot}            {slot, blob, updatedAt}
-PUT  /v1/sync/wraps/{slot}            {blob} → 204        slot: passphrase | recovery | device:<id of an active device>
+PUT  /v1/sync/wraps/{slot}            {blob} → 204        slot: passphrase | recovery | device:<id of an active device>; an unelevated session may only fill an empty slot; replacing any existing wrap needs an elevated session. Wraps carry no sender signature yet, so a client must not adopt a new profile key from a wrap it did not ask for (tracked as a follow-up: signed wraps)
 DELETE /v1/sync/wraps/{slot}          204
 POST /v1/sync/rotate                  {ifMatch, manifest, wraps: {slot: blob}, deleteSlots: [slot]} → 200 {version} | 412
 POST /v1/sync/gc                      {keep: [blobId]} → {deleted}     removes blobs older than sync.gc_grace that are not listed
@@ -251,18 +295,20 @@ GET  /v1/sync/usage                   {blobs, bytes, quotaBytes}
 
 ## Push
 
-Push is content free. The phone registers its platform token and receives an opaque handle; the desktop pings the handle.
+Push is content free and bound to an account. A signed-in desktop gets a single-use ticket and hands it to its phone over the gateway socket; the phone registers its platform token with the ticket and gets an opaque handle; only the desktop's session can ping it.
 
 ```
-POST /v1/push/register  {platform: "fcm" | "apns", token}   201 {handle}
-POST /v1/push/{handle}  (empty body)                        204
-DELETE /v1/push/{handle}                                    204
+POST /v1/push/tickets   (session)                          201 {ticket, expiresAt}   valid push.ticket_ttl, at most 10 open
+POST /v1/push/register  {platform: "fcm" | "apns", token, ticket}   201 {handle}     no session; 403 invalid-ticket
+POST /v1/push/{handle}  (session, empty body)              204
+DELETE /v1/push/{handle} (session)                         204
 ```
 
+- The handle belongs to the ticket's account. At `push.max_handles_per_account` a new registration replaces the account's oldest handle, so handles abandoned by phones that switched desktops or were reinstalled end by themselves; another account's session gets `410` for a handle that is not its own. Deleting the account deletes its handles.
 - A ping has no body (`400` otherwise). At most one per 30 seconds and 60 per hour per handle (`429`, `Retry-After`).
 - Android receives a high-priority data-only message `{"v": "1"}`. iOS receives an alert with the fixed localisation key `DESKTOP_NEEDS_YOU` and `mutable-content: 1`. The app wakes, connects to its desktop and builds its own alert.
-- `410 gone`: the handle is unknown, deleted, or its token was rejected by the platform (the handle is then deleted).
-- The server holds platform tokens, sealed with a key derived from `server.key`, and talks to FCM and APNs with the operator's own credentials. The handle is the credential; it is not tied to an account.
+- `410 gone`: the handle is unknown, deleted, someone else's, or its token was rejected by the platform (the handle is then deleted).
+- The server holds platform tokens, sealed with a key derived from `server.key`, and talks to FCM and APNs with the operator's own credentials.
 
 ## Error codes
 
@@ -270,9 +316,9 @@ DELETE /v1/push/{handle}                                    204
 |---|---|
 | 400 | `bad-request`, `bad-proof`, `bad-slot`, `size-mismatch` |
 | 401 | `unauthorized` |
-| 403 | `forbidden`, `invalid-invite`, `denied`, `public-disabled`, `publish-disabled` |
+| 403 | `forbidden`, `invalid-invite`, `denied`, `device-too-new`, `wrong-account`, `invalid-ticket`, `elevation-required`, `public-disabled`, `publish-disabled` |
 | 404 | `not-found`, `no-manifest`, `unknown-flow`, `unknown-device` |
-| 409 | `conflict`, `blob-exists`, `already-uploaded`, `device-limit` |
+| 409 | `conflict`, `blob-exists`, `already-uploaded`, `device-limit`, `no-second-device`, `not-a-github-account` |
 | 410 | `gone`, `expired` |
 | 412 | `version-mismatch` |
 | 413 | `too-large` |

@@ -302,12 +302,6 @@ func (s *Service) Sweep(ctx context.Context) {
 			slog.Error("remove expired share", "err", err)
 		}
 	}
-	if err := s.DB.SweepSessions(ctx); err != nil {
-		slog.Error("sweep sessions", "err", err)
-	}
-	if err := s.DB.SweepInvites(ctx); err != nil {
-		slog.Error("sweep invites", "err", err)
-	}
 }
 
 func (s *Service) Run(ctx context.Context) {
