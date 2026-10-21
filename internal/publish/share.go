@@ -19,6 +19,8 @@ const (
 	dataContentSecurityPolicy  = "default-src 'none'; sandbox"
 )
 
+const permissionsPolicy = "fullscreen=(), camera=(), microphone=(), geolocation=(), payment=(), usb=(), serial=(), bluetooth=(), clipboard-read=(), clipboard-write=(), display-capture=(), screen-wake-lock=(), web-share=()"
+
 var staticAssets = map[string]string{
 	"/shell.js":  "text/javascript; charset=utf-8",
 	"/crypto.js": "text/javascript; charset=utf-8",
@@ -76,6 +78,7 @@ func setCommonHeaders(w http.ResponseWriter) {
 	h.Set("Cross-Origin-Opener-Policy", "same-origin")
 	h.Set("X-Robots-Tag", "noindex")
 	h.Set("Cache-Control", "no-store")
+	h.Set("Permissions-Policy", permissionsPolicy)
 }
 
 func (s *Service) serveAsset(w http.ResponseWriter, r *http.Request, name, contentType, policy string) {
@@ -130,7 +133,7 @@ func (s *Service) serveMeta(w http.ResponseWriter, r *http.Request, id string) {
 	case unavailable:
 		httpx.WriteError(w, r, httpx.ErrGone)
 	default:
-		httpx.WriteJSON(w, http.StatusOK, map[string]any{"v": 1, "mode": share.Mode, "size": share.Size, "salt": httpx.B64(share.Salt), "expiresAt": share.ExpiresAt})
+		httpx.WriteJSON(w, http.StatusOK, map[string]any{"v": 1, "mode": share.Mode, "size": share.Size, "salt": httpx.B64(share.Salt), "expiresAt": share.ExpiresAt, "warning": s.Cfg.ShareWarning})
 	}
 }
 

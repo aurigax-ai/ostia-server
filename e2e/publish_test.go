@@ -486,3 +486,30 @@ func TestShareDomainInTheAPIsOwnZoneStillSandboxesEveryArtifact(t *testing.T) {
 		t.Fatalf("the admin UI must not exist on a share host: %s", res)
 	}
 }
+
+func TestShareWarningIsAServerSettingThatNoShareCanChange(t *testing.T) {
+	for _, tc := range []struct {
+		extra string
+		want  bool
+	}{{"", true}, {"[publish]\nshare_warning = true\n", true}, {"[publish]\nshare_warning = false\n", false}} {
+		e := newEnv(t, tc.extra)
+		owner := e.user(t, "desktop")
+		if res := owner.Do(t, "POST", "/v1/shares", map[string]any{"mode": "public", "size": 10, "warning": false, "showWarning": false}); res.Status != http.StatusCreated {
+			t.Fatalf("an uploader's warning field must be ignored, not break the request: %s", res)
+		}
+		sh := owner.PublishHTML(t, testkit.ShareOptions{Mode: "public", HTML: artifactHTML})
+		for _, path := range []string{"/meta", "/meta?warning=false"} {
+			res := e.net.ShareGet(t, shareHost, sh.ID, path, "X-Warning", "off", "Cookie", "warning=off")
+			if got, ok := res.Map(t)["warning"].(bool); res.Status != http.StatusOK || !ok || got != tc.want {
+				t.Fatalf("share_warning %v, %s: %s", tc.want, path, res)
+			}
+		}
+		if pp := e.net.ShareGet(t, shareHost, sh.ID, "/").Header.Get("Permissions-Policy"); !strings.Contains(pp, "fullscreen=()") {
+			t.Fatalf("Permissions-Policy %q", pp)
+		}
+		shell := e.net.ShareGet(t, shareHost, sh.ID, "/")
+		if !strings.Contains(shell.Header.Get("Content-Security-Policy"), "frame-ancestors 'none'") || strings.Contains(string(shell.Body), artifactHTML) {
+			t.Fatalf("the shell stays whatever the setting: %s", shell)
+		}
+	}
+}

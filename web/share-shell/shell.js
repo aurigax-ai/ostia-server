@@ -61,6 +61,8 @@ function renderDocument(html) {
   root.replaceChildren(frame)
 }
 
+let warning = true
+
 function acknowledged() {
   try {
     return localStorage.getItem(`ostia-notice:${shareId}`) === '1'
@@ -76,7 +78,7 @@ function acknowledge() {
 }
 
 function renderWithNotice(html) {
-  if (acknowledged()) {
+  if (!warning || acknowledged()) {
     renderDocument(html)
     return
   }
@@ -168,10 +170,10 @@ function showPasswordForm(meta) {
   input.focus()
 }
 
-document.body.prepend(renderBar())
-
 const meta = await fetchMeta()
 if (meta) {
+  warning = meta.warning !== false
+  if (warning) document.body.prepend(renderBar())
   if (meta.mode === 'public') await showPublic()
   else if (meta.mode === 'link') await showLink()
   else if (meta.mode === 'password') showPasswordForm(meta)
