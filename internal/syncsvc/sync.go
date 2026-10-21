@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"io"
+	"maps"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -231,6 +233,13 @@ func (s *Service) validSlot(ctx context.Context, accountID, slot string) error {
 	return nil
 }
 
+func (s *Service) checkWrap(ctx context.Context, p auth.Principal, slot string, blob []byte) error {
+	if slot == slotPassphrase || slot == slotRecovery {
+		return nil
+	}
+	return s.checkDeviceWrap(ctx, p, slot, blob)
+}
+
 type wrapView struct {
 	Slot      string    `json:"slot"`
 	Blob      httpx.B64 `json:"blob,omitzero"`
@@ -282,6 +291,9 @@ func (s *Service) putWrap(w http.ResponseWriter, r *http.Request, p auth.Princip
 	if len(in.Blob) == 0 || len(in.Blob) > maxWrapBytes {
 		return httpx.Errf(http.StatusRequestEntityTooLarge, "too-large", "wrap size is outside the allowed range")
 	}
+	if err := s.checkWrap(r.Context(), p, slot, in.Blob); err != nil {
+		return err
+	}
 	if err := s.DB.PutWrap(r.Context(), p.AccountID, slot, in.Blob); err != nil {
 		return err
 	}
@@ -320,12 +332,16 @@ func (s *Service) rotate(w http.ResponseWriter, r *http.Request, p auth.Principa
 		return httpx.Errf(http.StatusBadRequest, "bad-request", "manifest size is outside the allowed range")
 	}
 	rotation := store.Rotation{IfMatch: in.IfMatch, Manifest: in.Manifest, Wraps: map[string][]byte{}, DeleteSlots: in.DeleteSlots, Retention: s.retention()}
-	for slot, wrap := range in.Wraps {
+	for _, slot := range slices.Sorted(maps.Keys(in.Wraps)) {
+		wrap := in.Wraps[slot]
 		if err := s.validSlot(r.Context(), p.AccountID, slot); err != nil {
 			return err
 		}
 		if len(wrap) == 0 || len(wrap) > maxWrapBytes {
 			return httpx.Errf(http.StatusRequestEntityTooLarge, "too-large", "wrap size is outside the allowed range")
+		}
+		if err := s.checkWrap(r.Context(), p, slot, wrap); err != nil {
+			return err
 		}
 		rotation.Wraps[slot] = wrap
 	}

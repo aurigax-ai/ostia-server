@@ -15,7 +15,7 @@ This is the contract between ostia-server and its clients (the Ostia desktop app
 | Route | Answer |
 |---|---|
 | `GET /healthz` | `{"ok": true}` |
-| `GET /v1/info` | `{api, modules: {relay, publish, sync, push}, auth: {invite, github}, relayDomain, shareDomain, limits}`; the modules are booleans |
+| `GET /v1/info` | `{api, modules: {relay, publish, sync, push}, auth: {invite, github}, approverMinAgeSeconds, relayDomain, shareDomain, limits}`; the modules are booleans; `approverMinAgeSeconds` is `auth.approver_min_age` in seconds and is informational, see Client rules for device wraps |
 
 A disabled module's routes do not exist (`404`).
 
@@ -248,8 +248,10 @@ A blob id names its content, so a blob is write-once: uploading the same bytes a
 The manifest is JSON, sealed with `manifestKey` and AAD `ostia-sync/manifest/v1`:
 
 ```json
-{"counter": 7, "files": {"settings.json": {"blobId": "…", "hash": "…"}}, "devices": [{"id": "…", "name": "…"}]}
+{"counter": 7, "files": {"settings.json": {"blobId": "…", "hash": "…"}}, "devices": [{"id": "…", "name": "…", "signPub": "…", "boxPub": "…", "createdAt": 1760000000000}]}
 ```
+
+`devices` is the approved list. Each entry carries the device's public keys (unpadded base64url) and `createdAt`, the time in Unix milliseconds that the approving device wrote when it approved the device. The approved list is the client's trust anchor for device wraps: a client takes a device's keys from the sealed manifest entry and never from `GET /v1/devices`, which is the server's word. `createdAt` alone is not proof of age, because every device that holds `K` can write the manifest and backdate its own entry; the age rule in Client rules for device wraps accounts for that.
 
 The server stores sealed manifests with a monotonically increasing `version`. It keeps the newest `sync.manifest_history`, plus the last version of each of the previous `sync.manifest_checkpoint_days` days, so a flood of writes from a stolen token cannot push every earlier version out of the history.
 
@@ -260,7 +262,34 @@ The server stores sealed manifests with a monotonically increasing `version`. It
 All wraps are opaque to the server.
 
 - `passphrase` and `recovery` slots: `0x01 || memoryKiB (4 bytes BE) || passes (1) || lanes (1) || salt (16) || nonce (12) || AES-256-GCM(argon2id(secret, salt, passes, memoryKiB, lanes) → 32 bytes, K)`, AAD = `"ostia-sync/wrap/passphrase/v1"` followed by the first 23 header bytes. Production parameters are 64 MiB, 3 passes, 4 lanes.
-- `device:<deviceId>` slot: `0x01 || ephemeral X25519 public key (32) || nonce (12) || AES-256-GCM(wrapKey, K)` with `wrapKey = HKDF-SHA256(X25519(ephemeral, deviceBoxPub), salt = empty, info = "ostia-sync/wrap/device" || ephemeralPub || deviceBoxPub, 32)` and AAD = the first 33 bytes.
+- `device:<deviceId>` slot (version 2): `0x02 || signerIdLen (1) || signerId (utf-8) || counter (8 BE) || ephemeral X25519 public key (32) || nonce (12) || AES-256-GCM(wrapKey, K) (48) || signature (64)`.
+  - `wrapKey = HKDF-SHA256(X25519(ephemeral, targetBoxPub), salt = empty, info = "ostia-sync/wrap/device" || ephemeralPub || targetBoxPub, 32)`. AAD = every byte before the ciphertext (version through nonce) followed by the target slot name in utf-8.
+  - `signature = Ed25519(signer's device sign key)` over `"ostia-sync/wrap/sig/v1\n" || slot || "\n" || every byte before the signature`. The slot is signed, so a wrap cannot be moved to another device's slot.
+  - `counter` is the manifest counter the wrap belongs to: for a link, the manifest counter at approval time (at least 1); for a rotation, the counter of the new manifest.
+
+The server checks every device wrap on `PUT /v1/sync/wraps/device:<id>` and inside `POST /v1/sync/rotate`: it must parse as version 2 (`400 bad-wrap` otherwise), `signerId` must be the calling device and that device must be active (`403 wrong-signer` otherwise), and the signature must verify under that device's registered sign key (`400 bad-wrap`). A rotation with any failing wrap changes nothing. The server cannot open the wrap, so it does not check the counter or the target key; clients do. `GET` returns the blob untouched.
+
+Client rules for device wraps:
+
+- Age bound. A client enforces `max(24 h, approverMinAgeSeconds)`. `approverMinAgeSeconds` from `GET /v1/info` can only raise the bound above the client's own 24 hour floor, never lower it, so a server that reports 0 changes nothing. The field is informational, for a UI that says "this device can approve in N hours".
+- A linked device adopts a new key (a rotation, or any wrap it did not ask for) only from a version 2 wrap whose signer is in the approved list of the last manifest it opened, whose sign key from that manifest entry verifies the signature, whose signer is at least the age bound old (see Signer age), whose `counter` is greater than the highest counter it has seen for the account, and whose key opens the manifest at that counter. Anything else is ignored with a warning: the client keeps `K` and uploads nothing.
+- Signer age. A client measures the age of a signer as `now - max(entry.createdAt, firstSeen, listingCreatedAt)`. `firstSeen` is the time this client first opened a manifest that lists that id with that `signPub`, kept locally in the client's sealed sync store; `listingCreatedAt` is `createdAt` from `GET /v1/devices` when the device is listed. Taking the maximum means a backdated entry has no effect, so a device that holds `K` cannot age itself by editing its entry, and the server can only make a device look younger, which at worst delays an adoption. An id whose keys or `createdAt` change in a later manifest is treated as a new device: its `firstSeen` is now, and the client warns.
+- A joining device adopts only a wrap signed by the approver's sign key that went into the link code the person confirmed; `counter` must be at least 1 and at least the `counter` of the manifest that the wrapped key then opens. Without a manifest on the server there is nothing to open and the wrap is adopted on the first two conditions.
+- A re-link always uses a new device id and new keys; the client enforces this and never joins again with the identity of a device that was linked before. A join wrap is not bound to one join beyond its counter, so reusing an identity could let the server replay an older wrap from the same approver together with an older manifest and hand the device a key that a rotation already revoked.
+- A rotation wraps `K'` only to devices whose listed sign and box keys equal the keys in the approved list. The new manifest's approved list is the list of those devices.
+- An approving device writes the new device into the approved list, with `createdAt` set to its own clock at approval, in the next manifest it uploads.
+
+Known limit. A device that was offline while another device was removed still has the removed device in its last opened manifest. The removed device, whose keys were stolen, and a hostile server can give it a signed wrap with a counter above its highest and a manifest sealed under the attacker's key, and the rules above accept it: the removed device is old, so the age bound does not help, and no signature scheme fixes this alone. A client may keep the last few approved lists and warn when an adopting wrap's signer is missing from a newer manifest it fetched before.
+
+Link code. The person compares a code on both screens before the approver uploads a wrap, and the code binds both of the joiner's public keys and the approver's sign key:
+
+```
+digest = SHA-256("ostia-sync/link-code/v1\n" || joinerSignPub (32) || joinerBoxPub (32) || approverSignPub (32))
+code   = first 125 bits of digest as 25 RFC 4648 base32 characters (A-Z, 2-7, no padding, uppercase),
+         shown as 5 groups of 5 separated by "-"
+```
+
+The joiner reads its own two keys locally and the approver's `signPub` from the device listing. The approver reads its own `signPub` locally and the joiner's two keys from the listing. Both compute the code and the person confirms that the two match; a server that swaps any of the three keys makes the codes differ. `testdata/vectors/link.json` holds a fixed-key vector and a negative case with the joiner's `boxPub` swapped, checked by `vectors.test.mjs` and the Go vector test.
 
 A new device gets `K` from the passphrase, the recovery key, or from a signed-in device that uploads the device wrap after the person approves it.
 
@@ -275,9 +304,9 @@ GET  /v1/sync/blobs/{blobId}          raw bytes
 PUT  /v1/sync/blobs/{blobId}          raw bytes → 201 created | 200 identical | 409 | 413 | 507
 GET  /v1/sync/wraps                   {wraps: [{slot, updatedAt}]}
 GET  /v1/sync/wraps/{slot}            {slot, blob, updatedAt}
-PUT  /v1/sync/wraps/{slot}            {blob} → 204        slot: passphrase | recovery | device:<id of an active device>; an unelevated session may only fill an empty slot; replacing any existing wrap needs an elevated session. Wraps carry no sender signature yet, so a client must not adopt a new profile key from a wrap it did not ask for (tracked as a follow-up: signed wraps)
+PUT  /v1/sync/wraps/{slot}            {blob} → 204        slot: passphrase | recovery | device:<id of an active device>; an unelevated session may only fill an empty slot; replacing any existing wrap needs an elevated session. A `device:<id>` blob must be a version 2 wrap signed by the calling device (`400 bad-wrap`, `403 wrong-signer`), see Wrapping `K`
 DELETE /v1/sync/wraps/{slot}          204
-POST /v1/sync/rotate                  {ifMatch, manifest, wraps: {slot: blob}, deleteSlots: [slot]} → 200 {version} | 412
+POST /v1/sync/rotate                  {ifMatch, manifest, wraps: {slot: blob}, deleteSlots: [slot]} → 200 {version} | 412 | 400 bad-wrap | 403 wrong-signer     every device wrap is checked like a PUT
 POST /v1/sync/gc                      {keep: [blobId]} → {deleted}     removes blobs older than sync.gc_grace that are not listed
 GET  /v1/sync/usage                   {blobs, bytes, quotaBytes}
 ```
@@ -287,7 +316,7 @@ GET  /v1/sync/usage                   {blobs, bytes, quotaBytes}
 1. `GET manifest`; open it; refuse a counter lower than the highest seen. Fetch and open the blobs it lists; check each content hash.
 2. Merge per key with the last synced state as base. Upload blobs whose id the remote manifest does not list, then `PUT manifest` with `If-Match: <version read>` and `counter = highest + 1`.
 3. On `412`, repeat from step 1 (the reference client tries three times).
-4. A manifest that does not open with `K` means the key was rotated: read the `device:<own id>` wrap, unwrap the new key, retry.
+4. A manifest that does not open with `K` may mean the key was rotated. Unwrap the `device:<own id>` wrap only per the device-wrap client rules (signer in the last opened manifest, signature, age, counter above the highest, the manifest opens at that counter) and retry. Otherwise keep `K`, warn, and do not upload.
 
 ### Removing a device
 
@@ -314,9 +343,9 @@ DELETE /v1/push/{handle} (session)                         204
 
 | Status | `error` |
 |---|---|
-| 400 | `bad-request`, `bad-proof`, `bad-slot`, `size-mismatch` |
+| 400 | `bad-request`, `bad-proof`, `bad-slot`, `size-mismatch`, `bad-wrap` |
 | 401 | `unauthorized` |
-| 403 | `forbidden`, `invalid-invite`, `denied`, `device-too-new`, `wrong-account`, `invalid-ticket`, `elevation-required`, `public-disabled`, `publish-disabled` |
+| 403 | `forbidden`, `invalid-invite`, `denied`, `device-too-new`, `wrong-account`, `invalid-ticket`, `elevation-required`, `wrong-signer`, `public-disabled`, `publish-disabled` |
 | 404 | `not-found`, `no-manifest`, `unknown-flow`, `unknown-device` |
 | 409 | `conflict`, `blob-exists`, `already-uploaded`, `device-limit`, `no-second-device`, `not-a-github-account` |
 | 410 | `gone`, `expired` |

@@ -17,6 +17,7 @@ import {
 const read = (name) => JSON.parse(readFileSync(new URL(name, import.meta.url), 'utf8'))
 const sync = read('sync.json')
 const auth = read('auth.json')
+const link = read('link.json')
 
 const b64 = (text) => Buffer.from(text, 'base64url')
 const toB64 = (bytes) => Buffer.from(bytes).toString('base64url')
@@ -91,21 +92,71 @@ test('passphrase wrap matches and opens', () => {
 const x25519Private = (raw) => createPrivateKey({ key: Buffer.concat([Buffer.from('302e020100300506032b656e04220420', 'hex'), raw]), format: 'der', type: 'pkcs8' })
 const x25519Public = (raw) => createPublicKey({ key: Buffer.concat([Buffer.from('302a300506032b656e032100', 'hex'), raw]), format: 'der', type: 'spki' })
 
-test('device wrap opens with the device key and matches with the fixed ephemeral key', () => {
-  const wrap = b64(sync.deviceWrap)
-  const header = wrap.subarray(0, 33)
+const ed25519Public = (raw) => createPublicKey({ key: Buffer.concat([Buffer.from('302a300506032b6570032100', 'hex'), raw]), format: 'der', type: 'spki' })
+
+function splitDeviceWrap(wrap) {
+  assert.equal(wrap[0], 2)
+  const idLen = wrap[1]
+  const counterAt = 2 + idLen
+  const headerLen = counterAt + 8 + 32 + 12
+  const sigAt = wrap.length - 64
+  return {
+    signerId: wrap.subarray(2, counterAt).toString(),
+    counter: wrap.readBigUInt64BE(counterAt),
+    ephemeral: wrap.subarray(counterAt + 8, counterAt + 40),
+    header: wrap.subarray(0, headerLen),
+    sealed: wrap.subarray(headerLen - 12, sigAt),
+    signed: wrap.subarray(0, sigAt),
+    signature: wrap.subarray(sigAt),
+  }
+}
+
+const wrapSignatureMessage = (slot, signed) => Buffer.concat([Buffer.from(sync.wrapSignatureContext), Buffer.from(`${slot}\n`), signed])
+const signerPub = ed25519Public(b64(sync.wrapSignerSignPub))
+
+test('device wrap v2 opens with the device key, matches with the fixed ephemeral key and verifies', () => {
+  const parts = splitDeviceWrap(b64(sync.deviceWrap))
+  assert.equal(parts.signerId, sync.wrapSignerId)
+  assert.equal(parts.counter, BigInt(sync.wrapCounter))
   const devicePub = b64(sync.deviceBoxPublicKey)
   const deriveKey = (shared) =>
-    Buffer.from(hkdfSync('sha256', shared, Buffer.alloc(0), Buffer.concat([Buffer.from('ostia-sync/wrap/device'), header.subarray(1), devicePub]), 32))
-  const shared = diffieHellman({ privateKey: x25519Private(b64(sync.deviceBoxPrivateKey)), publicKey: x25519Public(header.subarray(1)) })
-  assert.deepEqual(open(deriveKey(shared), wrap.subarray(33), header), profileKey)
+    Buffer.from(hkdfSync('sha256', shared, Buffer.alloc(0), Buffer.concat([Buffer.from('ostia-sync/wrap/device'), parts.ephemeral, devicePub]), 32))
+  const aad = Buffer.concat([parts.header, Buffer.from(sync.wrapSlot)])
+  const shared = diffieHellman({ privateKey: x25519Private(b64(sync.deviceBoxPrivateKey)), publicKey: x25519Public(parts.ephemeral) })
+  assert.deepEqual(open(deriveKey(shared), parts.sealed, aad), profileKey)
 
   const ephemeralShared = diffieHellman({ privateKey: x25519Private(b64(sync.ephemeralPrivateKey)), publicKey: x25519Public(devicePub) })
-  const sealed = sealWithNonce(deriveKey(ephemeralShared), profileKey, header, b64(sync.deviceWrapNonce))
-  assert.equal(toB64(sealed), toB64(wrap.subarray(33)))
+  assert.equal(toB64(sealWithNonce(deriveKey(ephemeralShared), profileKey, aad, b64(sync.deviceWrapNonce))), toB64(parts.sealed))
+
+  assert.ok(verify(null, wrapSignatureMessage(sync.wrapSlot, parts.signed), signerPub, parts.signature))
+  assert.ok(!verify(null, wrapSignatureMessage('device:other', parts.signed), signerPub, parts.signature))
 })
 
-const ed25519Public = (raw) => createPublicKey({ key: Buffer.concat([Buffer.from('302a300506032b6570032100', 'hex'), raw]), format: 'der', type: 'spki' })
+test('forged and tampered device wraps fail the signature', () => {
+  for (const blob of [sync.wrongKeySignedWrap, sync.tamperedWrap]) {
+    const parts = splitDeviceWrap(b64(blob))
+    assert.ok(!verify(null, wrapSignatureMessage(sync.wrapSlot, parts.signed), signerPub, parts.signature))
+  }
+})
+
+const base32 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567'
+
+function linkCode(joinerSignPub, joinerBoxPub, approverSignPub) {
+  const digest = createHash('sha256')
+    .update(Buffer.concat([Buffer.from(link.tag), b64(joinerSignPub), b64(joinerBoxPub), b64(approverSignPub)]))
+    .digest()
+  const bits = [...digest.subarray(0, 16)].map((byte) => byte.toString(2).padStart(8, '0')).join('')
+  const chars = Array.from({ length: 25 }, (_, i) => base32[parseInt(bits.slice(i * 5, i * 5 + 5), 2)])
+  return Array.from({ length: 5 }, (_, i) => chars.slice(i * 5, i * 5 + 5).join('')).join('-')
+}
+
+test('link code matches and binds the joiner box key', () => {
+  assert.equal(link.tag, 'ostia-sync/link-code/v1\n')
+  assert.match(link.linkCode, /^([A-Z2-7]{5}-){4}[A-Z2-7]{5}$/)
+  assert.equal(linkCode(link.joinerSignPub, link.joinerBoxPub, link.approverSignPub), link.linkCode)
+  assert.equal(linkCode(link.joinerSignPub, link.swappedJoinerBoxPub, link.approverSignPub), link.swappedBoxLinkCode)
+  assert.notEqual(link.linkCode, link.swappedBoxLinkCode)
+})
 
 test('registration proof and challenge signature verify', () => {
   const pub = ed25519Public(b64(auth.signPub))

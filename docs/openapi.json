@@ -2957,7 +2957,7 @@
         "x-module": "sync"
       },
       "put": {
-        "summary": "Write a key wrap (replacing the passphrase or recovery wrap needs an elevated session)",
+        "summary": "Write a key wrap (replacing the passphrase or recovery wrap needs an elevated session; device wraps must be version 2 and signed by the calling device)",
         "security": [
           {
             "bearer": []
@@ -2968,7 +2968,7 @@
             "description": "Stored"
           },
           "400": {
-            "description": "bad-slot",
+            "description": "bad-slot, or bad-wrap: a device wrap that is not a well-formed version 2 wrap or whose signature does not verify under the calling device's registered sign key",
             "content": {
               "application/json": {
                 "schema": {
@@ -3015,7 +3015,7 @@
             }
           },
           "403": {
-            "description": "elevation-required: approve from another device or re-authenticate with GitHub (see /v1/auth/elevation)",
+            "description": "elevation-required (approve from another device or re-authenticate with GitHub, see /v1/auth/elevation), or wrong-signer: the wrap names a signer other than the calling device",
             "content": {
               "application/json": {
                 "schema": {
@@ -3216,7 +3216,17 @@
             }
           },
           "403": {
-            "description": "elevation-required: approve from another device or re-authenticate with GitHub (see /v1/auth/elevation)",
+            "description": "elevation-required, or wrong-signer: a device wrap names a signer other than the calling device",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "bad-request, or bad-wrap: a device wrap that is not a well-formed version 2 wrap or whose signature does not verify",
             "content": {
               "application/json": {
                 "schema": {
@@ -4152,6 +4162,10 @@
           },
           "limits": {
             "type": "object"
+          },
+          "approverMinAgeSeconds": {
+            "type": "integer",
+            "description": "How long a device must belong to the account before its approvals and signed wraps count (auth.approver_min_age, in seconds). Informational: clients enforce max(24 h, this value) and never act on a lower one"
           }
         }
       }

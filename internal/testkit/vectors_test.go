@@ -1,11 +1,15 @@
 package testkit
 
 import (
+	"bytes"
 	"crypto/ecdh"
 	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/json/v2"
+	"errors"
 	"os"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -34,6 +38,25 @@ type syncVectors struct {
 	EphemeralKey   string `json:"ephemeralPrivateKey"`
 	DeviceNonce    string `json:"deviceWrapNonce"`
 	DeviceWrap     string `json:"deviceWrap"`
+
+	WrapSignerID       string `json:"wrapSignerId"`
+	WrapSignerSeed     string `json:"wrapSignerSignSeed"`
+	WrapSignerPub      string `json:"wrapSignerSignPub"`
+	WrapSlot           string `json:"wrapSlot"`
+	WrapCounter        uint64 `json:"wrapCounter"`
+	WrapSignatureCtx   string `json:"wrapSignatureContext"`
+	WrongKeySignedWrap string `json:"wrongKeySignedWrap"`
+	TamperedWrap       string `json:"tamperedWrap"`
+}
+
+type linkVectors struct {
+	Tag                 string `json:"tag"`
+	JoinerSignPub       string `json:"joinerSignPub"`
+	JoinerBoxPub        string `json:"joinerBoxPub"`
+	ApproverSignPub     string `json:"approverSignPub"`
+	LinkCode            string `json:"linkCode"`
+	SwappedJoinerBoxPub string `json:"swappedJoinerBoxPub"`
+	SwappedBoxLinkCode  string `json:"swappedBoxLinkCode"`
 }
 
 type authVectors struct {
@@ -60,7 +83,13 @@ func buildSyncVectors(t *testing.T) syncVectors {
 	v.BlobNonce = b64.EncodeToString(blobNonce)
 	v.SealedBlob = b64.EncodeToString(sealWithNonce(subkey(key, labelBlobKey), content, []byte(aadBlob+v.Path), blobNonce))
 
-	manifest := Manifest{Counter: 7, Files: map[string]ManifestFile{v.Path: {BlobID: v.BlobID, Hash: v.ContentHash}}, Devices: []ManifestDevice{{ID: "device-1", Name: "laptop"}}}
+	manifest := Manifest{Counter: 7, Files: map[string]ManifestFile{v.Path: {BlobID: v.BlobID, Hash: v.ContentHash}}, Devices: []ManifestDevice{{
+		ID:        "device-1",
+		Name:      "laptop",
+		SignPub:   b64.EncodeToString(ed25519.NewKeyFromSeed(fixedBytes(32, 121)).Public().(ed25519.PublicKey)),
+		BoxPub:    b64.EncodeToString(mustX25519(fixedBytes(32, 61)).PublicKey().Bytes()),
+		CreatedAt: 1760000000000,
+	}}}
 	manifestJSON, _ := json.Marshal(manifest, json.Deterministic(true))
 	v.Manifest = string(manifestJSON)
 	manifestNonce := fixedBytes(12, 31)
@@ -79,12 +108,53 @@ func buildSyncVectors(t *testing.T) syncVectors {
 	v.DeviceBoxPub = b64.EncodeToString(deviceKey.PublicKey().Bytes())
 	v.EphemeralKey = b64.EncodeToString(fixedBytes(32, 71))
 	v.DeviceNonce = b64.EncodeToString(deviceNonce)
-	wrap, err := wrapForDevice(key, deviceKey.PublicKey().Bytes(), ephemeral, deviceNonce)
+	signSeed := fixedBytes(32, 121)
+	signer := WrapSigner{ID: "abcdefghijklmnopqrstuvwxyz", Sign: ed25519.NewKeyFromSeed(signSeed)}
+	v.WrapSignerID = signer.ID
+	v.WrapSignerSeed = b64.EncodeToString(signSeed)
+	v.WrapSignerPub = b64.EncodeToString(signer.Sign.Public().(ed25519.PublicKey))
+	v.WrapSlot = "device:zyxwvutsrqponmlkjihgfedcba"
+	v.WrapCounter = 7
+	v.WrapSignatureCtx = labelWrapSig
+	wrap, err := wrapForDevice(key, signer, v.WrapCounter, v.WrapSlot, deviceKey.PublicKey().Bytes(), ephemeral, deviceNonce)
 	if err != nil {
 		t.Fatal(err)
 	}
 	v.DeviceWrap = b64.EncodeToString(wrap)
+	forger := WrapSigner{ID: signer.ID, Sign: ed25519.NewKeyFromSeed(fixedBytes(32, 131))}
+	forged, err := wrapForDevice(key, forger, v.WrapCounter, v.WrapSlot, deviceKey.PublicKey().Bytes(), ephemeral, deviceNonce)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v.WrongKeySignedWrap = b64.EncodeToString(forged)
+	tampered := bytes.Clone(wrap)
+	tampered[len(tampered)-ed25519.SignatureSize-1] ^= 1
+	v.TamperedWrap = b64.EncodeToString(tampered)
 	return v
+}
+
+func mustX25519(seed []byte) *ecdh.PrivateKey {
+	key, err := ecdh.X25519().NewPrivateKey(seed)
+	if err != nil {
+		panic(err)
+	}
+	return key
+}
+
+func buildLinkVectors() linkVectors {
+	joinerSign := ed25519.NewKeyFromSeed(fixedBytes(32, 141)).Public().(ed25519.PublicKey)
+	joinerBox := mustX25519(fixedBytes(32, 151)).PublicKey().Bytes()
+	approverSign := ed25519.NewKeyFromSeed(fixedBytes(32, 161)).Public().(ed25519.PublicKey)
+	swappedBox := mustX25519(fixedBytes(32, 171)).PublicKey().Bytes()
+	return linkVectors{
+		Tag:                 labelLinkCode,
+		JoinerSignPub:       b64.EncodeToString(joinerSign),
+		JoinerBoxPub:        b64.EncodeToString(joinerBox),
+		ApproverSignPub:     b64.EncodeToString(approverSign),
+		LinkCode:            LinkCode(joinerSign, joinerBox, approverSign),
+		SwappedJoinerBoxPub: b64.EncodeToString(swappedBox),
+		SwappedBoxLinkCode:  LinkCode(joinerSign, swappedBox, approverSign),
+	}
 }
 
 func buildAuthVectors() authVectors {
@@ -150,18 +220,39 @@ func TestSyncVectorsAreStableAndOpen(t *testing.T) {
 		t.Fatal("wrong passphrase opens the wrap")
 	}
 	deviceKey, _ := ecdh.X25519().NewPrivateKey(fixedBytes(32, 61))
+	signPub, _ := b64.DecodeString(v.WrapSignerPub)
 	deviceWrap, _ := b64.DecodeString(v.DeviceWrap)
-	got, err = UnwrapForDevice(deviceWrap, deviceKey)
-	if err != nil || !reflect.DeepEqual(got, key) {
-		t.Fatalf("device wrap: %v", err)
+	opened, err := UnwrapForDevice(deviceWrap, v.WrapSlot, deviceKey, signPub)
+	if err != nil || !reflect.DeepEqual(opened.Key, key) || opened.Counter != v.WrapCounter || opened.SignerID != v.WrapSignerID {
+		t.Fatalf("device wrap: %+v %v", opened, err)
 	}
-	other, _ := ecdh.X25519().GenerateKey(nil)
-	if _, err := UnwrapForDevice(deviceWrap, other); err == nil {
+	other, _ := ecdh.X25519().GenerateKey(rand.Reader)
+	if _, err := UnwrapForDevice(deviceWrap, v.WrapSlot, other, signPub); err == nil {
 		t.Fatal("another device opens the wrap")
+	}
+	if _, err := UnwrapForDevice(deviceWrap, "device:other", deviceKey, signPub); !errors.Is(err, ErrBadWrapSignature) {
+		t.Fatalf("a wrap moved to another slot must fail its signature: %v", err)
+	}
+	for name, blob := range map[string]string{"wrongKeySignedWrap": v.WrongKeySignedWrap, "tamperedWrap": v.TamperedWrap} {
+		raw, _ := b64.DecodeString(blob)
+		if _, err := UnwrapForDevice(raw, v.WrapSlot, deviceKey, signPub); !errors.Is(err, ErrBadWrapSignature) {
+			t.Fatalf("%s: %v", name, err)
+		}
 	}
 }
 
 func TestAuthVectorsAreStable(t *testing.T) {
 	v := buildAuthVectors()
 	checkVectorFile(t, "../../testdata/vectors/auth.json", v)
+}
+
+func TestLinkCodeVectorsAreStableAndBindTheBoxKey(t *testing.T) {
+	v := buildLinkVectors()
+	checkVectorFile(t, "../../testdata/vectors/link.json", v)
+	if v.LinkCode == v.SwappedBoxLinkCode {
+		t.Fatal("swapping the joiner box key leaves the code unchanged")
+	}
+	if len(v.LinkCode) != 29 || strings.Count(v.LinkCode, "-") != 4 {
+		t.Fatalf("link code shape: %q", v.LinkCode)
+	}
 }
