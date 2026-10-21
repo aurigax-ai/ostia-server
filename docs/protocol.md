@@ -200,13 +200,16 @@ All requests are served by Host: `<id>.<share domain>`.
 
 | Path | Answer |
 |---|---|
-| `GET /` | The fixed shell page. A public share returns the file itself instead, with `Content-Security-Policy: sandbox allow-scripts`. |
-| `GET /meta` | `{v: 1, mode, size, salt, expiresAt}`; `404` unknown or not uploaded, `410` expired or removed |
-| `GET /blob` | The ciphertext; counts one view |
+| `GET /` | The fixed shell page, for every mode. |
+| `GET /meta` | `{v: 1, mode, size, salt, expiresAt, warning}`; `warning` is the server's `publish.share_warning` and no share can change it; `404` unknown or not uploaded, `410` expired or removed |
+| `GET /blob` | The ciphertext, or the file itself for a public share. Answers `404` to a top-level navigation (`Sec-Fetch-Mode: navigate` or `Sec-Fetch-Dest: document`), as does `/meta`, so a link cannot download it |
+| `POST /view` | Counts one view; the shell calls it once the page is shown, after the visitor accepted the notice. `204`; `404` for an unknown, expired or removed share |
 | `POST /report` | `{reason}` as above, for the shell's report button |
 | `GET /shell.js`, `/crypto.js`, `/shell.css` | The shell's static assets |
 
-The shell fetches `/meta` and `/blob`, decrypts with WebCrypto and renders the file in `<iframe sandbox="allow-scripts" srcdoc>`. Responses carry `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `Cross-Origin-Opener-Policy: same-origin`, `X-Robots-Tag: noindex` and `Cache-Control: no-store`. The server sets no cookies and stores no addresses or user agents; it counts views only.
+The shell fetches `/meta` and `/blob`, decrypts with WebCrypto (not for public shares), shows a notice bar and a one-time interstitial, and renders the file in `<iframe sandbox="allow-scripts" srcdoc>`. Responses carry `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `Cross-Origin-Opener-Policy: same-origin`, `X-Robots-Tag: noindex`, a `Permissions-Policy` that denies fullscreen and the other powerful features, and `Cache-Control: no-store`. The server sets no cookies and stores no addresses or user agents; it counts views only.
+
+Artifacts open links with `parent.postMessage({ostiaOpen: url}, '*')`: the shell takes `http(s)` URLs of up to 2048 characters from its own frame only, asks the visitor in a bar outside the frame, and opens the link with `window.open(url, '_blank', 'noopener,noreferrer')` only from the visitor's click on Open. Navigating the frame, popups, forms, downloads and `alert`/`confirm`/`prompt` are blocked; in-page DOM dialogs work.
 
 Expired shares are removed hourly (`publish.sweep_interval`). `ostia-server admin takedown <id>` disables a share and deletes its content at once.
 

@@ -43,7 +43,9 @@ async function fetchBlob() {
   return new Uint8Array(await response.arrayBuffer())
 }
 
-const ARTIFACT_POLICY = "connect-src 'none'"
+const ARTIFACT_POLICY = "connect-src 'none'; form-action 'none'; base-uri 'none'"
+const MAX_LINK_LENGTH = 2048
+const OPEN_DELAY_MS = 1000
 
 function withArtifactPolicy(html) {
   const doc = new DOMParser().parseFromString(html, 'text/html')
@@ -55,15 +57,123 @@ function withArtifactPolicy(html) {
   return type + doc.documentElement.outerHTML
 }
 
+function countView() {
+  fetch('/view', { method: 'POST' }).catch(() => {})
+}
+
 function renderDocument(html) {
   const frame = element('iframe', { sandbox: 'allow-scripts', title: 'Shared artifact', class: 'artifact' })
   frame.srcdoc = withArtifactPolicy(html)
-  root.replaceChildren(frame, reportBar())
+  artifactFrame = frame
+  countView()
+  root.replaceChildren(frame)
 }
 
-function reportBar() {
-  const bar = element('div', { class: 'bar' })
-  const open = element('button', { type: 'button', class: 'link' }, 'Report this share')
+let artifactFrame = null
+let linkConfirm = null
+
+function parseLink(value) {
+  if (typeof value !== 'string' || value.length > MAX_LINK_LENGTH) return null
+  let url
+  try {
+    url = new URL(value)
+  } catch {
+    return null
+  }
+  if ((url.protocol !== 'http:' && url.protocol !== 'https:') || url.username || url.password) return null
+  return url
+}
+
+const SHARED_SUFFIXES = new Set(['co', 'com', 'org', 'net', 'gov', 'edu', 'ac'])
+const MAX_PREFIX = 24
+
+function splitHost(hostname) {
+  const labels = hostname.split('.')
+  if (labels.length <= 2 || /^[\d.]+$/.test(hostname) || hostname.includes(':')) return ['', hostname]
+  const keep = labels.at(-1).length === 2 && SHARED_SUFFIXES.has(labels.at(-2)) ? 3 : 2
+  return [labels.slice(0, -keep).join('.') + '.', labels.slice(-keep).join('.')]
+}
+
+function middleTruncate(text) {
+  if (text.length <= MAX_PREFIX) return text
+  const half = (MAX_PREFIX - 1) / 2
+  return `${text.slice(0, Math.ceil(half))}…${text.slice(-Math.floor(half))}`
+}
+
+function hostLabel(url) {
+  const [prefix, domain] = splitHost(url.hostname)
+  const port = url.port ? `:${url.port}` : ''
+  const label = element('span', { class: 'host', title: url.host })
+  label.append(middleTruncate(prefix), element('strong', {}, domain + port))
+  return label
+}
+
+function confirmLink(url) {
+  if (linkConfirm) return
+  const open = element('button', { type: 'button', disabled: '' }, 'Open')
+  const cancel = element('button', { type: 'button' }, 'Cancel')
+  const box = element('div', { class: 'confirm', role: 'alertdialog', 'aria-label': 'Leaving the shared page' })
+  box.append(element('span', {}, 'This link leaves the shared page: '), hostLabel(url), open, cancel)
+  const close = () => {
+    clearTimeout(enable)
+    box.remove()
+    linkConfirm = null
+  }
+  const enable = setTimeout(() => open.removeAttribute('disabled'), OPEN_DELAY_MS)
+  open.addEventListener('click', () => {
+    window.open(url.href, '_blank', 'noopener,noreferrer')
+    close()
+  })
+  cancel.addEventListener('click', close)
+  linkConfirm = box
+  document.body.append(box)
+  cancel.focus()
+}
+
+window.addEventListener('message', (event) => {
+  if (!artifactFrame || event.source !== artifactFrame.contentWindow) return
+  const url = parseLink(event.data?.ostiaOpen)
+  if (url) confirmLink(url)
+})
+
+let warning = true
+
+function acknowledged() {
+  try {
+    return localStorage.getItem(`ostia-notice:${shareId}`) === '1'
+  } catch {
+    return false
+  }
+}
+
+function acknowledge() {
+  try {
+    localStorage.setItem(`ostia-notice:${shareId}`, '1')
+  } catch {}
+}
+
+function renderWithNotice(html) {
+  if (!warning || acknowledged()) {
+    renderDocument(html)
+    return
+  }
+  const show = element('button', { type: 'button' }, 'Show the page')
+  show.addEventListener('click', () => {
+    acknowledge()
+    renderDocument(html)
+  })
+  const notice = element('div', { class: 'notice' })
+  notice.append(
+    element('p', {}, 'This page was published by an Ostia user. Do not enter passwords or personal details.'),
+    show,
+  )
+  root.replaceChildren(notice)
+  show.focus()
+}
+
+function renderBar() {
+  const bar = element('div', { class: 'bar', role: 'region', 'aria-label': 'Share notice' })
+  const open = element('button', { type: 'button', class: 'link' }, 'Report')
   open.addEventListener('click', () => {
     const select = element('select', { 'aria-label': 'Reason' })
     for (const [value, label] of REPORT_REASONS) select.append(element('option', { value }, label))
@@ -77,10 +187,18 @@ function reportBar() {
       })
       status.textContent = response.ok ? 'Thank you, the report was recorded.' : 'The report could not be sent.'
     })
-    bar.replaceChildren(select, send, status)
+    reporting.replaceChildren(select, send, status)
   })
-  bar.append(open)
+  const reporting = element('span', { class: 'reporting' })
+  reporting.append(open)
+  bar.append(element('span', {}, 'Shared from Ostia · made by a user, not by Ostia ·'), reporting)
   return bar
+}
+
+async function showPublic() {
+  const blob = await fetchBlob()
+  if (!blob) return
+  renderWithNotice(new TextDecoder().decode(blob))
 }
 
 async function showLink() {
@@ -92,7 +210,7 @@ async function showLink() {
   const blob = await fetchBlob()
   if (!blob) return
   try {
-    renderDocument(await decryptBlob({ blob, id: shareId, key }))
+    renderWithNotice(await decryptBlob({ blob, id: shareId, key }))
   } catch {
     showMessage('This share could not be decrypted. The link may be damaged.')
   }
@@ -117,7 +235,7 @@ function showPasswordForm(meta) {
         salt: fromBase64Url(meta.salt),
         fragment: fragmentKey(location.hash),
       })
-      renderDocument(await decryptBlob({ blob, id: shareId, key }))
+      renderWithNotice(await decryptBlob({ blob, id: shareId, key }))
     } catch {
       status.textContent = 'Wrong password.'
       submit.disabled = false
@@ -129,7 +247,10 @@ function showPasswordForm(meta) {
 
 const meta = await fetchMeta()
 if (meta) {
-  if (meta.mode === 'link') await showLink()
+  warning = meta.warning !== false
+  if (warning) document.body.prepend(renderBar())
+  if (meta.mode === 'public') await showPublic()
+  else if (meta.mode === 'link') await showLink()
   else if (meta.mode === 'password') showPasswordForm(meta)
   else showMessage('This share uses an unsupported format.')
 }

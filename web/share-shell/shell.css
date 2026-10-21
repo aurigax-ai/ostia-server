@@ -6,5 +6,10 @@ body { display: flex; flex-direction: column; }
 .message { margin: auto; padding: 2rem; text-align: center; }
 .password { margin: auto; display: grid; gap: 0.75rem; grid-template-columns: 1fr auto; width: min(24rem, 90vw); }
 .password .message { grid-column: 1 / -1; padding: 0; }
-.bar { display: flex; gap: 0.5rem; align-items: center; justify-content: flex-end; padding: 0.25rem 0.75rem; font-size: 0.8rem; }
-.link { background: none; border: 0; padding: 0; color: inherit; text-decoration: underline; cursor: pointer; font: inherit; opacity: 0.7; }
+.bar { flex: none; display: flex; gap: 0.4rem; align-items: center; flex-wrap: wrap; padding: 0.35rem 0.75rem; font-size: 0.8rem; border-bottom: 1px solid rgba(128, 128, 128, 0.35); }
+.reporting { display: inline-flex; gap: 0.5rem; align-items: center; }
+.link { background: none; border: 0; padding: 0; color: inherit; text-decoration: underline; cursor: pointer; font: inherit; }
+.notice { margin: auto; display: grid; gap: 1rem; justify-items: center; padding: 2rem; max-width: 28rem; text-align: center; }
+.notice p { margin: 0; }
+.confirm { position: fixed; top: 3rem; left: 50%; transform: translateX(-50%); z-index: 1; display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; justify-content: center; max-width: min(36rem, 94vw); padding: 0.6rem 0.9rem; font-size: 0.9rem; background: Canvas; color: CanvasText; border: 1px solid; box-shadow: 0 0.25rem 1rem rgba(0, 0, 0, 0.35); }
+.host { overflow-wrap: anywhere; }

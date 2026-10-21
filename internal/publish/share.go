@@ -15,10 +15,11 @@ import (
 )
 
 const (
-	shellContentSecurityPolicy  = "default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src data: blob:; font-src data:; media-src data: blob:; connect-src 'self'; frame-src blob:; form-action 'none'; base-uri 'none'; frame-ancestors 'none'"
-	dataContentSecurityPolicy   = "default-src 'none'; sandbox"
-	publicContentSecurityPolicy = "sandbox allow-scripts"
+	shellContentSecurityPolicy = "default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src data: blob:; font-src data:; media-src data: blob:; connect-src 'self'; frame-src 'none'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'"
+	dataContentSecurityPolicy  = "default-src 'none'; sandbox"
 )
+
+const permissionsPolicy = "fullscreen=(), camera=(), microphone=(), geolocation=(), payment=(), usb=(), serial=(), clipboard-read=(), clipboard-write=(), display-capture=(), screen-wake-lock=(), picture-in-picture=()"
 
 var staticAssets = map[string]string{
 	"/shell.js":  "text/javascript; charset=utf-8",
@@ -48,6 +49,10 @@ func (s *Service) ShareHandler() http.Handler {
 			})).ServeHTTP(w, r)
 			return
 		}
+		if r.URL.Path == "/view" && r.Method == http.MethodPost {
+			s.serveView(w, r, id)
+			return
+		}
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
 			w.Header().Set("Allow", "GET, HEAD, POST")
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -59,7 +64,7 @@ func (s *Service) ShareHandler() http.Handler {
 		}
 		switch r.URL.Path {
 		case "/":
-			s.serveRoot(w, r, id)
+			s.serveAsset(w, r, "index.html", "text/html; charset=utf-8", shellContentSecurityPolicy)
 		case "/meta":
 			s.serveMeta(w, r, id)
 		case "/blob":
@@ -77,6 +82,7 @@ func setCommonHeaders(w http.ResponseWriter) {
 	h.Set("Cross-Origin-Opener-Policy", "same-origin")
 	h.Set("X-Robots-Tag", "noindex")
 	h.Set("Cache-Control", "no-store")
+	h.Set("Permissions-Policy", permissionsPolicy)
 }
 
 func (s *Service) serveAsset(w http.ResponseWriter, r *http.Request, name, contentType, policy string) {
@@ -118,34 +124,22 @@ func (s *Service) lookup(r *http.Request, id string) (store.Share, availability,
 	return share, available, nil
 }
 
-func (s *Service) serveRoot(w http.ResponseWriter, r *http.Request, id string) {
+func isNavigation(r *http.Request) bool {
+	return r.Header.Get("Sec-Fetch-Mode") == "navigate" || r.Header.Get("Sec-Fetch-Dest") == "document"
+}
+
+func (s *Service) serveView(w http.ResponseWriter, r *http.Request, id string) {
 	share, state, err := s.lookup(r, id)
 	if err != nil {
 		httpx.WriteError(w, r, err)
 		return
 	}
-	if state == available && share.Mode == ModePublic {
-		s.servePublic(w, r, share)
-		return
-	}
-	s.serveAsset(w, r, "index.html", "text/html; charset=utf-8", shellContentSecurityPolicy)
-}
-
-func (s *Service) servePublic(w http.ResponseWriter, r *http.Request, share store.Share) {
-	f, size, err := s.Blobs.Open(r.Context(), store.ShareBlobKey(share.ID))
-	if err != nil {
-		http.NotFound(w, r)
-		return
-	}
-	defer f.Close()
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Header().Set("Content-Security-Policy", publicContentSecurityPolicy)
-	w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
-	if r.Method == http.MethodHead {
+	if state != available {
+		httpx.WriteError(w, r, httpx.ErrNotFound)
 		return
 	}
 	_ = s.DB.CountView(r.Context(), share.ID)
-	_, _ = io.Copy(w, f)
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Service) serveMeta(w http.ResponseWriter, r *http.Request, id string) {
@@ -155,13 +149,17 @@ func (s *Service) serveMeta(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 	w.Header().Set("Content-Security-Policy", dataContentSecurityPolicy)
+	if isNavigation(r) {
+		httpx.WriteError(w, r, httpx.ErrNotFound)
+		return
+	}
 	switch state {
 	case missing:
 		httpx.WriteError(w, r, httpx.ErrNotFound)
 	case unavailable:
 		httpx.WriteError(w, r, httpx.ErrGone)
 	default:
-		httpx.WriteJSON(w, http.StatusOK, map[string]any{"v": 1, "mode": share.Mode, "size": share.Size, "salt": httpx.B64(share.Salt), "expiresAt": share.ExpiresAt})
+		httpx.WriteJSON(w, http.StatusOK, map[string]any{"v": 1, "mode": share.Mode, "size": share.Size, "salt": httpx.B64(share.Salt), "expiresAt": share.ExpiresAt, "warning": s.Cfg.ShareWarning})
 	}
 }
 
@@ -172,11 +170,15 @@ func (s *Service) serveBlob(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 	w.Header().Set("Content-Security-Policy", dataContentSecurityPolicy)
-	switch {
-	case state == missing || (state == available && share.Mode == ModePublic):
+	if isNavigation(r) {
 		httpx.WriteError(w, r, httpx.ErrNotFound)
 		return
-	case state == unavailable:
+	}
+	switch state {
+	case missing:
+		httpx.WriteError(w, r, httpx.ErrNotFound)
+		return
+	case unavailable:
 		httpx.WriteError(w, r, httpx.ErrGone)
 		return
 	}
@@ -192,6 +194,5 @@ func (s *Service) serveBlob(w http.ResponseWriter, r *http.Request, id string) {
 	if r.Method == http.MethodHead {
 		return
 	}
-	_ = s.DB.CountView(r.Context(), share.ID)
 	_, _ = io.Copy(w, f)
 }

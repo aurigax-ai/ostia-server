@@ -122,6 +122,7 @@ type Publish struct {
 	MaxExpiry           Duration `toml:"max_expiry"`
 	AllowNever          bool     `toml:"allow_never"`
 	AllowPublic         bool     `toml:"allow_public"`
+	ShareWarning        bool     `toml:"share_warning"`
 	SweepInterval       Duration `toml:"sweep_interval"`
 }
 
@@ -226,6 +227,7 @@ func Default() Config {
 			DefaultExpiry:       Duration(30 * 24 * time.Hour),
 			MaxExpiry:           Duration(365 * 24 * time.Hour),
 			AllowPublic:         true,
+			ShareWarning:        true,
 			SweepInterval:       Duration(time.Hour),
 		},
 		Sync: Sync{

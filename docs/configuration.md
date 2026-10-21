@@ -93,6 +93,7 @@ The admin web UI at `https://<domains.api>/admin/`. See [Administration](self-ho
 | `min_expiry`, `default_expiry`, `max_expiry` | `1m`, `720h`, `8760h` | |
 | `allow_never` | `false` | Allow shares that never expire. Intended for self-hosted instances. |
 | `allow_public` | `true` | Allow plaintext public shares. Owners must still choose them explicitly. |
+| `share_warning` | `true` | Show the notice bar and the one-time interstitial on every share. Only the operator can change it: no share, request or artifact can turn it off. The shell, the sandboxed frame and the frame policy stay either way. |
 | `sweep_interval` | `1h` | How often expired shares are removed. |
 
 ## `[storage]`
