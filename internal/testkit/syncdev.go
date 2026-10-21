@@ -47,11 +47,20 @@ func (d *SyncDevice) InitAccount(t testing.TB, passphrase, recoveryKey string) {
 	if recoveryKey != "" {
 		d.putWrap(t, "recovery", WrapWithSecret(d.Key, recoveryKey, d.Argon))
 	}
-	own, err := WrapForDevice(d.Key, d.API.ID.BoxPub())
+	d.putWrap(t, "device:"+d.API.ID.DeviceID, d.deviceWrap(t, d.Key, 1, d.API.ID.DeviceID, d.API.ID.BoxPub()))
+}
+
+func (d *SyncDevice) Signer() WrapSigner {
+	return WrapSigner{ID: d.API.ID.DeviceID, Sign: d.API.ID.Sign}
+}
+
+func (d *SyncDevice) deviceWrap(t testing.TB, key []byte, counter uint64, targetID string, boxPub []byte) []byte {
+	t.Helper()
+	wrap, err := WrapForDevice(key, d.Signer(), counter, "device:"+targetID, boxPub)
 	if err != nil {
 		t.Fatal(err)
 	}
-	d.putWrap(t, "device:"+d.API.ID.DeviceID, own)
+	return wrap
 }
 
 func (d *SyncDevice) putWrap(t testing.TB, slot string, wrap []byte) {
@@ -95,21 +104,27 @@ func (d *SyncDevice) UnlockFromDeviceWrap(t testing.TB) error {
 	if !ok {
 		return ErrKeyUnknown
 	}
-	key, err := UnwrapForDevice(wrap, d.API.ID.Box)
+	signerID, ok := ParseWrapSigner(wrap)
+	if !ok {
+		return ErrWrongKey
+	}
+	var signPub []byte
+	for _, dev := range d.Devices(t) {
+		if dev.ID == signerID {
+			signPub = dev.SignPub
+		}
+	}
+	opened, err := UnwrapForDevice(wrap, "device:"+d.API.ID.DeviceID, d.API.ID.Box, signPub)
 	if err != nil {
 		return err
 	}
-	d.Key = key
+	d.Key = opened.Key
 	return nil
 }
 
 func (d *SyncDevice) GrantDevice(t testing.TB, deviceID string, boxPub []byte) {
 	t.Helper()
-	wrap, err := WrapForDevice(d.Key, boxPub)
-	if err != nil {
-		t.Fatal(err)
-	}
-	d.putWrap(t, "device:"+deviceID, wrap)
+	d.putWrap(t, "device:"+deviceID, d.deviceWrap(t, d.Key, uint64(max(d.Highest, 1)), deviceID, boxPub))
 }
 
 type remoteState struct {
@@ -242,25 +257,28 @@ func (d *SyncDevice) uploadBlob(t testing.TB, id string, sealed []byte) {
 }
 
 type RemoteDevice struct {
-	ID     string
-	Name   string
-	BoxPub []byte
+	ID      string
+	Name    string
+	SignPub []byte
+	BoxPub  []byte
 }
 
 func (d *SyncDevice) Devices(t testing.TB) []RemoteDevice {
 	t.Helper()
 	var list struct {
 		Devices []struct {
-			ID     string `json:"id"`
-			Name   string `json:"name"`
-			BoxPub string `json:"boxPub"`
+			ID      string `json:"id"`
+			Name    string `json:"name"`
+			SignPub string `json:"signPub"`
+			BoxPub  string `json:"boxPub"`
 		} `json:"devices"`
 	}
 	d.API.Must(t, http.StatusOK, "GET", "/v1/devices", nil).JSON(t, &list)
 	out := make([]RemoteDevice, 0, len(list.Devices))
 	for _, dev := range list.Devices {
+		sign, _ := DecodeB64(dev.SignPub)
 		box, _ := DecodeB64(dev.BoxPub)
-		out = append(out, RemoteDevice{ID: dev.ID, Name: dev.Name, BoxPub: box})
+		out = append(out, RemoteDevice{ID: dev.ID, Name: dev.Name, SignPub: sign, BoxPub: box})
 	}
 	return out
 }
@@ -290,11 +308,7 @@ func (d *SyncDevice) RemoveDeviceAndRotate(t testing.TB, approver *API, removeID
 	}
 	for _, dev := range d.Devices(t) {
 		next.Devices = append(next.Devices, ManifestDevice{ID: dev.ID, Name: dev.Name})
-		wrap, err := WrapForDevice(newKey, dev.BoxPub)
-		if err != nil {
-			t.Fatal(err)
-		}
-		wraps["device:"+dev.ID] = EncodeB64(wrap)
+		wraps["device:"+dev.ID] = EncodeB64(d.deviceWrap(t, newKey, uint64(next.Counter), dev.ID, dev.BoxPub))
 	}
 	d.API.Must(t, http.StatusOK, "POST", "/v1/sync/rotate", map[string]any{
 		"ifMatch":     remote.version,

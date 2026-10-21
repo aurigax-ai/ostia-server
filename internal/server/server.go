@@ -168,9 +168,10 @@ func (s *Server) info(w http.ResponseWriter, r *http.Request) error {
 			"sync":    s.Cfg.SyncEnabled(),
 			"push":    s.Cfg.PushEnabled(),
 		},
-		"auth":        map[string]bool{"invite": true, "github": s.Auth.GitHub != nil},
-		"relayDomain": s.Cfg.Domains.Relay,
-		"shareDomain": s.Cfg.Domains.Share,
+		"auth":                  map[string]bool{"invite": true, "github": s.Auth.GitHub != nil},
+		"approverMinAgeSeconds": int64(s.Cfg.Auth.ApproverMinAge.Std() / time.Second),
+		"relayDomain":           s.Cfg.Domains.Relay,
+		"shareDomain":           s.Cfg.Domains.Share,
 		"limits": map[string]any{
 			"shareMaxBytes":  s.Cfg.Publish.MaxFileBytes,
 			"allowPublic":    s.Cfg.Publish.AllowPublic,

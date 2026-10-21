@@ -4,6 +4,7 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/ecdh"
+	"crypto/ed25519"
 	"crypto/hkdf"
 	"crypto/hmac"
 	"crypto/rand"
@@ -19,17 +20,22 @@ const (
 	syncKeyBytes      = 32
 	syncNonceBytes    = 12
 	syncWrapVersion   = 1
+	deviceWrapVersion = 2
 	syncSaltBytes     = 16
 	labelBlobKey      = "ostia-sync/blob"
 	labelManifestKey  = "ostia-sync/manifest"
 	labelPathKey      = "ostia-sync/path"
 	labelDeviceWrap   = "ostia-sync/wrap/device"
+	labelWrapSig      = "ostia-sync/wrap/sig/v1\n"
 	aadBlob           = "ostia-sync/blob/v1\n"
 	aadManifest       = "ostia-sync/manifest/v1"
 	aadPassphraseWrap = "ostia-sync/wrap/passphrase/v1"
 )
 
-var ErrWrongKey = errors.New("cannot open with this key")
+var (
+	ErrWrongKey         = errors.New("cannot open with this key")
+	ErrBadWrapSignature = errors.New("bad wrap signature")
+)
 
 type ArgonParams struct {
 	MemoryKiB uint32
@@ -162,12 +168,27 @@ func deviceWrapKey(shared, ephemeralPub, devicePub []byte) []byte {
 	return key
 }
 
-func WrapForDevice(profileKey, deviceBoxPub []byte) ([]byte, error) {
-	ephemeral, _ := ecdh.X25519().GenerateKey(rand.Reader)
-	return wrapForDevice(profileKey, deviceBoxPub, ephemeral, RandomBytes(syncNonceBytes))
+type WrapSigner struct {
+	ID   string
+	Sign ed25519.PrivateKey
 }
 
-func wrapForDevice(profileKey, deviceBoxPub []byte, ephemeral *ecdh.PrivateKey, nonce []byte) ([]byte, error) {
+type DeviceWrap struct {
+	SignerID string
+	Counter  uint64
+	Key      []byte
+}
+
+func wrapSignatureMessage(slot string, signed []byte) []byte {
+	return append([]byte(labelWrapSig+slot+"\n"), signed...)
+}
+
+func WrapForDevice(profileKey []byte, signer WrapSigner, counter uint64, slot string, deviceBoxPub []byte) ([]byte, error) {
+	ephemeral, _ := ecdh.X25519().GenerateKey(rand.Reader)
+	return wrapForDevice(profileKey, signer, counter, slot, deviceBoxPub, ephemeral, RandomBytes(syncNonceBytes))
+}
+
+func wrapForDevice(profileKey []byte, signer WrapSigner, counter uint64, slot string, deviceBoxPub []byte, ephemeral *ecdh.PrivateKey, nonce []byte) ([]byte, error) {
 	pub, err := ecdh.X25519().NewPublicKey(deviceBoxPub)
 	if err != nil {
 		return nil, err
@@ -176,24 +197,52 @@ func wrapForDevice(profileKey, deviceBoxPub []byte, ephemeral *ecdh.PrivateKey, 
 	if err != nil {
 		return nil, err
 	}
-	out := append([]byte{syncWrapVersion}, ephemeral.PublicKey().Bytes()...)
+	header := []byte{deviceWrapVersion, byte(len(signer.ID))}
+	header = append(header, signer.ID...)
+	header = binary.BigEndian.AppendUint64(header, counter)
+	header = append(header, ephemeral.PublicKey().Bytes()...)
+	header = append(header, nonce...)
 	key := deviceWrapKey(shared, ephemeral.PublicKey().Bytes(), deviceBoxPub)
-	return append(out, sealWithNonce(key, profileKey, out, nonce)...), nil
+	block, _ := aes.NewCipher(key)
+	gcm, _ := cipher.NewGCM(block)
+	body := gcm.Seal(header, nonce, profileKey, append(append([]byte(nil), header...), slot...))
+	return append(body, ed25519.Sign(signer.Sign, wrapSignatureMessage(slot, body))...), nil
 }
 
-func UnwrapForDevice(wrap []byte, box *ecdh.PrivateKey) ([]byte, error) {
-	const headerLen = 1 + 32
-	if len(wrap) < headerLen || wrap[0] != syncWrapVersion {
-		return nil, ErrWrongKey
+func ParseWrapSigner(wrap []byte) (string, bool) {
+	if len(wrap) < 2 || wrap[0] != deviceWrapVersion || len(wrap) < 2+int(wrap[1]) {
+		return "", false
 	}
-	ephemeral, err := ecdh.X25519().NewPublicKey(wrap[1:headerLen])
+	return string(wrap[2 : 2+int(wrap[1])]), true
+}
+
+func UnwrapForDevice(wrap []byte, slot string, box *ecdh.PrivateKey, signerSignPub []byte) (DeviceWrap, error) {
+	if len(wrap) < 2 || wrap[0] != deviceWrapVersion {
+		return DeviceWrap{}, ErrWrongKey
+	}
+	idLen := int(wrap[1])
+	headerLen := 2 + idLen + 8 + 32 + syncNonceBytes
+	if idLen == 0 || len(wrap) != headerLen+syncKeyBytes+16+ed25519.SignatureSize {
+		return DeviceWrap{}, ErrWrongKey
+	}
+	sigAt := len(wrap) - ed25519.SignatureSize
+	if !ed25519.Verify(signerSignPub, wrapSignatureMessage(slot, wrap[:sigAt]), wrap[sigAt:]) {
+		return DeviceWrap{}, ErrBadWrapSignature
+	}
+	counterAt := 2 + idLen
+	ephemeralBytes := wrap[counterAt+8 : counterAt+8+32]
+	ephemeral, err := ecdh.X25519().NewPublicKey(ephemeralBytes)
 	if err != nil {
-		return nil, ErrWrongKey
+		return DeviceWrap{}, ErrWrongKey
 	}
 	shared, err := box.ECDH(ephemeral)
 	if err != nil {
-		return nil, ErrWrongKey
+		return DeviceWrap{}, ErrWrongKey
 	}
-	key := deviceWrapKey(shared, wrap[1:headerLen], box.PublicKey().Bytes())
-	return open(key, wrap[headerLen:], wrap[:headerLen])
+	key := deviceWrapKey(shared, ephemeralBytes, box.PublicKey().Bytes())
+	plain, err := open(key, wrap[headerLen-syncNonceBytes:sigAt], append(append([]byte(nil), wrap[:headerLen]...), slot...))
+	if err != nil {
+		return DeviceWrap{}, err
+	}
+	return DeviceWrap{SignerID: string(wrap[2:counterAt]), Counter: binary.BigEndian.Uint64(wrap[counterAt:]), Key: plain}, nil
 }

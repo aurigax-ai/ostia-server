@@ -15,7 +15,7 @@ This is the contract between ostia-server and its clients (the Ostia desktop app
 | Route | Answer |
 |---|---|
 | `GET /healthz` | `{"ok": true}` |
-| `GET /v1/info` | `{api, modules: {relay, publish, sync, push}, auth: {invite, github}, relayDomain, shareDomain, limits}`; the modules are booleans |
+| `GET /v1/info` | `{api, modules: {relay, publish, sync, push}, auth: {invite, github}, approverMinAgeSeconds, relayDomain, shareDomain, limits}`; the modules are booleans; `approverMinAgeSeconds` is `auth.approver_min_age` in seconds (0 when switched off) |
 
 A disabled module's routes do not exist (`404`).
 
@@ -260,7 +260,18 @@ The server stores sealed manifests with a monotonically increasing `version`. It
 All wraps are opaque to the server.
 
 - `passphrase` and `recovery` slots: `0x01 || memoryKiB (4 bytes BE) || passes (1) || lanes (1) || salt (16) || nonce (12) || AES-256-GCM(argon2id(secret, salt, passes, memoryKiB, lanes) → 32 bytes, K)`, AAD = `"ostia-sync/wrap/passphrase/v1"` followed by the first 23 header bytes. Production parameters are 64 MiB, 3 passes, 4 lanes.
-- `device:<deviceId>` slot: `0x01 || ephemeral X25519 public key (32) || nonce (12) || AES-256-GCM(wrapKey, K)` with `wrapKey = HKDF-SHA256(X25519(ephemeral, deviceBoxPub), salt = empty, info = "ostia-sync/wrap/device" || ephemeralPub || deviceBoxPub, 32)` and AAD = the first 33 bytes.
+- `device:<deviceId>` slot (version 2): `0x02 || signerIdLen (1) || signerId (utf-8) || counter (8 BE) || ephemeral X25519 public key (32) || nonce (12) || AES-256-GCM(wrapKey, K) (48) || signature (64)`.
+  - `wrapKey = HKDF-SHA256(X25519(ephemeral, targetBoxPub), salt = empty, info = "ostia-sync/wrap/device" || ephemeralPub || targetBoxPub, 32)`. AAD = every byte before the ciphertext (version through nonce) followed by the target slot name in utf-8.
+  - `signature = Ed25519(signer's device sign key)` over `"ostia-sync/wrap/sig/v1\n" || slot || "\n" || every byte before the signature`. The slot is signed, so a wrap cannot be moved to another device's slot.
+  - `counter` is the manifest counter the wrap belongs to: for a link, the manifest counter at approval time (at least 1); for a rotation, the counter of the new manifest.
+
+The server checks every device wrap on `PUT /v1/sync/wraps/device:<id>` and inside `POST /v1/sync/rotate`: it must parse as version 2 (`400 bad-wrap` otherwise), `signerId` must be the calling device and that device must be active (`403 wrong-signer` otherwise), and the signature must verify under that device's registered sign key (`400 bad-wrap`). A rotation with any failing wrap changes nothing. The server cannot open the wrap, so it does not check the counter or the target key; clients do. `GET` returns the blob untouched.
+
+Client rules for device wraps:
+
+- A linked device adopts a new key (a rotation, or any wrap it did not ask for) only from a version 2 wrap whose signer is in the last manifest it opened, whose pinned sign key verifies the signature, whose signer has existed for at least `approverMinAgeSeconds` (from `GET /v1/info`), whose `counter` is greater than the highest counter it has seen for the account, and whose key opens the manifest at that counter. Anything else is ignored with a warning.
+- A joining device adopts only a wrap signed by the approver's sign key that went into the link code the person confirmed; `counter` must be at least 1 and the manifest must open with the wrapped key.
+- A rotation wraps `K'` only to devices whose listed sign and box keys equal the keys pinned in the manifest or the approved list.
 
 A new device gets `K` from the passphrase, the recovery key, or from a signed-in device that uploads the device wrap after the person approves it.
 
@@ -275,9 +286,9 @@ GET  /v1/sync/blobs/{blobId}          raw bytes
 PUT  /v1/sync/blobs/{blobId}          raw bytes → 201 created | 200 identical | 409 | 413 | 507
 GET  /v1/sync/wraps                   {wraps: [{slot, updatedAt}]}
 GET  /v1/sync/wraps/{slot}            {slot, blob, updatedAt}
-PUT  /v1/sync/wraps/{slot}            {blob} → 204        slot: passphrase | recovery | device:<id of an active device>; an unelevated session may only fill an empty slot; replacing any existing wrap needs an elevated session. Wraps carry no sender signature yet, so a client must not adopt a new profile key from a wrap it did not ask for (tracked as a follow-up: signed wraps)
+PUT  /v1/sync/wraps/{slot}            {blob} → 204        slot: passphrase | recovery | device:<id of an active device>; an unelevated session may only fill an empty slot; replacing any existing wrap needs an elevated session. A `device:<id>` blob must be a version 2 wrap signed by the calling device (`400 bad-wrap`, `403 wrong-signer`), see Wrapping `K`
 DELETE /v1/sync/wraps/{slot}          204
-POST /v1/sync/rotate                  {ifMatch, manifest, wraps: {slot: blob}, deleteSlots: [slot]} → 200 {version} | 412
+POST /v1/sync/rotate                  {ifMatch, manifest, wraps: {slot: blob}, deleteSlots: [slot]} → 200 {version} | 412 | 400 bad-wrap | 403 wrong-signer     every device wrap is checked like a PUT
 POST /v1/sync/gc                      {keep: [blobId]} → {deleted}     removes blobs older than sync.gc_grace that are not listed
 GET  /v1/sync/usage                   {blobs, bytes, quotaBytes}
 ```
