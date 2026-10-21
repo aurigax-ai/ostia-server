@@ -20,18 +20,32 @@ const playwright = process.env.CHROME_PATH ? await loadPlaywright() : null
 const skip = playwright ? false : 'set CHROME_PATH and make playwright-core importable (or PLAYWRIGHT_CORE) to run browser tests'
 
 const EVIL = 'http://evil.localhost'
-const artifacts = new Map(Object.entries({
-  loc: (evil) => `<p>stay</p><script>setTimeout(() => { location.href = '${evil}/loc' }, 50)</script>`,
-  refresh: (evil) => `<meta http-equiv="refresh" content="0;url=${evil}/refresh"><p>stay</p>`,
-  top: (evil) => `<p>stay</p><a id="a" target="_top" href="${evil}/top">x</a><script>setTimeout(() => document.getElementById('a').click(), 50)</script>`,
-  open: (evil) => `<p>stay</p><script>setTimeout(() => window.open('${evil}/open', '_blank'), 50)</script>`,
-  form: (evil) => `<p>stay</p><form id="f" method="post" action="${evil}/form"><input name="a"></form><script>setTimeout(() => document.getElementById('f').submit(), 50)</script>`,
-  first: () => `<script>parent.postMessage({ ostiaOpen: 'http://first.localhost/' }, '*'); setTimeout(() => parent.postMessage({ ostiaOpen: 'http://second.localhost/' }, '*'), 300)</script><p>stay</p>`,
-  bad: () => `<p>stay</p><script>for (const u of ['javascript:alert(1)', 'data:text/html,x', 'ftp://x/', 'http://u:p@x.localhost/', 'http://x.localhost/' + 'a'.repeat(2100)]) parent.postMessage({ ostiaOpen: u }, '*')</script>`,
-  long: () => `<p>stay</p><script>parent.postMessage({ ostiaOpen: 'https://accounts.google.com.secure-login.verification.example.org/x' }, '*')</script>`,
-  early: (evil) => `<script>parent.postMessage({ ostiaOpen: '${evil}/ok' }, '*')</script><p>stay</p>`,
-  head: () => `<script>window.headFirst = document.head.firstElementChild.outerHTML</script><p>stay</p>`,
-}))
+function artifactHtml(id, evil) {
+  switch (id) {
+    case 'loc':
+      return `<p>stay</p><script>setTimeout(() => { location.href = '${evil}/loc' }, 50)</script>`
+    case 'refresh':
+      return `<meta http-equiv="refresh" content="0;url=${evil}/refresh"><p>stay</p>`
+    case 'top':
+      return `<p>stay</p><a id="a" target="_top" href="${evil}/top">x</a><script>setTimeout(() => document.getElementById('a').click(), 50)</script>`
+    case 'open':
+      return `<p>stay</p><script>setTimeout(() => window.open('${evil}/open', '_blank'), 50)</script>`
+    case 'form':
+      return `<p>stay</p><form id="f" method="post" action="${evil}/form"><input name="a"></form><script>setTimeout(() => document.getElementById('f').submit(), 50)</script>`
+    case 'first':
+      return `<script>parent.postMessage({ ostiaOpen: 'http://first.localhost/' }, '*'); setTimeout(() => parent.postMessage({ ostiaOpen: 'http://second.localhost/' }, '*'), 300)</script><p>stay</p>`
+    case 'bad':
+      return `<p>stay</p><script>for (const u of ['javascript:alert(1)', 'data:text/html,x', 'ftp://x/', 'http://u:p@x.localhost/', 'http://x.localhost/' + 'a'.repeat(2100)]) parent.postMessage({ ostiaOpen: u }, '*')</script>`
+    case 'long':
+      return `<p>stay</p><script>parent.postMessage({ ostiaOpen: 'https://accounts.google.com.secure-login.verification.example.org/x' }, '*')</script>`
+    case 'early':
+      return `<script>parent.postMessage({ ostiaOpen: '${evil}/ok' }, '*')</script><p>stay</p>`
+    case 'head':
+      return `<script>window.headFirst = document.head.firstElementChild.outerHTML</script><p>stay</p>`
+    default:
+      return null
+  }
+}
 
 let server, evilServer, browser, base, evilHits, views
 const evilPort = () => evilServer.address().port
@@ -55,13 +69,13 @@ before(async () => {
       type = 'application/json'
       body = JSON.stringify({ v: 1, mode: 'public', size: 1, salt: '', expiresAt: 0, warning: true })
     } else if (path === '/blob') {
-      const artifact = artifacts.get(id)
-      if (!artifact) {
+      const artifact = artifactHtml(id, `${EVIL}:${evilPort()}`)
+      if (artifact === null) {
         res.writeHead(404).end()
         return
       }
       type = 'application/octet-stream'
-      body = `<!doctype html><body>${artifact(`${EVIL}:${evilPort()}`)}`
+      body = `<!doctype html><body>${artifact}`
     } else if (path === '/view') {
       views++
       res.writeHead(204).end()
