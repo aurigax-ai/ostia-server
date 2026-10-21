@@ -29,6 +29,14 @@ func signedHeaders(id *testkit.Identity, message func(deviceID string, ms int64)
 	}
 }
 
+func wrapReadFor(slot string) func(string, int64) []byte {
+	return func(deviceID string, ms int64) []byte { return auth.WrapReadMessage(deviceID, ms, slot) }
+}
+
+func manifestPutFor(ifMatch int64, body []byte) func(string, int64) []byte {
+	return func(deviceID string, ms int64) []byte { return auth.ManifestPutMessage(deviceID, ms, ifMatch, body) }
+}
+
 func TestStolenTokenCannotReadPassphraseOrRecoveryWrapsOrPushManifests(t *testing.T) {
 	f := newSyncFixture(t, "")
 	stolen := stolenCopy(f.env, f.a.API)
@@ -73,18 +81,18 @@ func TestSignedReadsRejectWrongContextStaleAndReplayedSignatures(t *testing.T) {
 	}
 
 	expect("a signature made for inviting", read(signedHeaders(owner.ID, auth.InviteMessage, now)), http.StatusForbidden, "bad-signature")
-	expect("a signature made for pushing a manifest", read(signedHeaders(owner.ID, auth.ManifestPutMessage, now+1)), http.StatusForbidden, "bad-signature")
-	expect("a timestamp ten minutes old", read(signedHeaders(owner.ID, auth.WrapReadMessage, now-10*60*1000)), http.StatusForbidden, "stale-signature")
-	expect("a timestamp ten minutes ahead", read(signedHeaders(owner.ID, auth.WrapReadMessage, now+10*60*1000)), http.StatusForbidden, "stale-signature")
+	expect("a signature made for pushing a manifest", read(signedHeaders(owner.ID, manifestPutFor(0, []byte("{}")), now+1)), http.StatusForbidden, "bad-signature")
+	expect("a timestamp ten minutes old", read(signedHeaders(owner.ID, wrapReadFor("passphrase"), now-10*60*1000)), http.StatusForbidden, "stale-signature")
+	expect("a timestamp ten minutes ahead", read(signedHeaders(owner.ID, wrapReadFor("passphrase"), now+10*60*1000)), http.StatusForbidden, "stale-signature")
 
-	good := signedHeaders(owner.ID, auth.WrapReadMessage, now+2)
+	good := signedHeaders(owner.ID, wrapReadFor("passphrase"), now+2)
 	expect("a fresh signature", read(good), http.StatusOK, "")
 	expect("the same request replayed", read(good), http.StatusForbidden, "stale-signature")
-	older := signedHeaders(owner.ID, auth.WrapReadMessage, now+1)
+	older := signedHeaders(owner.ID, wrapReadFor("passphrase"), now+1)
 	expect("an older timestamp than the last accepted one", read(older), http.StatusForbidden, "stale-signature")
 
 	other := f.env.device(t, owner, "phone")
-	foreign := signedHeaders(other.ID, auth.WrapReadMessage, now+3)
+	foreign := signedHeaders(other.ID, wrapReadFor("passphrase"), now+3)
 	expect("another device's signature on the owner's token", read(foreign), http.StatusForbidden, "bad-signature")
 }
 
@@ -261,5 +269,89 @@ func TestDeleteJournalModeRunsWithoutAWALFile(t *testing.T) {
 	got, err := f.a.Pull(t)
 	if err != nil || !testkit.Equal(got, settings("theme", "dark")) {
 		t.Fatalf("pull: %v %v", got, err)
+	}
+}
+
+func TestSignaturesBindTheSlotTheVersionAndTheBody(t *testing.T) {
+	f := newSyncFixture(t, "")
+	owner := f.a.API
+	stolen := stolenCopy(f.env, owner)
+	now := time.Now().UnixMilli()
+
+	read := func(slot string, headers map[string]string) testkit.Response {
+		t.Helper()
+		res, err := stolen.Raw("GET", "/v1/sync/wraps/"+slot, headers, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return res
+	}
+	if res := read("recovery", signedHeaders(owner.ID, wrapReadFor("passphrase"), now)); res.Status != http.StatusForbidden || res.Map(t)["error"] != "bad-signature" {
+		t.Fatalf("a passphrase read signature redirected to the recovery slot: %s", res)
+	}
+	if res := read("recovery", signedHeaders(owner.ID, wrapReadFor("recovery"), now+1)); res.Status != http.StatusOK {
+		t.Fatalf("a signature for the recovery slot: %s", res)
+	}
+
+	body := []byte(`{"blob":"` + testkit.EncodeB64([]byte("sealed")) + `"}`)
+	put := func(ifMatch string, sent []byte, headers map[string]string) testkit.Response {
+		t.Helper()
+		headers["If-Match"] = ifMatch
+		headers["Content-Type"] = "application/json"
+		res, err := stolen.Raw("PUT", "/v1/sync/manifest", headers, bytes.NewReader(sent))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return res
+	}
+	forged := []byte(`{"blob":"` + testkit.EncodeB64([]byte("junk!!")) + `"}`)
+	if res := put("0", forged, signedHeaders(owner.ID, manifestPutFor(0, body), now+2)); res.Status != http.StatusForbidden || res.Map(t)["error"] != "bad-signature" {
+		t.Fatalf("a captured signature carried another body: %s", res)
+	}
+	if res := put("1", body, signedHeaders(owner.ID, manifestPutFor(0, body), now+3)); res.Status != http.StatusForbidden || res.Map(t)["error"] != "bad-signature" {
+		t.Fatalf("a captured signature carried another If-Match: %s", res)
+	}
+	if res := put("0", body, signedHeaders(owner.ID, manifestPutFor(0, body), now+4)); res.Status != http.StatusOK {
+		t.Fatalf("the exact request the signature covers: %s", res)
+	}
+}
+
+func TestAdminBackupStreamsToStandardOutputForKubectlExec(t *testing.T) {
+	f := newSyncFixture(t, "")
+	identity, err := age.GenerateX25519Identity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(serverBinary, "admin", "-config", f.env.proc.ConfigPath, "backup", "-recipient", identity.Recipient().String(), "-out", "-")
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("backup to stdout: %v\n%s", err, stderr.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("anything on stderr is noise for a pipeline: %q", stderr.String())
+	}
+	if bytes.HasPrefix(stdout.Bytes(), []byte("SQLite format 3")) {
+		t.Fatal("standard output carries plain SQLite")
+	}
+	reader, err := age.Decrypt(&stdout, identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain, _ := io.ReadAll(reader)
+	restored := filepath.Join(t.TempDir(), "restored.sqlite")
+	if err := os.WriteFile(restored, plain, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	db, err := store.Open(restored, store.JournalWAL, time.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if accounts, err := db.Accounts(t.Context()); err != nil || len(accounts) != 1 {
+		t.Fatalf("restored accounts: %+v %v", accounts, err)
+	}
+	if left, _ := filepath.Glob(filepath.Join(f.env.proc.DataDir, "backup-*")); len(left) != 0 {
+		t.Fatalf("plaintext scratch left in the data directory: %v", left)
 	}
 }

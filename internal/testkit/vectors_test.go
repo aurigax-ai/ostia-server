@@ -5,6 +5,7 @@ import (
 	"crypto/ecdh"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/json/v2"
 	"errors"
 	"fmt"
@@ -73,8 +74,12 @@ type authVectors struct {
 	ChallengeMsg      string `json:"challengeMessage"`
 	ChallengeSig      string `json:"challengeSignature"`
 	Timestamp         int64  `json:"timestamp"`
+	WrapSlot          string `json:"wrapSlot"`
 	WrapReadMsg       string `json:"wrapReadMessage"`
 	WrapReadSig       string `json:"wrapReadSignature"`
+	IfMatch           int64  `json:"ifMatch"`
+	ManifestBody      string `json:"manifestBody"`
+	ManifestBodyHash  string `json:"manifestBodyHash"`
 	ManifestPutMsg    string `json:"manifestPutMessage"`
 	ManifestPutSig    string `json:"manifestPutSignature"`
 }
@@ -178,9 +183,14 @@ func buildAuthVectors() authVectors {
 	v.ChallengeMsg = challengeContext + "\n" + v.DeviceID + "\n" + v.Nonce
 	v.ChallengeSig = b64.EncodeToString(ed25519.Sign(priv, []byte(v.ChallengeMsg)))
 	v.Timestamp = 1767225600000
-	v.WrapReadMsg = fmt.Sprintf("%s\n%s\n%d", wrapReadContext, v.DeviceID, v.Timestamp)
+	v.WrapSlot = "passphrase"
+	v.WrapReadMsg = fmt.Sprintf("%s\n%s\n%d\n%s", wrapReadContext, v.DeviceID, v.Timestamp, v.WrapSlot)
 	v.WrapReadSig = b64.EncodeToString(ed25519.Sign(priv, []byte(v.WrapReadMsg)))
-	v.ManifestPutMsg = fmt.Sprintf("%s\n%s\n%d", manifestPutContext, v.DeviceID, v.Timestamp)
+	v.IfMatch = 3
+	v.ManifestBody = `{"blob":"c2VhbGVkIG1hbmlmZXN0"}`
+	bodySum := sha256.Sum256([]byte(v.ManifestBody))
+	v.ManifestBodyHash = b64.EncodeToString(bodySum[:])
+	v.ManifestPutMsg = fmt.Sprintf("%s\n%s\n%d\n%d\n%s", manifestPutContext, v.DeviceID, v.Timestamp, v.IfMatch, v.ManifestBodyHash)
 	v.ManifestPutSig = b64.EncodeToString(ed25519.Sign(priv, []byte(v.ManifestPutMsg)))
 	return v
 }
@@ -258,10 +268,10 @@ func TestAuthVectorsAreStable(t *testing.T) {
 	v := buildAuthVectors()
 	checkVectorFile(t, "../../testdata/vectors/auth.json", v)
 
-	if v.WrapReadMsg != string(auth.WrapReadMessage(v.DeviceID, v.Timestamp)) {
+	if v.WrapReadMsg != string(auth.WrapReadMessage(v.DeviceID, v.Timestamp, v.WrapSlot)) {
 		t.Fatalf("wrap read message differs from the server's: %q", v.WrapReadMsg)
 	}
-	if v.ManifestPutMsg != string(auth.ManifestPutMessage(v.DeviceID, v.Timestamp)) {
+	if v.ManifestPutMsg != string(auth.ManifestPutMessage(v.DeviceID, v.Timestamp, v.IfMatch, []byte(v.ManifestBody))) {
 		t.Fatalf("manifest put message differs from the server's: %q", v.ManifestPutMsg)
 	}
 	if v.WrapReadSig == v.ManifestPutSig {

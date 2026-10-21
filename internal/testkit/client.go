@@ -6,6 +6,7 @@ import (
 	"crypto/ecdh"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json/v2"
@@ -13,6 +14,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -134,18 +136,22 @@ func (a *API) nextStamp() int64 {
 	return a.stamp
 }
 
-func (a *API) deviceSignature(method, path string) map[string]string {
+func (a *API) deviceSignature(method, path string, headers map[string]string, body []byte) map[string]string {
 	if a.Unsigned || a.ID == nil || a.ID.Sign == nil || a.Token == "" || a.ID.DeviceID == "" {
 		return nil
 	}
 	sign := func(message string) string {
 		return b64.EncodeToString(ed25519.Sign(a.ID.Sign, []byte(message)))
 	}
-	stamped := func(context string) map[string]string {
+	stamped := func(context string, fields ...string) map[string]string {
 		stamp := a.nextStamp()
+		message := context + "\n" + a.ID.DeviceID + "\n" + fmt.Sprint(stamp)
+		for _, field := range fields {
+			message += "\n" + field
+		}
 		return map[string]string{
 			"X-Device-Timestamp": fmt.Sprint(stamp),
-			"X-Device-Signature": sign(context + "\n" + a.ID.DeviceID + "\n" + fmt.Sprint(stamp)),
+			"X-Device-Signature": sign(message),
 		}
 	}
 	switch {
@@ -154,9 +160,14 @@ func (a *API) deviceSignature(method, path string) map[string]string {
 	case method == "POST" && path == "/v1/auth/elevation/approval":
 		return stamped(elevateContext)
 	case method == "GET" && (path == "/v1/sync/wraps/passphrase" || path == "/v1/sync/wraps/recovery"):
-		return stamped(wrapReadContext)
+		return stamped(wrapReadContext, strings.TrimPrefix(path, "/v1/sync/wraps/"))
 	case method == "PUT" && path == "/v1/sync/manifest":
-		return stamped(manifestPutContext)
+		ifMatch, err := strconv.ParseInt(strings.Trim(headers["If-Match"], `" `), 10, 64)
+		if err != nil {
+			return nil
+		}
+		sum := sha256.Sum256(body)
+		return stamped(manifestPutContext, fmt.Sprint(ifMatch), b64.EncodeToString(sum[:]))
 	case method == "DELETE" && strings.HasPrefix(path, "/v1/devices/"):
 		target := strings.TrimPrefix(path, "/v1/devices/")
 		return map[string]string{"X-Device-Signature": sign("ostia-server/revoke/v1\n" + a.ID.DeviceID + "\n" + target)}
@@ -189,8 +200,16 @@ func NewAPI(n Net, id *Identity) *API {
 }
 
 func (a *API) Raw(method, path string, headers map[string]string, body io.Reader) (Response, error) {
+	var raw []byte
+	if body != nil {
+		var err error
+		if raw, err = io.ReadAll(body); err != nil {
+			return Response{}, err
+		}
+		body = bytes.NewReader(raw)
+	}
 	merged := map[string]string{}
-	for k, v := range a.deviceSignature(method, path) {
+	for k, v := range a.deviceSignature(method, path, headers, raw) {
 		merged[k] = v
 	}
 	for k, v := range headers {

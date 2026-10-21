@@ -2,9 +2,12 @@ package server
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -55,21 +58,16 @@ func TestBackupIsEncryptedToTheRecipientAndRestorable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	out := filepath.Join(t.TempDir(), "backup.age")
-	if err := a.Backup(t.Context(), identity.Recipient(), out); err != nil {
+	var out bytes.Buffer
+	if err := a.Backup(t.Context(), identity.Recipient(), &out); err != nil {
 		t.Fatal(err)
 	}
 
-	info, err := os.Stat(out)
-	if err != nil || info.Mode().Perm() != 0o600 {
-		t.Fatalf("backup file: %v %v", info, err)
-	}
-	encrypted, _ := os.ReadFile(out)
+	encrypted := out.Bytes()
 	if bytes.Contains(encrypted, []byte(marker)) || bytes.HasPrefix(encrypted, []byte("SQLite format 3")) {
 		t.Fatal("the backup holds the database in clear")
 	}
-	left, _ := filepath.Glob(filepath.Join(a.Cfg.DataDir, "backup-*"))
-	if len(left) != 0 {
+	if left, _ := filepath.Glob(filepath.Join(a.Cfg.DataDir, scratchPattern)); len(left) != 0 {
 		t.Fatalf("a plaintext copy was left behind: %v", left)
 	}
 
@@ -97,26 +95,98 @@ func TestBackupIsEncryptedToTheRecipientAndRestorable(t *testing.T) {
 	}
 }
 
-func TestBackupRefusesToOverwriteAndLeavesNothingOnFailure(t *testing.T) {
+type failingWriter struct{ after int }
+
+func (w *failingWriter) Write(p []byte) (int, error) {
+	if w.after <= 0 {
+		return 0, errors.New("pipe closed")
+	}
+	w.after -= len(p)
+	return len(p), nil
+}
+
+func TestBackupLeavesNoPlaintextScratchWhenItFailsOrIsCancelled(t *testing.T) {
 	a := openTestAdmin(t)
 	identity, _ := age.GenerateX25519Identity()
-	out := filepath.Join(t.TempDir(), "taken.age")
-	if err := os.WriteFile(out, []byte("keep me"), 0o600); err != nil {
+	left := func() []string {
+		l, _ := filepath.Glob(filepath.Join(a.Cfg.DataDir, scratchPattern))
+		return l
+	}
+	if err := a.Backup(t.Context(), identity.Recipient(), &failingWriter{}); err == nil {
+		t.Fatal("a closed output was not reported")
+	}
+	if l := left(); len(l) != 0 {
+		t.Fatalf("scratch left after a failed write: %v", l)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if err := a.Backup(ctx, identity.Recipient(), io.Discard); err == nil {
+		t.Fatal("a cancelled backup succeeded")
+	}
+	if l := left(); len(l) != 0 {
+		t.Fatalf("scratch left after a cancel: %v", l)
+	}
+}
+
+func TestStartingTheServerRemovesScratchLeftByAKilledBackup(t *testing.T) {
+	cfg := config.Default()
+	cfg.DataDir = t.TempDir()
+	cfg.Domains.API = "api.test"
+	cfg.Listen.HTTPS, cfg.Listen.HTTP = "", "127.0.0.1:0"
+	stale := filepath.Join(cfg.DataDir, "backup-123456")
+	if err := os.MkdirAll(stale, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := a.Backup(t.Context(), identity.Recipient(), out); err == nil {
-		t.Fatal("an existing file was overwritten")
+	if err := os.WriteFile(filepath.Join(stale, "ostia.sqlite"), []byte("plaintext"), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	if kept, _ := os.ReadFile(out); string(kept) != "keep me" {
-		t.Fatalf("the existing file was changed: %q", kept)
+	srv, err := New(cfg, Options{})
+	if err != nil {
+		t.Fatal(err)
 	}
-	missing := filepath.Join(t.TempDir(), "no-such-dir", "backup.age")
-	if err := a.Backup(t.Context(), identity.Recipient(), missing); err == nil {
-		t.Fatal("a backup into a missing directory succeeded")
+	t.Cleanup(func() { _ = srv.DB.Close() })
+	if _, err := os.Stat(stale); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the stale plaintext copy survived the start: %v", err)
 	}
-	left, _ := filepath.Glob(filepath.Join(a.Cfg.DataDir, "backup-*"))
-	if len(left) != 0 {
-		t.Fatalf("scratch left behind after failures: %v", left)
+}
+
+func TestSweepTruncatesTheWALSoDeletedPagesDoNotLinger(t *testing.T) {
+	now := time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC)
+	cfg := config.Default()
+	cfg.DataDir = t.TempDir()
+	cfg.Domains.API = "api.test"
+	cfg.Listen.HTTPS, cfg.Listen.HTTP = "", "127.0.0.1:0"
+	cfg.Modules = config.Modules{Sync: true}
+	srv, err := New(cfg, Options{Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = srv.DB.Close() })
+	const marker = "Lingering-Device-Name-In-The-WAL"
+	if _, _, err := srv.DB.RegisterProvider(t.Context(), "github", "h", store.NewDevice{Name: marker, SignPub: make([]byte, 32), BoxPub: make([]byte, 32)}, 10); err != nil {
+		t.Fatal(err)
+	}
+	wal := filepath.Join(cfg.DataDir, "ostia.sqlite-wal")
+	raw, err := os.ReadFile(wal)
+	if err != nil || !bytes.Contains(raw, []byte(marker)) {
+		t.Fatalf("the test needs the marker in the WAL first: %v", err)
+	}
+	accounts, _ := srv.DB.Accounts(t.Context())
+	if err := srv.Auth.DeleteAccount(t.Context(), accounts[0].ID, nil); err != nil {
+		t.Fatal(err)
+	}
+	if raw, _ := os.ReadFile(wal); !bytes.Contains(raw, []byte(marker)) {
+		t.Fatal("expected the deleted row's old page to be in the WAL until a checkpoint")
+	}
+	srv.sweep(t.Context())
+	if raw, _ := os.ReadFile(wal); bytes.Contains(raw, []byte(marker)) {
+		t.Fatal("a deleted device name is still in the WAL after the sweep")
+	}
+	if info, err := os.Stat(wal); err != nil || info.Size() != 0 {
+		t.Fatalf("the WAL was not truncated: %v %v", info, err)
+	}
+	if raw, _ := os.ReadFile(filepath.Join(cfg.DataDir, "ostia.sqlite")); bytes.Contains(raw, []byte(marker)) {
+		t.Fatal("a deleted device name is in the database file")
 	}
 }
 
@@ -149,5 +219,18 @@ func TestSweepDeletesRevokedDevicesPastTheirRetention(t *testing.T) {
 	srv.sweep(t.Context())
 	if _, err := srv.DB.Device(t.Context(), gone.ID); err == nil {
 		t.Fatal("the revoked device row survived the sweep")
+	}
+}
+
+func TestRoutesThatCarryMegabytesGetTheBulkDeadline(t *testing.T) {
+	srv := everythingOn(t)
+	got := srv.mux.BulkPatterns()
+	slices.Sort(got)
+	want := []string{
+		"GET /v1/sync/blobs/{blobId}", "GET /v1/sync/manifest", "POST /v1/sync/rotate",
+		"PUT /v1/shares/{id}/blob", "PUT /v1/sync/blobs/{blobId}", "PUT /v1/sync/manifest",
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("bulk routes\n got %v\nwant %v", got, want)
 	}
 }

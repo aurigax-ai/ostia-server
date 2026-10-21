@@ -89,19 +89,34 @@ func WriteJSON(w http.ResponseWriter, status int, v any) {
 	_, _ = w.Write(body)
 }
 
-func ReadJSON(w http.ResponseWriter, r *http.Request, v any, max int64) error {
-	body := http.MaxBytesReader(w, r.Body, max)
-	if err := json.UnmarshalRead(body, v); err != nil {
+func ReadBody(w http.ResponseWriter, r *http.Request, max int64) ([]byte, error) {
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, max))
+	if err != nil {
 		var tooBig *http.MaxBytesError
 		if errors.As(err, &tooBig) {
-			return ErrTooLarge
+			return nil, ErrTooLarge
 		}
-		if errors.Is(err, io.EOF) {
-			return Errf(http.StatusBadRequest, "bad-request", "empty body")
-		}
+		return nil, Errf(http.StatusBadRequest, "bad-request", "unreadable body")
+	}
+	return body, nil
+}
+
+func DecodeJSON(body []byte, v any) error {
+	if len(body) == 0 {
+		return Errf(http.StatusBadRequest, "bad-request", "empty body")
+	}
+	if err := json.Unmarshal(body, v); err != nil {
 		return Errf(http.StatusBadRequest, "bad-request", "invalid JSON body")
 	}
 	return nil
+}
+
+func ReadJSON(w http.ResponseWriter, r *http.Request, v any, max int64) error {
+	body, err := ReadBody(w, r, max)
+	if err != nil {
+		return err
+	}
+	return DecodeJSON(body, v)
 }
 
 type Proxies struct {
@@ -238,6 +253,7 @@ func Deadlines(read, write time.Duration, next http.Handler) http.Handler {
 type Mux struct {
 	*http.ServeMux
 	patterns []string
+	bulk     []string
 	jsonWait time.Duration
 	bulkWait time.Duration
 }
@@ -253,7 +269,10 @@ func (m *Mux) Handle(pattern string, handler http.Handler) {
 
 func (m *Mux) HandleBulk(pattern string, handler http.Handler) {
 	m.patterns = append(m.patterns, pattern)
+	m.bulk = append(m.bulk, pattern)
 	m.ServeMux.Handle(pattern, Deadlines(m.bulkWait, m.bulkWait, handler))
 }
 
 func (m *Mux) Patterns() []string { return append([]string(nil), m.patterns...) }
+
+func (m *Mux) BulkPatterns() []string { return append([]string(nil), m.bulk...) }

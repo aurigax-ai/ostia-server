@@ -98,7 +98,7 @@ ostia-server admin [-config file] <command>
     disable-publish <account-id>       stop an account from publishing
     enable-publish <account-id>        allow an account to publish again
     delete-account <account-id>        remove an account and everything it stored
-    backup -recipient <age1...> -out <file>   write the database, encrypted to an age public key
+    backup -recipient <age1...> -out <file|->   write the database, encrypted to an age public key (- is standard output)
 ostia-server version
 `
 

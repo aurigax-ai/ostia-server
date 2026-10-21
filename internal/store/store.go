@@ -46,8 +46,9 @@ func Open(path, journal string, now func() time.Time) (*DB, error) {
 		return nil, err
 	}
 	q := url.Values{}
-	q.Add("_pragma", "journal_mode("+journal+")")
 	q.Add("_pragma", "busy_timeout(5000)")
+	q.Add("_pragma", "journal_mode("+journal+")")
+	q.Add("_pragma", "journal_size_limit(4194304)")
 	q.Add("_pragma", "foreign_keys(1)")
 	q.Add("_pragma", "synchronous(NORMAL)")
 	q.Add("_pragma", "secure_delete(1)")

@@ -10,7 +10,16 @@ import (
 	"filippo.io/age"
 )
 
-func (a *Admin) Backup(ctx context.Context, recipient age.Recipient, out string) (err error) {
+const scratchPattern = "backup-*"
+
+func removeScratch(dataDir string) {
+	stale, _ := filepath.Glob(filepath.Join(dataDir, scratchPattern))
+	for _, dir := range stale {
+		_ = os.RemoveAll(dir)
+	}
+}
+
+func (a *Admin) Backup(ctx context.Context, recipient age.Recipient, out io.Writer) error {
 	scratch, err := os.MkdirTemp(a.Cfg.DataDir, "backup-")
 	if err != nil {
 		return err
@@ -25,20 +34,22 @@ func (a *Admin) Backup(ctx context.Context, recipient age.Recipient, out string)
 		return err
 	}
 	defer src.Close()
-	dst, err := os.OpenFile(out, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	enc, err := age.Encrypt(out, recipient)
 	if err != nil {
 		return err
 	}
-	defer func() {
-		if err != nil {
-			_ = os.Remove(out)
-		}
-	}()
-	enc, err := age.Encrypt(dst, recipient)
-	if err != nil {
-		_ = dst.Close()
-		return err
+	_, copyErr := io.Copy(enc, &ctxReader{ctx: ctx, r: src})
+	return errors.Join(copyErr, enc.Close())
+}
+
+type ctxReader struct {
+	ctx context.Context
+	r   io.Reader
+}
+
+func (c *ctxReader) Read(p []byte) (int, error) {
+	if err := c.ctx.Err(); err != nil {
+		return 0, err
 	}
-	_, copyErr := io.Copy(enc, src)
-	return errors.Join(copyErr, enc.Close(), dst.Close())
+	return c.r.Read(p)
 }

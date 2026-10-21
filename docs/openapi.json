@@ -2563,7 +2563,7 @@
             "name": "X-Device-Signature",
             "in": "header",
             "required": true,
-            "description": "Base64url Ed25519 signature over \"ostia-server/manifest-put/v1\\n<device id>\\n<timestamp>\"",
+            "description": "Base64url Ed25519 signature over \"ostia-server/manifest-put/v1\\n<device id>\\n<timestamp>\\n<If-Match as a decimal number>\\n<unpadded base64url SHA-256 of the exact request body>\"",
             "schema": {
               "type": "string"
             }
@@ -2992,7 +2992,7 @@
             "name": "X-Device-Signature",
             "in": "header",
             "required": false,
-            "description": "Required for the passphrase and recovery slots: base64url Ed25519 signature over \"ostia-server/wrap-read/v1\\n<device id>\\n<timestamp>\"",
+            "description": "Required for the passphrase and recovery slots: base64url Ed25519 signature over \"ostia-server/wrap-read/v1\\n<device id>\\n<timestamp>\\n<slot>\"",
             "schema": {
               "type": "string"
             }

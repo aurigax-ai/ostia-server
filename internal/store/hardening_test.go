@@ -230,3 +230,61 @@ func TestADatabaseInWALModeConvertsToDeleteMode(t *testing.T) {
 		t.Fatalf("data lost in the conversion: %v %v", devices, err)
 	}
 }
+
+func TestSwitchingModeWaitsForOtherConnectionsInsteadOfFailingAtOnce(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "db.sqlite")
+	current, err := Open(path, JournalDelete, time.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	register(t, current, "github", "h")
+	reader, err := current.sql.Conn(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reader.ExecContext(t.Context(), `BEGIN DEFERRED`); err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	if err := reader.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM accounts`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	result := make(chan error, 1)
+	go func() {
+		d, err := Open(path, JournalWAL, time.Now)
+		if err == nil {
+			_ = d.Close()
+		}
+		result <- err
+	}()
+	select {
+	case err := <-result:
+		t.Fatalf("the switch did not wait for the other connection: %v", err)
+	case <-time.After(300 * time.Millisecond):
+	}
+	_, _ = reader.ExecContext(t.Context(), `ROLLBACK`)
+	_ = reader.Close()
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatalf("the switch failed after the other reader left: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the switch never finished")
+	}
+	_ = current.Close()
+}
+
+func TestJournalSizeIsLimitedAndCheckpointTruncatesTheWAL(t *testing.T) {
+	d, _ := open(t)
+	if got := pragma(t, d, "journal_size_limit"); got != "4194304" {
+		t.Fatalf("journal_size_limit is %q", got)
+	}
+	register(t, d, "github", "h")
+	if err := d.CheckpointWAL(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if got := pragma(t, d, "journal_mode"); got != "wal" {
+		t.Fatalf("%q", got)
+	}
+}

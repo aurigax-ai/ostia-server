@@ -81,6 +81,7 @@ func New(cfg config.Config, opts Options) (*Server, error) {
 	if err := mkdirAll(cfg.DataDir); err != nil {
 		return nil, err
 	}
+	removeScratch(cfg.DataDir)
 	db, err := store.Open(filepath.Join(cfg.DataDir, "ostia.sqlite"), cfg.Storage.SQLiteJournal, now)
 	if err != nil {
 		return nil, err
@@ -389,6 +390,7 @@ func (s *Server) sweep(ctx context.Context) {
 		"invites":      s.DB.SweepInvites,
 		"approvals":    s.DB.SweepApprovals,
 		"push tickets": s.DB.SweepPushTickets,
+		"wal":          s.DB.CheckpointWAL,
 		"revoked devices": func(ctx context.Context) error {
 			return s.DB.SweepRevokedDevices(ctx, s.Cfg.Auth.RevokedDeviceRetention.Std())
 		},

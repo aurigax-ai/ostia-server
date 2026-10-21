@@ -43,8 +43,8 @@ func TestAllConsumesNothingWhenOneRefuses(t *testing.T) {
 	if both.Allow("k") {
 		t.Fatal("second request allowed past the one-per-hour rule")
 	}
-	if slow.keys["k"].tokens != 4 {
-		t.Fatalf("refused request still consumed from the other limiter: %v", slow.keys["k"].tokens)
+	if slow.keys["k"].Value.(*bucket).tokens != 4 {
+		t.Fatalf("refused request still consumed from the other limiter: %v", slow.keys["k"].Value.(*bucket).tokens)
 	}
 }
 
@@ -62,25 +62,49 @@ func TestSweepDropsIdleKeys(t *testing.T) {
 	}
 }
 
-func TestKeysBeyondTheCapShareOneOverflowBucket(t *testing.T) {
+func TestTheOldestKeyIsEvictedWhenTheTableIsFull(t *testing.T) {
 	clock := &fakeClock{t: time.Unix(1000, 0)}
 	l := New(Rule{Every: time.Hour, Burst: 2, MaxKeys: 3}, clock.now)
 	for _, key := range []string{"a", "b", "c"} {
-		if !l.Allow(key) {
-			t.Fatalf("%s refused", key)
+		l.Allow(key)
+		l.Allow(key)
+		if l.Allow(key) {
+			t.Fatalf("%s got past its burst", key)
 		}
 	}
-	if !l.Allow("d") || !l.Allow("e") {
-		t.Fatal("the overflow bucket refused inside its burst")
+	l.Allow("a")
+	if !l.Allow("d") {
+		t.Fatal("a new key was refused instead of getting its own bucket")
 	}
-	if l.Allow("f") {
-		t.Fatal("new keys past the cap do not share one budget")
+	if l.Len() != 3 {
+		t.Fatalf("the table grew past the cap: %d", l.Len())
 	}
-	if l.Len() != 4 {
-		t.Fatalf("the table grew past the cap and its overflow bucket: %d", l.Len())
+	if _, ok := l.keys["b"]; ok {
+		t.Fatal("the least recently used key (b) was kept")
 	}
-	if !l.Allow("a") {
-		t.Fatal("a key tracked before the cap lost its own bucket")
+	for _, key := range []string{"a", "c", "d"} {
+		if _, ok := l.keys[key]; !ok {
+			t.Fatalf("%s was evicted", key)
+		}
+	}
+	for range 2 {
+		if !l.Allow("b") {
+			t.Fatal("an evicted key did not start over with a full burst")
+		}
+	}
+}
+
+func TestAFloodOfNewKeysNeverStarvesALaterNewKey(t *testing.T) {
+	clock := &fakeClock{t: time.Unix(1000, 0)}
+	l := New(Rule{Every: time.Hour, Burst: 1, MaxKeys: 100}, clock.now)
+	for i := range 10000 {
+		l.Allow(string(rune('a'+i%26)) + string(rune(i)))
+	}
+	if l.Len() != 100 {
+		t.Fatalf("table size %d", l.Len())
+	}
+	if !l.Allow("a real client") {
+		t.Fatal("a new client shared a budget with the flood")
 	}
 }
 
@@ -89,17 +113,18 @@ func TestSweepFreesRoomUnderTheCap(t *testing.T) {
 	l := New(Rule{Every: time.Second, Burst: 1, MaxKeys: 2}, clock.now)
 	l.Allow("a")
 	l.Allow("b")
-	l.Allow("c")
 	clock.t = clock.t.Add(time.Minute)
 	l.Sweep()
-	if l.Len() != 0 {
-		t.Fatalf("refilled buckets were kept: %d", l.Len())
+	if l.Len() != 0 || l.order.Len() != 0 {
+		t.Fatalf("refilled buckets were kept: %d %d", l.Len(), l.order.Len())
 	}
-	if !l.Allow("c") || !l.Allow("d") {
-		t.Fatal("keys refused after the table was swept")
-	}
-	if _, ok := l.keys["d"]; !ok {
-		t.Fatal("a new key did not get its own bucket once there was room")
+	l.Allow("c")
+	clock.t = clock.t.Add(500 * time.Millisecond)
+	l.Allow("d")
+	clock.t = clock.t.Add(700 * time.Millisecond)
+	l.Sweep()
+	if _, ok := l.keys["d"]; !ok || l.Len() != 1 || l.order.Len() != 1 {
+		t.Fatalf("sweep kept the wrong buckets: %d %d", l.Len(), l.order.Len())
 	}
 }
 
@@ -111,7 +136,7 @@ func TestAllHonoursTheCapToo(t *testing.T) {
 	both.Allow("x")
 	both.Allow("y")
 	both.Allow("z")
-	if a.Len() > 2 || b.Len() > 2 {
+	if a.Len() != 1 || b.Len() != 1 {
 		t.Fatalf("combined limiter grew past its caps: %d %d", a.Len(), b.Len())
 	}
 }

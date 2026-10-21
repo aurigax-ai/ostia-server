@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"crypto/ed25519"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"net/http"
@@ -420,8 +421,12 @@ func (s *Service) deviceInvite(w http.ResponseWriter, r *http.Request, p Princip
 	return nil
 }
 
-func StampedMessage(context, deviceID string, ms int64) []byte {
-	return []byte(context + "\n" + deviceID + "\n" + strconv.FormatInt(ms, 10))
+func StampedMessage(context, deviceID string, ms int64, fields ...string) []byte {
+	message := context + "\n" + deviceID + "\n" + strconv.FormatInt(ms, 10)
+	for _, field := range fields {
+		message += "\n" + field
+	}
+	return []byte(message)
 }
 
 func InviteMessage(deviceID string, ms int64) []byte {
@@ -432,15 +437,20 @@ func ElevateMessage(deviceID string, ms int64) []byte {
 	return StampedMessage(ElevateContext, deviceID, ms)
 }
 
-func WrapReadMessage(deviceID string, ms int64) []byte {
-	return StampedMessage(WrapReadContext, deviceID, ms)
+func WrapReadMessage(deviceID string, ms int64, slot string) []byte {
+	return StampedMessage(WrapReadContext, deviceID, ms, slot)
 }
 
-func ManifestPutMessage(deviceID string, ms int64) []byte {
-	return StampedMessage(ManifestPutContext, deviceID, ms)
+func ManifestPutFields(ifMatch int64, body []byte) []string {
+	sum := sha256.Sum256(body)
+	return []string{strconv.FormatInt(ifMatch, 10), httpx.EncodeB64(sum[:])}
 }
 
-func (s *Service) RequireSignedTimestamp(r *http.Request, p Principal, context string) error {
+func ManifestPutMessage(deviceID string, ms int64, ifMatch int64, body []byte) []byte {
+	return StampedMessage(ManifestPutContext, deviceID, ms, ManifestPutFields(ifMatch, body)...)
+}
+
+func (s *Service) RequireSignedTimestamp(r *http.Request, p Principal, context string, fields ...string) error {
 	stamp, err := strconv.ParseInt(r.Header.Get(timestampHeader), 10, 64)
 	if err != nil {
 		return httpx.Errf(http.StatusForbidden, "device-signature-required", "send X-Device-Timestamp (milliseconds) and sign it with the device key")
@@ -448,7 +458,7 @@ func (s *Service) RequireSignedTimestamp(r *http.Request, p Principal, context s
 	if skew := s.Now().Sub(time.UnixMilli(stamp)); skew > signatureSkew || skew < -signatureSkew {
 		return httpx.Errf(http.StatusForbidden, "stale-signature", "the signed timestamp is too far from the server's clock")
 	}
-	if err := s.requireDeviceSignature(r, p, StampedMessage(context, p.DeviceID, stamp)); err != nil {
+	if err := s.requireDeviceSignature(r, p, StampedMessage(context, p.DeviceID, stamp, fields...)); err != nil {
 		return err
 	}
 	fresh, err := s.DB.AdvanceSigningCounter(r.Context(), p.DeviceID, stamp)
