@@ -1,0 +1,28 @@
+[Unit]
+Description=Ostia server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=ostia-server
+Group=ostia-server
+ExecStart=/usr/local/bin/ostia-server -config /etc/ostia-server/ostia-server.toml
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=2s
+StateDirectory=ostia-server
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+ReadWritePaths=/var/lib/ostia-server
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

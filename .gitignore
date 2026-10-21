@@ -1,0 +1,6 @@
+/data/
+/ostia-server
+/ostia-server.toml
+*.test
+*.out
+node_modules/

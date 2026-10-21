@@ -1,0 +1,17 @@
+services:
+  ostia-server:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    restart: unless-stopped
+    ports:
+      - "443:443"
+    volumes:
+      - ./ostia-server.toml:/etc/ostia-server/ostia-server.toml:ro
+      - ./certs:/etc/ostia-server/certs:ro
+      - data:/var/lib/ostia-server
+    sysctls:
+      net.ipv4.ip_unprivileged_port_start: 0
+
+volumes:
+  data:

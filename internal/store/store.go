@@ -1,0 +1,90 @@
+package store
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"net/url"
+	"time"
+
+	_ "modernc.org/sqlite"
+)
+
+var (
+	ErrNotFound        = errors.New("not found")
+	ErrConflict        = errors.New("conflict")
+	ErrVersionMismatch = errors.New("version mismatch")
+	ErrQuota           = errors.New("quota exceeded")
+	ErrLimit           = errors.New("limit reached")
+	ErrGone            = errors.New("gone")
+)
+
+var migrations = []string{schemaV1}
+
+type DB struct {
+	sql *sql.DB
+	now func() time.Time
+}
+
+func Open(path string, now func() time.Time) (*DB, error) {
+	q := url.Values{}
+	q.Add("_pragma", "journal_mode(WAL)")
+	q.Add("_pragma", "busy_timeout(5000)")
+	q.Add("_pragma", "foreign_keys(1)")
+	q.Add("_pragma", "synchronous(NORMAL)")
+	q.Set("_txlock", "immediate")
+	conn, err := sql.Open("sqlite", "file:"+path+"?"+q.Encode())
+	if err != nil {
+		return nil, err
+	}
+	conn.SetMaxOpenConns(8)
+	d := &DB{sql: conn, now: now}
+	if err := d.migrate(context.Background()); err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
+	return d, nil
+}
+
+func (d *DB) Close() error { return d.sql.Close() }
+
+func (d *DB) ms() int64 { return d.now().UnixMilli() }
+
+func (d *DB) migrate(ctx context.Context) error {
+	return d.tx(ctx, func(tx *sql.Tx) error {
+		var version int
+		if err := tx.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&version); err != nil {
+			return err
+		}
+		if version > len(migrations) {
+			return fmt.Errorf("database schema version %d is newer than this build supports (%d)", version, len(migrations))
+		}
+		for i := version; i < len(migrations); i++ {
+			if _, err := tx.ExecContext(ctx, migrations[i]); err != nil {
+				return fmt.Errorf("migration %d: %w", i+1, err)
+			}
+		}
+		_, err := tx.ExecContext(ctx, fmt.Sprintf(`PRAGMA user_version = %d`, len(migrations)))
+		return err
+	})
+}
+
+func (d *DB) tx(ctx context.Context, fn func(tx *sql.Tx) error) error {
+	tx, err := d.sql.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	if err := fn(tx); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	return tx.Commit()
+}
+
+func notFound(err error) error {
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	}
+	return err
+}

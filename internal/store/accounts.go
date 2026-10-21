@@ -1,0 +1,112 @@
+package store
+
+import (
+	"context"
+	"database/sql"
+
+	"github.com/aurigax-ai/ostia-server/internal/ids"
+)
+
+type Account struct {
+	ID              string
+	Provider        string
+	CreatedAt       int64
+	PublishDisabled bool
+}
+
+func scanAccount(row interface{ Scan(...any) error }) (Account, error) {
+	var a Account
+	var disabled int
+	err := row.Scan(&a.ID, &a.Provider, &a.CreatedAt, &disabled)
+	a.PublishDisabled = disabled != 0
+	return a, notFound(err)
+}
+
+const accountColumns = `id, provider, created_at, publish_disabled`
+
+func (d *DB) Account(ctx context.Context, id string) (Account, error) {
+	return scanAccount(d.sql.QueryRowContext(ctx, `SELECT `+accountColumns+` FROM accounts WHERE id = ?`, id))
+}
+
+func (d *DB) Accounts(ctx context.Context) ([]Account, error) {
+	rows, err := d.sql.QueryContext(ctx, `SELECT `+accountColumns+` FROM accounts ORDER BY created_at`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Account
+	for rows.Next() {
+		a, err := scanAccount(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
+func (d *DB) SetPublishDisabled(ctx context.Context, id string, disabled bool) error {
+	flag := 0
+	if disabled {
+		flag = 1
+	}
+	res, err := d.sql.ExecContext(ctx, `UPDATE accounts SET publish_disabled = ? WHERE id = ?`, flag, id)
+	return affected(res, err)
+}
+
+func affected(res sql.Result, err error) error {
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (d *DB) BlobKeysOf(ctx context.Context, accountID string) ([]string, error) {
+	var keys []string
+	rows, err := d.sql.QueryContext(ctx, `SELECT blob_id FROM sync_blobs WHERE account_id = ?`, accountID)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
+		keys = append(keys, SyncBlobKey(accountID, id))
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	shares, err := d.sql.QueryContext(ctx, `SELECT id FROM shares WHERE account_id = ? AND uploaded_at > 0`, accountID)
+	if err != nil {
+		return nil, err
+	}
+	defer shares.Close()
+	for shares.Next() {
+		var id string
+		if err := shares.Scan(&id); err != nil {
+			return nil, err
+		}
+		keys = append(keys, ShareBlobKey(id))
+	}
+	return keys, shares.Err()
+}
+
+func (d *DB) DeleteAccount(ctx context.Context, id string) error {
+	res, err := d.sql.ExecContext(ctx, `DELETE FROM accounts WHERE id = ?`, id)
+	return affected(res, err)
+}
+
+func SyncBlobKey(accountID, blobID string) string { return "sync/" + accountID + "/" + blobID }
+
+func ShareBlobKey(shareID string) string { return "share/" + shareID }
+
+func newAccountID() string { return ids.New() }

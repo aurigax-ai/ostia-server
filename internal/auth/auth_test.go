@@ -1,0 +1,494 @@
+package auth
+
+import (
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/json/v2"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/aurigax-ai/ostia-server/internal/blob"
+	"github.com/aurigax-ai/ostia-server/internal/config"
+	"github.com/aurigax-ai/ostia-server/internal/httpx"
+	"github.com/aurigax-ai/ostia-server/internal/serverkey"
+	"github.com/aurigax-ai/ostia-server/internal/store"
+)
+
+type env struct {
+	svc   *Service
+	srv   *httptest.Server
+	clock *time.Time
+	gh    *fakeGitHub
+}
+
+type fakeGitHub struct {
+	srv      *httptest.Server
+	pending  atomic.Int32
+	userID   atomic.Int64
+	polls    atomic.Int32
+	slowDown atomic.Bool
+}
+
+func newFakeGitHub() *fakeGitHub {
+	f := &fakeGitHub{}
+	f.userID.Store(4242)
+	mux := httpx.NewMux()
+	mux.HandleFunc("POST /login/device/code", func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		if r.Form.Get("client_id") != "client-1" {
+			http.Error(w, "bad client", http.StatusBadRequest)
+			return
+		}
+		httpx.WriteJSON(w, 200, map[string]any{"device_code": "dev-code", "user_code": "ABCD-1234", "verification_uri": "https://github.test/login/device", "expires_in": 900, "interval": 5})
+	})
+	mux.HandleFunc("POST /login/oauth/access_token", func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		f.polls.Add(1)
+		if r.Form.Get("device_code") != "dev-code" || r.Form.Get("grant_type") != "urn:ietf:params:oauth:grant-type:device_code" {
+			httpx.WriteJSON(w, 200, map[string]any{"error": "bad_verification_code"})
+			return
+		}
+		if f.slowDown.CompareAndSwap(true, false) {
+			httpx.WriteJSON(w, 200, map[string]any{"error": "slow_down"})
+			return
+		}
+		if f.pending.Add(-1) >= 0 {
+			httpx.WriteJSON(w, 200, map[string]any{"error": "authorization_pending"})
+			return
+		}
+		httpx.WriteJSON(w, 200, map[string]any{"access_token": "gho_token"})
+	})
+	mux.HandleFunc("GET /user", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer gho_token" {
+			http.Error(w, "no", http.StatusUnauthorized)
+			return
+		}
+		httpx.WriteJSON(w, 200, map[string]any{"id": f.userID.Load(), "login": "someone"})
+	})
+	f.srv = httptest.NewServer(mux)
+	return f
+}
+
+func newEnv(t *testing.T) *env {
+	t.Helper()
+	now := time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC)
+	e := &env{clock: &now, gh: newFakeGitHub()}
+	t.Cleanup(e.gh.srv.Close)
+	clock := func() time.Time { return *e.clock }
+	db, err := store.Open(filepath.Join(t.TempDir(), "db"), clock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	blobs, _ := blob.NewDisk(t.TempDir())
+	cfg := config.Default().Auth
+	e.svc = &Service{
+		DB: db, Blobs: blobs, Key: serverkey.New(make([]byte, 32)), Cfg: cfg, Now: clock,
+		GitHub: &GitHub{ClientID: "client-1", BaseURL: e.gh.srv.URL, APIURL: e.gh.srv.URL, Client: http.DefaultClient},
+		Guard:  &httpx.Guard{IP: func(r *http.Request) string { return "1.1.1.1" }, Now: clock},
+	}
+	mux := httpx.NewMux()
+	e.svc.Mount(mux)
+	e.srv = httptest.NewServer(mux)
+	t.Cleanup(e.srv.Close)
+	return e
+}
+
+type device struct {
+	sign ed25519.PrivateKey
+	box  []byte
+	name string
+	id   string
+}
+
+func newDevice(name string) *device {
+	_, priv, _ := ed25519.GenerateKey(rand.Reader)
+	box := make([]byte, 32)
+	_, _ = rand.Read(box)
+	return &device{sign: priv, box: box, name: name}
+}
+
+func (d *device) registration() map[string]any {
+	pub := d.sign.Public().(ed25519.PublicKey)
+	return map[string]any{
+		"name":    d.name,
+		"signPub": httpx.EncodeB64(pub),
+		"boxPub":  httpx.EncodeB64(d.box),
+		"proof":   httpx.EncodeB64(ed25519.Sign(d.sign, registrationMessage(pub, d.box))),
+	}
+}
+
+func (e *env) post(t *testing.T, path, token string, body any) (int, map[string]any) {
+	t.Helper()
+	return e.call(t, "POST", path, token, body)
+}
+
+func (e *env) call(t *testing.T, method, path, token string, body any) (int, map[string]any) {
+	t.Helper()
+	var rd *strings.Reader
+	if body != nil {
+		raw, _ := json.Marshal(body)
+		rd = strings.NewReader(string(raw))
+	} else {
+		rd = strings.NewReader("")
+	}
+	req, _ := http.NewRequest(method, e.srv.URL+path, rd)
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	var out map[string]any
+	_ = json.UnmarshalRead(res.Body, &out)
+	return res.StatusCode, out
+}
+
+func (e *env) invite(t *testing.T, accountID string) string {
+	t.Helper()
+	code, _, err := e.svc.CreateInvite(t.Context(), accountID, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return code
+}
+
+func (e *env) signIn(t *testing.T, d *device, code string) {
+	t.Helper()
+	body := d.registration()
+	body["code"] = code
+	status, out := e.post(t, "/v1/auth/invite", "", body)
+	if status != 201 {
+		t.Fatalf("register %d %v", status, out)
+	}
+	d.id = out["deviceId"].(string)
+}
+
+func (e *env) session(t *testing.T, d *device) string {
+	t.Helper()
+	status, out := e.post(t, "/v1/auth/challenge", "", map[string]string{"deviceId": d.id})
+	if status != 200 {
+		t.Fatalf("challenge %d", status)
+	}
+	nonce := out["nonce"].(string)
+	sig := ed25519.Sign(d.sign, ChallengeMessage(d.id, nonce))
+	status, out = e.post(t, "/v1/auth/verify", "", map[string]string{"deviceId": d.id, "nonce": nonce, "sig": httpx.EncodeB64(sig)})
+	if status != 200 {
+		t.Fatalf("verify %d %v", status, out)
+	}
+	return out["token"].(string)
+}
+
+func TestInviteRegistrationThenKeySession(t *testing.T) {
+	e := newEnv(t)
+	d := newDevice("desktop")
+	e.signIn(t, d, e.invite(t, ""))
+	token := e.session(t, d)
+	status, out := e.call(t, "GET", "/v1/devices", token, nil)
+	list, _ := out["devices"].([]any)
+	if status != 200 || len(list) != 1 || list[0].(map[string]any)["current"] != true {
+		t.Fatalf("devices %d %v", status, out)
+	}
+}
+
+func TestRegistrationRefusals(t *testing.T) {
+	e := newEnv(t)
+	d := newDevice("desktop")
+	body := d.registration()
+	body["code"] = "nope"
+	if status, out := e.post(t, "/v1/auth/invite", "", body); status != 403 || out["error"] != "invalid-invite" {
+		t.Fatalf("unknown code: %d %v", status, out)
+	}
+	code := e.invite(t, "")
+	body = d.registration()
+	body["code"] = code
+	body["proof"] = httpx.EncodeB64(make([]byte, 64))
+	if status, out := e.post(t, "/v1/auth/invite", "", body); status != 400 || out["error"] != "bad-proof" {
+		t.Fatalf("forged proof: %d %v", status, out)
+	}
+	body = d.registration()
+	body["code"] = code
+	body["name"] = "\x07bell"
+	if status, _ := e.post(t, "/v1/auth/invite", "", body); status != 400 {
+		t.Fatalf("control characters in name: %d", status)
+	}
+	body = d.registration()
+	body["code"] = strings.ToUpper(code)
+	if status, _ := e.post(t, "/v1/auth/invite", "", body); status != 201 {
+		t.Fatalf("code is typed by humans and must match regardless of case: %d", status)
+	}
+	if status, _ := e.post(t, "/v1/auth/invite", "", body); status != 403 {
+		t.Fatalf("invite reused: %d", status)
+	}
+}
+
+func TestChallengeIsSingleUseAndBoundToTheDevice(t *testing.T) {
+	e := newEnv(t)
+	d := newDevice("desktop")
+	e.signIn(t, d, e.invite(t, ""))
+	other := newDevice("other")
+	e.signIn(t, other, e.invite(t, ""))
+
+	_, out := e.post(t, "/v1/auth/challenge", "", map[string]string{"deviceId": d.id})
+	nonce := out["nonce"].(string)
+	sig := httpx.EncodeB64(ed25519.Sign(d.sign, ChallengeMessage(d.id, nonce)))
+	verify := map[string]string{"deviceId": d.id, "nonce": nonce, "sig": sig}
+	if status, _ := e.post(t, "/v1/auth/verify", "", verify); status != 200 {
+		t.Fatal("first verify failed")
+	}
+	if status, _ := e.post(t, "/v1/auth/verify", "", verify); status != 401 {
+		t.Fatalf("nonce replayed: %d", status)
+	}
+
+	_, out = e.post(t, "/v1/auth/challenge", "", map[string]string{"deviceId": d.id})
+	nonce = out["nonce"].(string)
+	forged := httpx.EncodeB64(ed25519.Sign(other.sign, ChallengeMessage(d.id, nonce)))
+	if status, _ := e.post(t, "/v1/auth/verify", "", map[string]string{"deviceId": d.id, "nonce": nonce, "sig": forged}); status != 401 {
+		t.Fatalf("signature of another key accepted: %d", status)
+	}
+
+	_, out = e.post(t, "/v1/auth/challenge", "", map[string]string{"deviceId": d.id})
+	nonce = out["nonce"].(string)
+	sig = httpx.EncodeB64(ed25519.Sign(d.sign, ChallengeMessage(d.id, nonce)))
+	*e.clock = e.clock.Add(2 * time.Minute)
+	if status, _ := e.post(t, "/v1/auth/verify", "", map[string]string{"deviceId": d.id, "nonce": nonce, "sig": sig}); status != 401 {
+		t.Fatalf("expired nonce accepted: %d", status)
+	}
+}
+
+func TestUnknownDeviceGetsAChallengeButNeverASession(t *testing.T) {
+	e := newEnv(t)
+	status, out := e.post(t, "/v1/auth/challenge", "", map[string]string{"deviceId": "doesnotexist"})
+	if status != 200 || out["nonce"] == "" {
+		t.Fatalf("challenge must not reveal whether a device exists: %d %v", status, out)
+	}
+}
+
+func TestSessionExpiresAndRoutesNeedBearer(t *testing.T) {
+	e := newEnv(t)
+	d := newDevice("desktop")
+	e.signIn(t, d, e.invite(t, ""))
+	token := e.session(t, d)
+	for _, route := range [][2]string{{"GET", "/v1/devices"}, {"POST", "/v1/devices/invite"}, {"DELETE", "/v1/devices/x"}, {"DELETE", "/v1/account"}, {"DELETE", "/v1/auth/session"}} {
+		if status, _ := e.call(t, route[0], route[1], "", nil); status != 401 {
+			t.Errorf("%s %s without a bearer: %d", route[0], route[1], status)
+		}
+		if status, _ := e.call(t, route[0], route[1], "wrong", nil); status != 401 {
+			t.Errorf("%s %s with a wrong bearer: %d", route[0], route[1], status)
+		}
+	}
+	*e.clock = e.clock.Add(2 * time.Hour)
+	if status, _ := e.call(t, "GET", "/v1/devices", token, nil); status != 401 {
+		t.Fatalf("expired session: %d", status)
+	}
+}
+
+func TestLogoutEndsTheSession(t *testing.T) {
+	e := newEnv(t)
+	d := newDevice("desktop")
+	e.signIn(t, d, e.invite(t, ""))
+	token := e.session(t, d)
+	if status, _ := e.call(t, "DELETE", "/v1/auth/session", token, nil); status != 204 {
+		t.Fatalf("logout %d", status)
+	}
+	if status, _ := e.call(t, "GET", "/v1/devices", token, nil); status != 401 {
+		t.Fatalf("session survived logout: %d", status)
+	}
+}
+
+func TestDeviceInviteJoinsTheSameAccountAndRevokeKicksIt(t *testing.T) {
+	e := newEnv(t)
+	laptop := newDevice("laptop")
+	e.signIn(t, laptop, e.invite(t, ""))
+	token := e.session(t, laptop)
+
+	status, out := e.post(t, "/v1/devices/invite", token, nil)
+	if status != 201 {
+		t.Fatalf("device invite %d %v", status, out)
+	}
+	phone := newDevice("desktop-2")
+	e.signIn(t, phone, out["code"].(string))
+	phoneToken := e.session(t, phone)
+
+	_, list := e.call(t, "GET", "/v1/devices", token, nil)
+	if len(list["devices"].([]any)) != 2 {
+		t.Fatalf("both devices must share an account: %v", list)
+	}
+
+	var revoked []string
+	e.svc.Hooks.DeviceRevoked = func(id string) { revoked = append(revoked, id) }
+	if status, _ := e.call(t, "DELETE", "/v1/devices/"+phone.id, token, nil); status != 204 {
+		t.Fatalf("revoke %d", status)
+	}
+	if len(revoked) != 1 || revoked[0] != phone.id {
+		t.Fatalf("hook: %v", revoked)
+	}
+	if status, _ := e.call(t, "GET", "/v1/devices", phoneToken, nil); status != 401 {
+		t.Fatalf("revoked device keeps its session: %d", status)
+	}
+	_, out = e.post(t, "/v1/auth/challenge", "", map[string]string{"deviceId": phone.id})
+	sig := httpx.EncodeB64(ed25519.Sign(phone.sign, ChallengeMessage(phone.id, out["nonce"].(string))))
+	if status, _ := e.post(t, "/v1/auth/verify", "", map[string]string{"deviceId": phone.id, "nonce": out["nonce"].(string), "sig": sig}); status != 401 {
+		t.Fatalf("revoked device signs in again: %d", status)
+	}
+	if status, _ := e.call(t, "DELETE", "/v1/devices/"+phone.id, token, nil); status != 404 {
+		t.Fatalf("second revoke %d", status)
+	}
+}
+
+func TestDeviceCannotRevokeAnotherAccountsDevice(t *testing.T) {
+	e := newEnv(t)
+	a, b := newDevice("a"), newDevice("b")
+	e.signIn(t, a, e.invite(t, ""))
+	e.signIn(t, b, e.invite(t, ""))
+	tokenA := e.session(t, a)
+	if status, _ := e.call(t, "DELETE", "/v1/devices/"+b.id, tokenA, nil); status != 404 {
+		t.Fatalf("cross-account revoke: %d", status)
+	}
+	if status, _ := e.call(t, "GET", "/v1/devices", e.session(t, b), nil); status != 200 {
+		t.Fatal("victim device lost access")
+	}
+}
+
+func TestDeleteAccountRemovesEverythingAndNotifies(t *testing.T) {
+	e := newEnv(t)
+	d := newDevice("desktop")
+	e.signIn(t, d, e.invite(t, ""))
+	token := e.session(t, d)
+	var gone []string
+	e.svc.Hooks.AccountDeleted = func(ids []string) { gone = ids }
+	if status, _ := e.call(t, "DELETE", "/v1/account", token, nil); status != 204 {
+		t.Fatalf("delete %d", status)
+	}
+	if len(gone) != 1 || gone[0] != d.id {
+		t.Fatalf("hook: %v", gone)
+	}
+	if status, _ := e.call(t, "GET", "/v1/devices", token, nil); status != 401 {
+		t.Fatalf("session of a deleted account works: %d", status)
+	}
+}
+
+func TestDeviceLimit(t *testing.T) {
+	e := newEnv(t)
+	e.svc.Cfg.MaxDevices = 1
+	a := newDevice("a")
+	e.signIn(t, a, e.invite(t, ""))
+	token := e.session(t, a)
+	_, out := e.post(t, "/v1/devices/invite", token, nil)
+	b := newDevice("b")
+	body := b.registration()
+	body["code"] = out["code"]
+	if status, out := e.post(t, "/v1/auth/invite", "", body); status != 409 || out["error"] != "device-limit" {
+		t.Fatalf("device limit: %d %v", status, out)
+	}
+}
+
+func TestGitHubDeviceFlowSignsInAndReusesTheAccount(t *testing.T) {
+	e := newEnv(t)
+	e.gh.pending.Store(1)
+	status, out := e.post(t, "/v1/auth/github/device", "", nil)
+	if status != 200 || out["userCode"] != "ABCD-1234" || out["verificationUri"] == "" {
+		t.Fatalf("start %d %v", status, out)
+	}
+	flowID := out["flowId"].(string)
+	d := newDevice("laptop")
+	poll := func() (int, map[string]any) {
+		body := d.registration()
+		body["flowId"] = flowID
+		return e.post(t, "/v1/auth/github/poll", "", body)
+	}
+
+	if status, out := poll(); status != 202 || out["status"] != "pending" {
+		t.Fatalf("polling before the interval must stay pending: %d %v", status, out)
+	}
+	if e.gh.polls.Load() != 0 {
+		t.Fatal("GitHub was polled before the interval elapsed")
+	}
+	*e.clock = e.clock.Add(6 * time.Second)
+	if status, _ := poll(); status != 202 {
+		t.Fatalf("authorization_pending: %d", status)
+	}
+	*e.clock = e.clock.Add(6 * time.Second)
+	status, out = poll()
+	if status != 201 || out["provider"] != "github" {
+		t.Fatalf("done: %d %v", status, out)
+	}
+	d.id = out["deviceId"].(string)
+	first := out["accountId"].(string)
+	if status, _ := poll(); status != 404 {
+		t.Fatalf("flow reusable after success: %d", status)
+	}
+
+	e.gh.pending.Store(0)
+	_, out = e.post(t, "/v1/auth/github/device", "", nil)
+	flowID = out["flowId"].(string)
+	second := newDevice("phone")
+	*e.clock = e.clock.Add(6 * time.Second)
+	body := second.registration()
+	body["flowId"] = flowID
+	status, out = e.post(t, "/v1/auth/github/poll", "", body)
+	if status != 201 || out["accountId"] != first {
+		t.Fatalf("same GitHub user must land in the same account: %d %v vs %s", status, out, first)
+	}
+
+	e.gh.userID.Store(777)
+	_, out = e.post(t, "/v1/auth/github/device", "", nil)
+	flowID = out["flowId"].(string)
+	third := newDevice("stranger")
+	*e.clock = e.clock.Add(6 * time.Second)
+	body = third.registration()
+	body["flowId"] = flowID
+	status, out = e.post(t, "/v1/auth/github/poll", "", body)
+	if status != 201 || out["accountId"] == first {
+		t.Fatalf("different GitHub user shares an account: %d %v", status, out)
+	}
+}
+
+func TestGitHubSlowDownRaisesTheInterval(t *testing.T) {
+	e := newEnv(t)
+	e.gh.slowDown.Store(true)
+	e.gh.pending.Store(100)
+	_, out := e.post(t, "/v1/auth/github/device", "", nil)
+	flowID := out["flowId"].(string)
+	d := newDevice("laptop")
+	*e.clock = e.clock.Add(6 * time.Second)
+	body := d.registration()
+	body["flowId"] = flowID
+	status, out := e.post(t, "/v1/auth/github/poll", "", body)
+	if status != 202 || out["interval"].(float64) != 10 {
+		t.Fatalf("slow_down: %d %v", status, out)
+	}
+}
+
+func TestGitHubPollRejectsUnknownFlowAndBadProof(t *testing.T) {
+	e := newEnv(t)
+	d := newDevice("laptop")
+	body := d.registration()
+	body["flowId"] = "nope"
+	if status, _ := e.post(t, "/v1/auth/github/poll", "", body); status != 404 {
+		t.Fatalf("unknown flow: %d", status)
+	}
+	body["proof"] = httpx.EncodeB64(make([]byte, 64))
+	if status, _ := e.post(t, "/v1/auth/github/poll", "", body); status != 400 {
+		t.Fatalf("bad proof: %d", status)
+	}
+}
+
+func TestGitHubRoutesAbsentWhenNotConfigured(t *testing.T) {
+	e := newEnv(t)
+	e.svc.GitHub = nil
+	mux := httpx.NewMux()
+	e.svc.Mount(mux)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/auth/github/device", nil))
+	if rec.Code != 404 && rec.Code != 405 {
+		t.Fatalf("github route mounted without a client id: %d", rec.Code)
+	}
+}
