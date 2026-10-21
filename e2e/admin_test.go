@@ -115,7 +115,7 @@ func TestAdminSetupAndGitHubSignInToTheWebUI(t *testing.T) {
 	}
 
 	res, _ := gitHubSignIn(t, e, gh, code, 4242, "octocat")
-	session := cookieNamed(res, "ostia_admin")
+	session := cookieNamed(res, "__Host-ostia_admin")
 	if res.StatusCode != http.StatusSeeOther || session == nil || !session.Secure || !session.HttpOnly {
 		t.Fatalf("%d %v", res.StatusCode, res.Header)
 	}
@@ -134,11 +134,11 @@ func TestAdminSetupAndGitHubSignInToTheWebUI(t *testing.T) {
 		t.Fatalf("%d %s", res.StatusCode, body)
 	}
 
-	if res, body := gitHubSignIn(t, e, gh, "", 9, "mallory"); res.StatusCode != http.StatusForbidden || cookieNamed(res, "ostia_admin") != nil {
+	if res, body := gitHubSignIn(t, e, gh, "", 9, "mallory"); res.StatusCode != http.StatusForbidden || cookieNamed(res, "__Host-ostia_admin") != nil {
 		t.Fatalf("a GitHub user that is not the admin: %d %s", res.StatusCode, body)
 	}
 	again, _ := gitHubSignIn(t, e, gh, "", 4242, "octocat")
-	if again.StatusCode != http.StatusSeeOther || cookieNamed(again, "ostia_admin") == nil {
+	if again.StatusCode != http.StatusSeeOther || cookieNamed(again, "__Host-ostia_admin") == nil {
 		t.Fatalf("the admin could not sign in again: %d", again.StatusCode)
 	}
 
@@ -162,7 +162,7 @@ func TestAdminSetupAndGitHubSignInToTheWebUI(t *testing.T) {
 func TestAdminResetReturnsTheServerToSetup(t *testing.T) {
 	e, gh := adminEnv(t)
 	res, _ := gitHubSignIn(t, e, gh, setupCode(t, e), 4242, "octocat")
-	session := cookieNamed(res, "ostia_admin")
+	session := cookieNamed(res, "__Host-ostia_admin")
 	if session == nil {
 		t.Fatalf("%d", res.StatusCode)
 	}

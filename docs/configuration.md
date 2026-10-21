@@ -14,7 +14,7 @@
 | Key | Default | |
 |---|---|---|
 | `api` | required | Host name of the HTTP API (not an IP address). |
-| `share` | required with `publish` | A different registrable domain than `api`, judged with the public suffix list (`api.example.com` and `shares.example.com` are refused; the server will not start). A share domain that is itself a public suffix is fine. Each share is `<id>.<share>`. |
+| `share` | required with `publish` | Each share is `<id>.<share>`. May be on the API's registrable domain when it is a dedicated zone: API `sync.ostia.example.com`, shares `share.ostia.example.com`. Refused when it equals `api` or is a parent of it (`example.com` for `api.example.com`). Shares are always sandboxed and the server's cookies are host-only, which is what makes a same-site zone safe; see [design](design.md#the-share-domain-is-a-sandboxed-origin-not-a-cookie-jar). A different registrable domain, or a public suffix, also works. |
 | `relay` | required with `relay` | Phones connect to `<label>.<relay>`. Must not be a parent of `api`. |
 | `port` | `443`, or `80` with `scheme = "http"` | The port clients use to reach this server from outside (for example a mapped port); it goes into the share and upload URLs and into the relay label answer. |
 | `scheme` | `https` | `http` only for local development; it changes the URLs the server hands out. |
@@ -24,9 +24,10 @@
 | Key | Default | |
 |---|---|---|
 | `listen.https` | `:443` | The SNI router: relay hosts are passed through, other hosts are terminated or forwarded (see `tls.mode`). Required by the relay. Empty to disable. |
+| `listen.relay` | empty | A relay-only listener for a proxy that passes TLS through. It carries the phone's TLS as plain TCP, serves relay hosts and closes everything else, and needs no certificate. A connection from an address in `listen.trusted_proxies` must start with a PROXY protocol v1 or v2 header, which supplies the phone's address for the rate limits; a connection from any other address is read as plain TLS and cannot send a header. Without `trusted_proxies` no header is ever read. Satisfies the relay module's listener requirement, so `listen.https` can be empty. Set it to a port the proxy can reach and nothing else can. |
 | `listen.http` | empty | Plain HTTP for use behind a reverse proxy that terminates TLS. Serves the API and share hosts by `Host`. |
 | `listen.client_ip_header` | `X-Forwarded-For` | Header that carries the client address when a trusted proxy sits in front. Used only for rate limiting. |
-| `listen.trusted_proxies` | empty | Addresses or CIDR ranges of the proxies allowed to set that header. Only a connection from one of them is believed, and then only the last address in the header, the one that proxy appended, is the client: entries to its left are never read. Empty means the header is never read. List the proxy's own addresses and not a whole pod or node range: anything inside a listed range that can reach the server directly chooses its own address. |
+| `listen.trusted_proxies` | empty | Addresses or CIDR ranges of the proxies allowed to set that header, and to send the PROXY protocol header on `listen.relay`. Only a connection from one of them is believed, and then only the last address in the header, the one that proxy appended, is the client: entries to its left are never read. Empty means the header is never read. List the proxy's own addresses and not a whole pod or node range: anything inside a listed range that can reach the server directly chooses its own address. |
 | `tls.mode` | `files` | `files`: terminate TLS with the certificates below. `forward`: pass non-relay connections, untouched, to `tls.forward_addr` (a proxy that holds the certificates). |
 | `tls.forward_addr` | empty | `host:port` for `forward`. |
 | `tls.forward_proxy_protocol` | `true` | Send a PROXY protocol v2 header to the proxy so it learns the client's address. The proxy must be set up to read it. |

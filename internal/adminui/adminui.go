@@ -26,7 +26,7 @@ const (
 	CodeTTL    = 10 * time.Minute
 	SessionTTL = 8 * time.Hour
 
-	cookieName  = "ostia_admin"
+	cookieName  = "__Host-ostia_admin"
 	csrfPurpose = "admin-csrf"
 	formLimit   = 4 << 10
 	csp         = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'"
@@ -144,7 +144,7 @@ func (s *Service) session(r *http.Request) (session, bool) {
 func adminName(githubID int64) string { return "github:" + strconv.FormatInt(githubID, 10) }
 
 func (s *Service) openSession(w http.ResponseWriter, r *http.Request, token string, githubID int64, login, action string) {
-	http.SetCookie(w, &http.Cookie{Name: cookieName, Value: token, Path: "/admin", MaxAge: int(SessionTTL / time.Second), HttpOnly: true, Secure: true, SameSite: http.SameSiteStrictMode})
+	http.SetCookie(w, &http.Cookie{Name: cookieName, Value: token, Path: "/", MaxAge: int(SessionTTL / time.Second), HttpOnly: true, Secure: true, SameSite: http.SameSiteStrictMode})
 	s.audit(r.Context(), adminName(githubID), action, login)
 	http.Redirect(w, r, "/admin/invites", http.StatusSeeOther)
 }
@@ -153,7 +153,7 @@ func (s *Service) logout(w http.ResponseWriter, r *http.Request, sess session) e
 	if err := s.DB.DeleteAdminSession(r.Context(), ids.Hash(sess.token)); err != nil {
 		return err
 	}
-	http.SetCookie(w, &http.Cookie{Name: cookieName, Path: "/admin", MaxAge: -1, HttpOnly: true, Secure: true, SameSite: http.SameSiteStrictMode})
+	http.SetCookie(w, &http.Cookie{Name: cookieName, Path: "/", MaxAge: -1, HttpOnly: true, Secure: true, SameSite: http.SameSiteStrictMode})
 	s.audit(r.Context(), sess.admin, "logout", "")
 	http.Redirect(w, r, "/admin/", http.StatusSeeOther)
 	return nil

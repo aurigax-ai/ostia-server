@@ -195,8 +195,9 @@ func TestValidationErrors(t *testing.T) {
 	}{
 		"missing api":            {strings.Replace(minimal, `api = "api.example.com"`, "", 1), "domains.api"},
 		"share equals api":       {strings.Replace(minimal, "example-share.net", "api.example.com", 1), "domains.share must differ"},
-		"share under api":        {strings.Replace(minimal, "example-share.net", "share.api.example.com", 1), "different registrable domain"},
-		"share beside api":       {strings.Replace(minimal, "example-share.net", "shares.example.com", 1), "different registrable domain"},
+		"share parent of api":    {strings.Replace(minimal, "example-share.net", "example.com", 1), "must not be a parent"},
+		"share is the suffix":    {strings.Replace(minimal, "example-share.net", "com", 1), "must not be a parent"},
+		"share parent of nested": {strings.Replace(strings.Replace(minimal, "example-share.net", "ostia.example.com", 1), "api.example.com", "sync.ostia.example.com", 1), "must not be a parent"},
 		"share on co.uk":         {strings.Replace(strings.Replace(minimal, "example-share.net", "a.co.uk", 1), "api.example.com", "api.b.co.uk", 1), ""},
 		"api under relay":        {strings.Replace(minimal, "api.example.com", "api.r.example.com", 1), "must not sit under"},
 		"no certs":               {strings.Replace(minimal, "[[tls.certs]]\ncert = \"/etc/c.pem\"\nkey = \"/etc/k.pem\"\n", "", 1), "tls.certs"},
@@ -225,6 +226,37 @@ func TestValidationErrors(t *testing.T) {
 	}
 }
 
+func TestRelayListenerReplacesTheSNIRouterForTheRelayModule(t *testing.T) {
+	body := `
+data_dir = "/d"
+[domains]
+api = "sync.ostia.example.com"
+share = "share.ostia.example.com"
+relay = "relay.ostia.example.com"
+[listen]
+https = ""
+http = ":8080"
+relay = ":8443"
+client_ip_header = "X-Forwarded-For"
+trusted_proxies = ["10.1.0.0/16"]
+`
+	cfg, err := Load(write(t, body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Listen.Relay != ":8443" {
+		t.Fatalf("%+v", cfg.Listen)
+	}
+	noListener := strings.Replace(body, `relay = ":8443"`, "", 1)
+	if _, err := Load(write(t, noListener)); err == nil || !strings.Contains(err.Error(), "listen.https or listen.relay") {
+		t.Fatalf("the relay module needs a listener: %v", err)
+	}
+	moduleOff := body + "\n[modules]\nrelay = false\n"
+	if _, err := Load(write(t, moduleOff)); err == nil || !strings.Contains(err.Error(), "listen.relay needs modules.relay") {
+		t.Fatalf("a relay listener without the module: %v", err)
+	}
+}
+
 func TestRelayOffNeedsNoRelayDomain(t *testing.T) {
 	body := strings.Replace(minimal, `relay = "r.example.com"`, "", 1) + "\n[modules]\nrelay = false\n"
 	if _, err := Load(write(t, body)); err != nil {
@@ -246,6 +278,19 @@ relay = false
 `
 	if _, err := Load(write(t, body)); err != nil {
 		t.Fatalf("%v", err)
+	}
+}
+
+func TestShareDomainMayBeADedicatedZoneOnTheSameSite(t *testing.T) {
+	for _, share := range []string{"shares.example.com", "share.api.example.com", "api2.example.com"} {
+		body := strings.Replace(minimal, "example-share.net", share, 1)
+		if _, err := Load(write(t, body)); err != nil {
+			t.Errorf("%s: %v", share, err)
+		}
+	}
+	nested := strings.Replace(strings.Replace(minimal, "example-share.net", "share.ostia.example.com", 1), "api.example.com", "sync.ostia.example.com", 1)
+	if _, err := Load(write(t, nested)); err != nil {
+		t.Fatalf("a sibling zone under the same parent as the api host: %v", err)
 	}
 }
 

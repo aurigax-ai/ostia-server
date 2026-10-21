@@ -6,8 +6,8 @@ require (
 	filippo.io/age v1.3.2
 	github.com/coder/websocket v1.8.15
 	github.com/pelletier/go-toml/v2 v2.4.3
+	github.com/pires/go-proxyproto v0.16.0
 	golang.org/x/crypto v0.58.0
-	golang.org/x/net v0.61.0
 	golang.org/x/text v0.43.0
 	modernc.org/sqlite v1.60.1
 )

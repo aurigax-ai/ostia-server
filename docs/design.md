@@ -12,6 +12,8 @@ The phone already pins the desktop gateway's certificate fingerprint and ignores
 
 The desktop dials out over a WebSocket, so it needs no open port. There is one WebSocket per phone connection and TCP provides the flow control, so there is no multiplexer.
 
+The relay can share the HTTPS port with the API or have a port of its own. `listen.https` is an SNI router that hands relay hosts to the relay and terminates or forwards every other host. `listen.relay` is a second listener that does only the first half: it reads the ClientHello, hands relay hosts to the relay and closes everything else. It exists for deployments where an outer proxy already owns 443, terminates TLS for the API and the share hosts, and passes the relay hosts through untouched to a port of the server's. The phone's TLS then arrives as plain TCP, so the server cannot see the phone's address and needs the proxy to tell it, with PROXY protocol v1 or v2. Only peers in `listen.trusted_proxies` are read for a header, and they must send one: a trusted address that sends none is dropped, and a header from any other address is not parsed and is treated as garbage like any non-TLS bytes, so a client cannot choose its own address or the address it is limited under. The header is read before the ClientHello and under the same hello timeout.
+
 Unknown labels and non-TLS connections are held for the hello timeout and then closed without a reply. A known label with no desktop listening is reset at once. Answering differently would let a scanner tell which desktops exist or are online.
 
 ## Shares: one origin each, a fixed shell, the key in the fragment
@@ -54,9 +56,15 @@ A label is an identifier, not a secret: it is in the pairing QR and in every add
 
 The router holds a connection until its ClientHello arrives, which is a slow-connection attack surface. The pool is capped, each source address (an IPv6 /64 counts as one) may hold only a few places, and when the pool is three quarters full the router stops holding connections that are not TLS.
 
-## The share domain is a different site
+## The share domain is a sandboxed origin, not a cookie jar
 
-Browsers decide same-site by registrable domain from the public suffix list. A share domain under the API's registrable domain would let a malicious share set cookies for, or be treated as part of, the API's site. The server refuses to start in that case.
+A share can hold script from a stranger, so the question is what that script can reach. Browsers scope cookies by host and by registrable domain, so a page on a sibling host can try to set a cookie for the whole domain (`Domain=example.com`) or read one that was set that way. The server closes that door from both ends instead of requiring a separate registrable domain:
+
+- **Artifact code never runs in a real origin.** A public share is served with `Content-Security-Policy: sandbox allow-scripts`: the document gets an opaque origin, so it has no cookie jar to read or write and cannot reach the page that framed it. An encrypted share is opened by Ostia's own shell, which decrypts in the browser and renders the artifact in `<iframe sandbox="allow-scripts">` without `allow-same-origin`, so the artifact has an opaque origin there too, and the shell's CSP (`default-src 'none'`, `frame-src blob:`) allows nothing else. Tests fail if either policy loses the sandbox, if the shell grants `allow-same-origin`, top navigation, popups or forms, or if a share response sets a cookie.
+- **Every cookie the server sets is host-only.** None carries a `Domain` attribute, so the browser sends it to the one host that set it and nowhere else. The admin session cookie is `__Host-ostia_admin` (`Secure; Path=/`, no `Domain`): the browser refuses to let any other host, including a sibling under the same registrable domain, set or overwrite a cookie with that prefix. The sign-in state cookie was already `__Host-`.
+- **The shell is first-party code.** It runs in a real origin (`<id>.<share>`), served from the share host with nothing but static files and the three routes of a share. It holds no session and no token, and the admin UI and the API do not exist on that host.
+
+With those in place a share domain that sits in the API's own registrable domain gives a malicious share nothing that a different domain would withhold, so the server only refuses what would put the shares at or above the API: the same host, or a parent of it (`example.com` for `api.example.com`). Use a dedicated zone: API `sync.ostia.example.com`, shares `share.ostia.example.com`, each share at `<id>.share.ostia.example.com`, with its own wildcard certificate and DNS record. Do not put shares on a parent, because a share host would then be a sibling of everything beneath it and a parent-domain cookie from any other service would reach it. A separate registrable domain (or a public suffix such as `github.io`) is still the stronger choice where the operator controls one, since it also isolates the browser's other per-site state; the sandbox is what the same-site layout relies on.
 
 ## Rate limits and authentication on every route
 

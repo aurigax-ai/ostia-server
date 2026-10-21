@@ -300,6 +300,24 @@ func (s *Server) Run(ctx context.Context) error {
 			closers = append(closers, func() { _ = secured.Close() })
 		}
 	}
+	if s.Cfg.Listen.Relay != "" {
+		raw, err := net.Listen("tcp", s.Cfg.Listen.Relay)
+		if err != nil {
+			return err
+		}
+		closers = append(closers, func() { _ = raw.Close() })
+		ln, err := sni.TrustProxyHeaders(raw, s.Cfg.Listen.TrustedProxies, s.Cfg.Relay.HelloTimeout.Std())
+		if err != nil {
+			return err
+		}
+		slog.Info("listening", "relay", raw.Addr().String())
+		router := s.sniRouter(func(conn net.Conn) { _ = conn.Close() })
+		wg.Go(func() {
+			if err := router.Serve(ln); err != nil {
+				errs <- err
+			}
+		})
+	}
 	if s.Relay != nil {
 		wg.Go(func() { s.Relay.Run(ctx) })
 	}
@@ -345,6 +363,23 @@ func (s *Server) maintain(ctx context.Context) {
 }
 
 func (s *Server) router(terminated *connListener) *sni.Router {
+	return s.sniRouter(func(conn net.Conn) {
+		if s.Cfg.TLS.Mode == config.TLSForward {
+			forwardTo(s.Cfg.TLS.ForwardAddr, s.Cfg.TLS.ForwardProxyProtocol, conn)
+			return
+		}
+		secured := tls.Server(conn, s.certs.config())
+		_ = secured.SetDeadline(time.Now().Add(tlsHandshakeWait))
+		if err := secured.Handshake(); err != nil {
+			_ = conn.Close()
+			return
+		}
+		_ = secured.SetDeadline(time.Time{})
+		terminated.push(secured)
+	})
+}
+
+func (s *Server) sniRouter(onOther func(net.Conn)) *sni.Router {
 	r := &sni.Router{
 		HelloTimeout:    s.Cfg.Relay.HelloTimeout.Std(),
 		MaxPending:      s.Cfg.Relay.MaxPendingHellos,
@@ -357,20 +392,7 @@ func (s *Server) router(terminated *connListener) *sni.Router {
 			}
 			return sni.Other, ""
 		},
-		OnOther: func(conn net.Conn) {
-			if s.Cfg.TLS.Mode == config.TLSForward {
-				forwardTo(s.Cfg.TLS.ForwardAddr, s.Cfg.TLS.ForwardProxyProtocol, conn)
-				return
-			}
-			secured := tls.Server(conn, s.certs.config())
-			_ = secured.SetDeadline(time.Now().Add(tlsHandshakeWait))
-			if err := secured.Handshake(); err != nil {
-				_ = conn.Close()
-				return
-			}
-			_ = secured.SetDeadline(time.Time{})
-			terminated.push(secured)
-		},
+		OnOther: onOther,
 	}
 	if s.Relay != nil {
 		r.OnRelay = s.Relay.HandlePhone
