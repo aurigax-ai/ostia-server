@@ -86,14 +86,18 @@ func TestPublicShareIsExplicitAndSandboxed(t *testing.T) {
 	owner := e.user(t, "desktop")
 	sh := owner.PublishHTML(t, testkit.ShareOptions{Mode: "public", HTML: artifactHTML})
 	res := e.net.ShareGet(t, shareHost, sh.ID, "/")
-	if res.Status != http.StatusOK || string(res.Body) != artifactHTML {
-		t.Fatalf("public share: %s", res)
+	if res.Status != http.StatusOK || strings.Contains(string(res.Body), artifactHTML) || !strings.Contains(string(res.Body), "/shell.js") {
+		t.Fatalf("a public share must be the shell, never the artifact: %s", res)
 	}
-	if csp := res.Header.Get("Content-Security-Policy"); csp != "sandbox allow-scripts" {
-		t.Fatalf("public documents must run in an opaque origin, got CSP %q", csp)
+	if csp := res.Header.Get("Content-Security-Policy"); !strings.Contains(csp, "frame-ancestors 'none'") || strings.Contains(csp, "allow-same-origin") {
+		t.Fatalf("shell CSP %q", csp)
 	}
-	if res := e.net.ShareGet(t, shareHost, sh.ID, "/blob"); res.Status != http.StatusNotFound {
-		t.Fatalf("/blob of a public share: %s", res)
+	blob := e.net.ShareGet(t, shareHost, sh.ID, "/blob")
+	if blob.Status != http.StatusOK || string(blob.Body) != artifactHTML {
+		t.Fatalf("/blob of a public share: %s", blob)
+	}
+	if ct := blob.Header.Get("Content-Type"); ct != "application/octet-stream" || !strings.Contains(blob.Header.Get("Content-Security-Policy"), "sandbox") {
+		t.Fatalf("public bytes must not be a document: %q", ct)
 	}
 	if views := viewsOf(t, owner, sh.ID); views != 1 {
 		t.Fatalf("views %d", views)
@@ -452,7 +456,7 @@ func TestShareDomainInTheAPIsOwnZoneStillSandboxesEveryArtifact(t *testing.T) {
 			t.Fatal(err)
 		}
 		_ = res.Body.Close()
-		if res.StatusCode != http.StatusOK || res.Header.Get("Content-Security-Policy") != "sandbox allow-scripts" {
+		if res.StatusCode != http.StatusOK || !strings.Contains(res.Header.Get("Content-Security-Policy"), "frame-ancestors 'none'") {
 			t.Fatalf("%s public share: %d CSP %q", method, res.StatusCode, res.Header.Get("Content-Security-Policy"))
 		}
 		if len(res.Cookies()) != 0 {
@@ -475,8 +479,8 @@ func TestShareDomainInTheAPIsOwnZoneStillSandboxesEveryArtifact(t *testing.T) {
 	if blob := n.ShareGet(t, share, encrypted.ID, "/blob"); strings.Contains(string(blob.Body), "document.cookie") {
 		t.Fatal("an encrypted share must not be served as readable bytes")
 	}
-	if res := n.ShareGet(t, share, public.ID, "/blob"); res.Status != http.StatusNotFound {
-		t.Fatalf("a public share has no blob route: %s", res)
+	if res := n.ShareGet(t, share, public.ID, "/blob"); res.Status != http.StatusOK || res.Header.Get("Content-Type") != "application/octet-stream" {
+		t.Fatalf("a public share's bytes are data, not a document: %s", res)
 	}
 	if res := n.ShareGet(t, share, public.ID, "/admin/"); res.Status != http.StatusNotFound {
 		t.Fatalf("the admin UI must not exist on a share host: %s", res)

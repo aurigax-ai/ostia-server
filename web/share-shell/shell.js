@@ -58,12 +58,45 @@ function withArtifactPolicy(html) {
 function renderDocument(html) {
   const frame = element('iframe', { sandbox: 'allow-scripts', title: 'Shared artifact', class: 'artifact' })
   frame.srcdoc = withArtifactPolicy(html)
-  root.replaceChildren(frame, reportBar())
+  root.replaceChildren(frame)
 }
 
-function reportBar() {
-  const bar = element('div', { class: 'bar' })
-  const open = element('button', { type: 'button', class: 'link' }, 'Report this share')
+function acknowledged() {
+  try {
+    return localStorage.getItem(`ostia-notice:${shareId}`) === '1'
+  } catch {
+    return false
+  }
+}
+
+function acknowledge() {
+  try {
+    localStorage.setItem(`ostia-notice:${shareId}`, '1')
+  } catch {}
+}
+
+function renderWithNotice(html) {
+  if (acknowledged()) {
+    renderDocument(html)
+    return
+  }
+  const show = element('button', { type: 'button' }, 'Show the page')
+  show.addEventListener('click', () => {
+    acknowledge()
+    renderDocument(html)
+  })
+  const notice = element('div', { class: 'notice' })
+  notice.append(
+    element('p', {}, 'This page was published by an Ostia user. Do not enter passwords or personal details.'),
+    show,
+  )
+  root.replaceChildren(notice)
+  show.focus()
+}
+
+function renderBar() {
+  const bar = element('div', { class: 'bar', role: 'region', 'aria-label': 'Share notice' })
+  const open = element('button', { type: 'button', class: 'link' }, 'Report')
   open.addEventListener('click', () => {
     const select = element('select', { 'aria-label': 'Reason' })
     for (const [value, label] of REPORT_REASONS) select.append(element('option', { value }, label))
@@ -77,10 +110,18 @@ function reportBar() {
       })
       status.textContent = response.ok ? 'Thank you, the report was recorded.' : 'The report could not be sent.'
     })
-    bar.replaceChildren(select, send, status)
+    reporting.replaceChildren(select, send, status)
   })
-  bar.append(open)
+  const reporting = element('span', { class: 'reporting' })
+  reporting.append(open)
+  bar.append(element('span', {}, 'Shared from Ostia · made by a user, not by Ostia ·'), reporting)
   return bar
+}
+
+async function showPublic() {
+  const blob = await fetchBlob()
+  if (!blob) return
+  renderWithNotice(new TextDecoder().decode(blob))
 }
 
 async function showLink() {
@@ -92,7 +133,7 @@ async function showLink() {
   const blob = await fetchBlob()
   if (!blob) return
   try {
-    renderDocument(await decryptBlob({ blob, id: shareId, key }))
+    renderWithNotice(await decryptBlob({ blob, id: shareId, key }))
   } catch {
     showMessage('This share could not be decrypted. The link may be damaged.')
   }
@@ -117,7 +158,7 @@ function showPasswordForm(meta) {
         salt: fromBase64Url(meta.salt),
         fragment: fragmentKey(location.hash),
       })
-      renderDocument(await decryptBlob({ blob, id: shareId, key }))
+      renderWithNotice(await decryptBlob({ blob, id: shareId, key }))
     } catch {
       status.textContent = 'Wrong password.'
       submit.disabled = false
@@ -127,9 +168,12 @@ function showPasswordForm(meta) {
   input.focus()
 }
 
+document.body.prepend(renderBar())
+
 const meta = await fetchMeta()
 if (meta) {
-  if (meta.mode === 'link') await showLink()
+  if (meta.mode === 'public') await showPublic()
+  else if (meta.mode === 'link') await showLink()
   else if (meta.mode === 'password') showPasswordForm(meta)
   else showMessage('This share uses an unsupported format.')
 }

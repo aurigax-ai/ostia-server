@@ -200,13 +200,13 @@ All requests are served by Host: `<id>.<share domain>`.
 
 | Path | Answer |
 |---|---|
-| `GET /` | The fixed shell page. A public share returns the file itself instead, with `Content-Security-Policy: sandbox allow-scripts`. |
+| `GET /` | The fixed shell page, for every mode. |
 | `GET /meta` | `{v: 1, mode, size, salt, expiresAt}`; `404` unknown or not uploaded, `410` expired or removed |
-| `GET /blob` | The ciphertext; counts one view |
+| `GET /blob` | The ciphertext, or the file itself for a public share; counts one view |
 | `POST /report` | `{reason}` as above, for the shell's report button |
 | `GET /shell.js`, `/crypto.js`, `/shell.css` | The shell's static assets |
 
-The shell fetches `/meta` and `/blob`, decrypts with WebCrypto and renders the file in `<iframe sandbox="allow-scripts" srcdoc>`. Responses carry `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `Cross-Origin-Opener-Policy: same-origin`, `X-Robots-Tag: noindex` and `Cache-Control: no-store`. The server sets no cookies and stores no addresses or user agents; it counts views only.
+The shell fetches `/meta` and `/blob`, decrypts with WebCrypto (not for public shares), shows a notice bar and a one-time interstitial, and renders the file in `<iframe sandbox="allow-scripts" srcdoc>`. Responses carry `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `Cross-Origin-Opener-Policy: same-origin`, `X-Robots-Tag: noindex` and `Cache-Control: no-store`. The server sets no cookies and stores no addresses or user agents; it counts views only.
 
 Expired shares are removed hourly (`publish.sweep_interval`). `ostia-server admin takedown <id>` disables a share and deletes its content at once.
 
