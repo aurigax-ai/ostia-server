@@ -35,7 +35,7 @@
       "name": "Push"
     },
     {
-      "name": "Share host"
+      "name": "Shares"
     }
   ],
   "paths": {
@@ -3816,20 +3816,7 @@
         "x-module": "push"
       }
     },
-    "/": {
-      "servers": [
-        {
-          "url": "https://{id}.{shareDomain}",
-          "variables": {
-            "id": {
-              "default": "id"
-            },
-            "shareDomain": {
-              "default": "example-share.net"
-            }
-          }
-        }
-      ],
+    "/s/{id}": {
       "get": {
         "summary": "The shell page (or the file itself for a public share)",
         "security": [],
@@ -3839,24 +3826,21 @@
           }
         },
         "tags": [
-          "Share host"
+          "Shares"
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
         ]
       }
     },
-    "/meta": {
-      "servers": [
-        {
-          "url": "https://{id}.{shareDomain}",
-          "variables": {
-            "id": {
-              "default": "id"
-            },
-            "shareDomain": {
-              "default": "example-share.net"
-            }
-          }
-        }
-      ],
+    "/s/{id}/meta": {
       "get": {
         "summary": "Share metadata",
         "security": [],
@@ -3884,6 +3868,10 @@
                     "expiresAt": {
                       "type": "integer",
                       "description": "Unix milliseconds"
+                    },
+                    "warning": {
+                      "type": "boolean",
+                      "description": "The server's publish.share_warning; no share can change it"
                     }
                   }
                 }
@@ -3912,24 +3900,21 @@
           }
         },
         "tags": [
-          "Share host"
+          "Shares"
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
         ]
       }
     },
-    "/blob": {
-      "servers": [
-        {
-          "url": "https://{id}.{shareDomain}",
-          "variables": {
-            "id": {
-              "default": "id"
-            },
-            "shareDomain": {
-              "default": "example-share.net"
-            }
-          }
-        }
-      ],
+    "/s/{id}/blob": {
       "get": {
         "summary": "The ciphertext; counts one view",
         "security": [],
@@ -3967,24 +3952,21 @@
           }
         },
         "tags": [
-          "Share host"
+          "Shares"
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
         ]
       }
     },
-    "/report": {
-      "servers": [
-        {
-          "url": "https://{id}.{shareDomain}",
-          "variables": {
-            "id": {
-              "default": "id"
-            },
-            "shareDomain": {
-              "default": "example-share.net"
-            }
-          }
-        }
-      ],
+    "/s/{id}/report": {
       "post": {
         "summary": "Report this share",
         "security": [],
@@ -4045,7 +4027,52 @@
           }
         },
         "tags": [
-          "Share host"
+          "Shares"
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/s/{id}/view": {
+      "post": {
+        "summary": "Count one view",
+        "description": "Called by the shell once the page is shown, after the visitor accepted the notice.",
+        "security": [],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Counted"
+          },
+          "404": {
+            "description": "not-found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "Shares"
         ]
       }
     }
@@ -4211,9 +4238,6 @@
             }
           },
           "relayDomain": {
-            "type": "string"
-          },
-          "shareDomain": {
             "type": "string"
           },
           "limits": {

@@ -1,6 +1,7 @@
 package e2e
 
 import (
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -36,20 +37,20 @@ func TestLinkShareIsEncryptedAndOpensWithTheFragmentKey(t *testing.T) {
 	owner := e.user(t, "desktop")
 	sh := owner.PublishHTML(t, testkit.ShareOptions{Mode: "link", HTML: artifactHTML})
 
-	if !strings.HasPrefix(sh.URL, "https://"+sh.ID+"."+shareHost+"/") {
+	if !strings.HasPrefix(sh.URL, "https://"+apiHost+"/s/"+sh.ID) {
 		t.Fatalf("each share gets its own subdomain on the share domain: %s", sh.URL)
 	}
-	blob := e.net.ShareGet(t, shareHost, sh.ID, "/blob")
+	blob := e.net.ShareGet(t, sh.ID, "/blob")
 	if blob.Status != http.StatusOK || strings.Contains(string(blob.Body), "quarterly numbers") || strings.Contains(string(blob.Body), "<p>") {
 		t.Fatalf("the server must only hold ciphertext: %d", blob.Status)
 	}
-	html, err := e.net.OpenShare(t, shareHost, sh)
+	html, err := e.net.OpenShare(t, sh)
 	if err != nil || html != artifactHTML {
 		t.Fatalf("open: %q %v", html, err)
 	}
 	wrongKey := sh
 	wrongKey.Key = testkit.RandomBytes(32)
-	if _, err := e.net.OpenShare(t, shareHost, wrongKey); err == nil {
+	if _, err := e.net.OpenShare(t, wrongKey); err == nil {
 		t.Fatal("a different fragment key decrypted the share")
 	}
 }
@@ -58,25 +59,25 @@ func TestPasswordShareNeedsThePassword(t *testing.T) {
 	e := newEnv(t, "")
 	owner := e.user(t, "desktop")
 	sh := owner.PublishHTML(t, testkit.ShareOptions{Mode: "password", Password: "correct horse", HTML: artifactHTML})
-	meta := e.net.ShareGet(t, shareHost, sh.ID, "/meta").Map(t)
+	meta := e.net.ShareGet(t, sh.ID, "/meta").Map(t)
 	if meta["mode"] != "password" || meta["salt"] == "" {
 		t.Fatalf("meta: %v", meta)
 	}
-	if html, err := e.net.OpenShare(t, shareHost, sh); err != nil || html != artifactHTML {
+	if html, err := e.net.OpenShare(t, sh); err != nil || html != artifactHTML {
 		t.Fatalf("right password: %q %v", html, err)
 	}
 	wrong := sh
 	wrong.Password = "battery staple"
-	if _, err := e.net.OpenShare(t, shareHost, wrong); err == nil {
+	if _, err := e.net.OpenShare(t, wrong); err == nil {
 		t.Fatal("wrong password opened the share")
 	}
 	both := owner.PublishHTML(t, testkit.ShareOptions{Mode: "password", Password: "pw", HTML: artifactHTML, WithFragmentKey: true})
-	if html, err := e.net.OpenShare(t, shareHost, both); err != nil || html != artifactHTML {
+	if html, err := e.net.OpenShare(t, both); err != nil || html != artifactHTML {
 		t.Fatalf("password plus link key: %q %v", html, err)
 	}
 	noFragment := both
 	noFragment.Key = nil
-	if _, err := e.net.OpenShare(t, shareHost, noFragment); err == nil {
+	if _, err := e.net.OpenShare(t, noFragment); err == nil {
 		t.Fatal("the password alone opened a share that also needs the link key")
 	}
 }
@@ -85,14 +86,14 @@ func TestPublicShareIsExplicitAndSandboxed(t *testing.T) {
 	e := newEnv(t, "")
 	owner := e.user(t, "desktop")
 	sh := owner.PublishHTML(t, testkit.ShareOptions{Mode: "public", HTML: artifactHTML})
-	res := e.net.ShareGet(t, shareHost, sh.ID, "/")
+	res := e.net.ShareGet(t, sh.ID, "/")
 	if res.Status != http.StatusOK || strings.Contains(string(res.Body), artifactHTML) || !strings.Contains(string(res.Body), "/shell.js") {
 		t.Fatalf("a public share must be the shell, never the artifact: %s", res)
 	}
 	if csp := res.Header.Get("Content-Security-Policy"); !strings.Contains(csp, "frame-ancestors 'none'") || strings.Contains(csp, "allow-same-origin") {
 		t.Fatalf("shell CSP %q", csp)
 	}
-	blob := e.net.ShareGet(t, shareHost, sh.ID, "/blob")
+	blob := e.net.ShareGet(t, sh.ID, "/blob")
 	if blob.Status != http.StatusOK || string(blob.Body) != artifactHTML {
 		t.Fatalf("/blob of a public share: %s", blob)
 	}
@@ -102,7 +103,7 @@ func TestPublicShareIsExplicitAndSandboxed(t *testing.T) {
 	if views := viewsOf(t, owner, sh.ID); views != 0 {
 		t.Fatalf("fetching the bytes is not a view: %d", views)
 	}
-	if res := e.net.SharePost(t, shareHost, sh.ID, "/view", nil); res.Status != http.StatusNoContent {
+	if res := e.net.SharePost(t, sh.ID, "/view", nil); res.Status != http.StatusNoContent {
 		t.Fatalf("/view: %s", res)
 	}
 	if views := viewsOf(t, owner, sh.ID); views != 1 {
@@ -126,8 +127,11 @@ func TestShareHostSendsStrictHeadersAndNoCookies(t *testing.T) {
 	e := newEnv(t, "")
 	owner := e.user(t, "desktop")
 	sh := owner.PublishHTML(t, testkit.ShareOptions{Mode: "link", HTML: artifactHTML})
-	for _, path := range []string{"/", "/meta", "/blob", "/shell.js", "/crypto.js", "/shell.css"} {
-		res := e.net.ShareGet(t, shareHost, sh.ID, path)
+	for _, path := range []string{"/", "/meta", "/blob", "/s/-/shell.js", "/s/-/crypto.js", "/s/-/shell.css"} {
+		res := e.net.ShareGet(t, sh.ID, path)
+		if strings.HasPrefix(path, "/s/-") {
+			res = e.net.ShareGet(t, "-", strings.TrimPrefix(path, "/s/-"))
+		}
 		if res.Status != http.StatusOK {
 			t.Fatalf("%s: %s", path, res)
 		}
@@ -149,7 +153,7 @@ func TestShareHostSendsStrictHeadersAndNoCookies(t *testing.T) {
 			t.Errorf("%s sets a cookie", path)
 		}
 	}
-	shell := e.net.ShareGet(t, shareHost, sh.ID, "/")
+	shell := e.net.ShareGet(t, sh.ID, "/")
 	csp := shell.Header.Get("Content-Security-Policy")
 	for _, directive := range []string{"default-src 'none'", "connect-src 'self'", "frame-src 'none'", "frame-ancestors 'none'", "base-uri 'none'"} {
 		if !strings.Contains(csp, directive) {
@@ -165,18 +169,18 @@ func TestViewsAreCountedWithoutLoggingWho(t *testing.T) {
 	e := newEnv(t, "")
 	owner := e.user(t, "desktop")
 	sh := owner.PublishHTML(t, testkit.ShareOptions{Mode: "link", HTML: artifactHTML})
-	e.net.ShareGet(t, shareHost, sh.ID, "/meta")
+	e.net.ShareGet(t, sh.ID, "/meta")
 	if views := viewsOf(t, owner, sh.ID); views != 0 {
 		t.Fatalf("meta is not a view: %d", views)
 	}
 	for range 3 {
-		e.net.ShareGet(t, shareHost, sh.ID, "/blob")
+		e.net.ShareGet(t, sh.ID, "/blob")
 	}
 	if views := viewsOf(t, owner, sh.ID); views != 0 {
 		t.Fatalf("blob fetches are not views: %d", views)
 	}
 	for range 3 {
-		e.net.SharePost(t, shareHost, sh.ID, "/view", nil)
+		e.net.SharePost(t, sh.ID, "/view", nil)
 	}
 	if views := viewsOf(t, owner, sh.ID); views != 3 {
 		t.Fatalf("views %d", views)
@@ -191,14 +195,14 @@ func TestSharesExpireAndAreSwept(t *testing.T) {
 	e := newEnv(t, "[publish]\nmin_expiry = \"1s\"\nsweep_interval = \"300ms\"\n")
 	owner := e.user(t, "desktop")
 	sh := owner.PublishHTML(t, testkit.ShareOptions{Mode: "link", HTML: artifactHTML, ExpiresInSeconds: ptr(int64(2))})
-	if _, err := e.net.OpenShare(t, shareHost, sh); err != nil {
+	if _, err := e.net.OpenShare(t, sh); err != nil {
 		t.Fatalf("share must open before it expires: %v", err)
 	}
 	time.Sleep(2300 * time.Millisecond)
-	if meta := e.net.ShareGet(t, shareHost, sh.ID, "/meta"); meta.Status != http.StatusGone && meta.Status != http.StatusNotFound {
+	if meta := e.net.ShareGet(t, sh.ID, "/meta"); meta.Status != http.StatusGone && meta.Status != http.StatusNotFound {
 		t.Fatalf("expired share still served: %s", meta)
 	}
-	if blob := e.net.ShareGet(t, shareHost, sh.ID, "/blob"); blob.Status == http.StatusOK {
+	if blob := e.net.ShareGet(t, sh.ID, "/blob"); blob.Status == http.StatusOK {
 		t.Fatal("expired share content still served")
 	}
 	waitUntil(t, "the sweeper removes the share", func() bool {
@@ -208,7 +212,7 @@ func TestSharesExpireAndAreSwept(t *testing.T) {
 		owner.Must(t, http.StatusOK, "GET", "/v1/shares", nil).JSON(t, &list)
 		return len(list.Shares) == 0
 	})
-	if meta := e.net.ShareGet(t, shareHost, sh.ID, "/meta"); meta.Status != http.StatusNotFound {
+	if meta := e.net.ShareGet(t, sh.ID, "/meta"); meta.Status != http.StatusNotFound {
 		t.Fatalf("swept share: %s", meta)
 	}
 }
@@ -260,14 +264,14 @@ func TestDeleteWithTheTokenTheOwnerOrNotAtAll(t *testing.T) {
 	if res := stranger.Do(t, "DELETE", "/v1/shares/"+sh.ID, nil); res.Status != http.StatusNotFound {
 		t.Fatalf("another account's delete: %s", res)
 	}
-	if _, err := e.net.OpenShare(t, shareHost, sh); err != nil {
+	if _, err := e.net.OpenShare(t, sh); err != nil {
 		t.Fatalf("share lost to refused deletes: %v", err)
 	}
 	anon.Must(t, http.StatusNoContent, "DELETE", "/v1/shares/"+sh.ID, nil, "X-Delete-Token", sh.DeleteToken)
-	if meta := e.net.ShareGet(t, shareHost, sh.ID, "/meta"); meta.Status != http.StatusNotFound {
+	if meta := e.net.ShareGet(t, sh.ID, "/meta"); meta.Status != http.StatusNotFound {
 		t.Fatalf("deleted share: %s", meta)
 	}
-	if blob := e.net.ShareGet(t, shareHost, sh.ID, "/blob"); blob.Status != http.StatusNotFound {
+	if blob := e.net.ShareGet(t, sh.ID, "/blob"); blob.Status != http.StatusNotFound {
 		t.Fatalf("deleted share content: %s", blob)
 	}
 
@@ -281,10 +285,10 @@ func TestReportPathAndTakedown(t *testing.T) {
 	sh := owner.PublishHTML(t, testkit.ShareOptions{Mode: "link", HTML: artifactHTML})
 	anon := e.anonymous()
 
-	if res := e.net.SharePost(t, shareHost, sh.ID, "/report", map[string]string{"reason": "bogus"}); res.Status != http.StatusBadRequest {
+	if res := e.net.SharePost(t, sh.ID, "/report", map[string]string{"reason": "bogus"}); res.Status != http.StatusBadRequest {
 		t.Fatalf("unknown reason: %s", res)
 	}
-	if res := e.net.SharePost(t, shareHost, sh.ID, "/report", map[string]string{"reason": "malware"}); res.Status != http.StatusNoContent {
+	if res := e.net.SharePost(t, sh.ID, "/report", map[string]string{"reason": "malware"}); res.Status != http.StatusNoContent {
 		t.Fatalf("report from the shell page: %s", res)
 	}
 	anon.Must(t, http.StatusNoContent, "POST", "/v1/report/"+sh.ID, map[string]string{"reason": "abuse"})
@@ -297,10 +301,10 @@ func TestReportPathAndTakedown(t *testing.T) {
 		t.Fatalf("admin reports:\n%s", reports)
 	}
 	e.proc.Admin(t, "takedown", sh.ID)
-	if meta := e.net.ShareGet(t, shareHost, sh.ID, "/meta"); meta.Status != http.StatusGone {
+	if meta := e.net.ShareGet(t, sh.ID, "/meta"); meta.Status != http.StatusGone {
 		t.Fatalf("taken down share meta: %s", meta)
 	}
-	if blob := e.net.ShareGet(t, shareHost, sh.ID, "/blob"); blob.Status != http.StatusGone {
+	if blob := e.net.ShareGet(t, sh.ID, "/blob"); blob.Status != http.StatusGone {
 		t.Fatalf("taken down share content: %s", blob)
 	}
 	if res := anon.Do(t, "POST", "/v1/report/"+sh.ID, map[string]string{"reason": "abuse"}); res.Status != http.StatusNotFound {
@@ -374,32 +378,32 @@ func TestShareLimitsAndUploadRules(t *testing.T) {
 	if res := stranger.UploadShare(t, other, make([]byte, 100)); res.Status != http.StatusNotFound {
 		t.Fatalf("another account's upload: %s", res)
 	}
-	if meta := e.net.ShareGet(t, shareHost, other, "/meta"); meta.Status != http.StatusNotFound {
+	if meta := e.net.ShareGet(t, other, "/meta"); meta.Status != http.StatusNotFound {
 		t.Fatalf("a share that was never uploaded must not be served: %s", meta)
 	}
 }
 
-func TestShareHostsAreIsolatedAndUnknownHostsRefused(t *testing.T) {
+func TestShareRoutesAreStrictAndUnknownIDsRefused(t *testing.T) {
 	e := newEnv(t, "")
 	owner := e.user(t, "desktop")
 	a := owner.PublishHTML(t, testkit.ShareOptions{Mode: "link", HTML: artifactHTML})
 	b := owner.PublishHTML(t, testkit.ShareOptions{Mode: "link", HTML: artifactHTML})
-	if a.ID == b.ID || strings.Split(a.URL, "/")[2] == strings.Split(b.URL, "/")[2] {
-		t.Fatal("shares must not share an origin")
+	if a.ID == b.ID || a.URL == b.URL || strings.Split(a.URL, "/")[2] != apiHost || strings.Split(b.URL, "/")[2] != apiHost {
+		t.Fatalf("shares are paths of the API host: %s %s", a.URL, b.URL)
 	}
-	if res := e.net.ShareGet(t, shareHost, strings.Repeat("a", 26), "/"); res.Status != http.StatusOK {
+	if res := e.net.ShareGet(t, strings.Repeat("a", 26), "/"); res.Status != http.StatusOK {
 		t.Fatalf("an unknown share still gets the shell, which reports it missing: %s", res)
 	}
-	if meta := e.net.ShareGet(t, shareHost, strings.Repeat("a", 26), "/meta"); meta.Status != http.StatusNotFound {
+	if meta := e.net.ShareGet(t, strings.Repeat("a", 26), "/meta"); meta.Status != http.StatusNotFound {
 		t.Fatalf("unknown share meta: %s", meta)
 	}
-	if res := e.net.ShareGet(t, shareHost, "not-a-share-id", "/"); res.Status != http.StatusNotFound {
-		t.Fatalf("host that is not a share id: %s", res)
+	if res := e.net.ShareGet(t, "not-a-share-id", "/"); res.Status != http.StatusNotFound {
+		t.Fatalf("a path that is not a share id: %s", res)
 	}
-	if res := e.net.ShareGet(t, shareHost, a.ID, "/v1/shares"); res.Status != http.StatusNotFound {
-		t.Fatalf("the API must not be reachable on a share host: %s", res)
+	if res := e.net.ShareGet(t, a.ID, "/v1/shares"); res.Status != http.StatusNotFound {
+		t.Fatalf("the API must not be reachable under a share: %s", res)
 	}
-	if res := e.net.ShareGet(t, shareHost, a.ID, "/../../etc/passwd"); res.Status != http.StatusNotFound && res.Status != http.StatusMovedPermanently {
+	if res := e.net.ShareGet(t, a.ID, "/../../etc/passwd"); res.Status != http.StatusNotFound && res.Status != http.StatusMovedPermanently {
 		t.Fatalf("traversal: %s", res)
 	}
 	api := e.anonymous()
@@ -424,7 +428,7 @@ func TestDeleteAccountRemovesItsShares(t *testing.T) {
 	second := e.device(t, owner, "phone")
 	owner.ElevateByApproval(t, second)
 	owner.Must(t, http.StatusNoContent, "DELETE", "/v1/account", nil)
-	if meta := e.net.ShareGet(t, shareHost, sh.ID, "/meta"); meta.Status != http.StatusNotFound {
+	if meta := e.net.ShareGet(t, sh.ID, "/meta"); meta.Status != http.StatusNotFound {
 		t.Fatalf("share of a deleted account: %s", meta)
 	}
 	if res := owner.Do(t, "GET", "/v1/shares", nil); res.Status != http.StatusUnauthorized {
@@ -442,23 +446,18 @@ func TestPublishRoutesRequireASession(t *testing.T) {
 	}
 }
 
-func TestShareDomainInTheAPIsOwnZoneStillSandboxesEveryArtifact(t *testing.T) {
-	const api, share = "sync.ostia.test", "share.ostia.test"
-	pki := testkit.NewPKI(t, t.TempDir(), api, "*."+share)
-	proc := testkit.StartProcess(t, serverBinary, testkit.Config{
-		APIDomain: api, ShareDomain: share, RelayDomain: "relay.ostia.test", CertFile: pki.CertFile, KeyFile: pki.KeyFile,
-	})
-	n := testkit.Net{HTTPSAddr: proc.HTTPSAddr, Roots: pki.Roots, APIHost: api}
-	owner := testkit.NewAPI(n, testkit.NewIdentity("desktop"))
-	owner.Onboard(t, strings.TrimSpace(strings.SplitN(proc.Admin(t, "invite"), "\n", 2)[0]))
+func TestSharesOnTheAPIOriginStillSandboxEveryArtifact(t *testing.T) {
+	e := newEnv(t, "")
+	owner := e.user(t, "desktop")
+	n := e.net
 
-	hostile := "<script>document.cookie='__Host-ostia_admin=x; Domain=ostia.test'; fetch('https://" + api + "/admin/')</script>"
+	hostile := "<script>document.cookie='__Host-ostia_admin=x'; fetch('/admin/')</script>"
 	public := owner.PublishHTML(t, testkit.ShareOptions{Mode: "public", HTML: hostile})
-	if !strings.HasSuffix(strings.Split(public.URL, "/")[2], "."+share) {
+	if public.URL != "https://"+apiHost+"/s/"+public.ID {
 		t.Fatalf("share url %s", public.URL)
 	}
 	for _, method := range []string{"GET", "HEAD"} {
-		req, err := http.NewRequest(method, "https://"+public.ID+"."+share+"/", nil)
+		req, err := http.NewRequest(method, n.URL("/s/"+public.ID), nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -468,34 +467,51 @@ func TestShareDomainInTheAPIsOwnZoneStillSandboxesEveryArtifact(t *testing.T) {
 			t.Fatal(err)
 		}
 		_ = res.Body.Close()
-		if res.StatusCode != http.StatusOK || !strings.Contains(res.Header.Get("Content-Security-Policy"), "frame-ancestors 'none'") {
-			t.Fatalf("%s public share: %d CSP %q", method, res.StatusCode, res.Header.Get("Content-Security-Policy"))
+		csp := res.Header.Get("Content-Security-Policy")
+		if res.StatusCode != http.StatusOK || !strings.Contains(csp, "frame-ancestors 'none'") || !strings.Contains(csp, "default-src 'none'") || strings.Contains(csp, "unsafe-eval") {
+			t.Fatalf("%s public share: %d CSP %q", method, res.StatusCode, csp)
+		}
+		if res.Header.Get("Cross-Origin-Opener-Policy") != "same-origin" || res.Header.Get("X-Content-Type-Options") != "nosniff" {
+			t.Fatalf("%s: COOP %q nosniff %q", method, res.Header.Get("Cross-Origin-Opener-Policy"), res.Header.Get("X-Content-Type-Options"))
 		}
 		if len(res.Cookies()) != 0 {
-			t.Fatalf("%s: the share host set a cookie", method)
+			t.Fatalf("%s: a share route set a cookie", method)
 		}
+	}
+	withCookie := n.ShareGet(t, public.ID, "/meta", "Cookie", "__Host-ostia_admin=a-session")
+	without := n.ShareGet(t, public.ID, "/meta")
+	if fmt.Sprint(withCookie.Map(t)) != fmt.Sprint(without.Map(t)) || withCookie.Header.Get("Set-Cookie") != "" {
+		t.Fatal("a share route must not read or set the admin cookie")
 	}
 
 	encrypted := owner.PublishHTML(t, testkit.ShareOptions{Mode: "link", HTML: hostile})
-	for _, path := range []string{"/", "/meta", "/blob", "/shell.js", "/crypto.js", "/shell.css"} {
-		res := n.ShareGet(t, share, encrypted.ID, path)
+	responses := map[string]testkit.Response{}
+	for _, path := range []string{"/", "/meta", "/blob"} {
+		responses[path] = n.ShareGet(t, encrypted.ID, path)
+	}
+	for _, path := range []string{"/shell.js", "/crypto.js", "/shell.css"} {
+		responses["/s/-"+path] = n.ShareGet(t, "-", path)
+	}
+	for path, res := range responses {
 		csp := res.Header.Get("Content-Security-Policy")
-		if csp == "" || res.Header.Get("Set-Cookie") != "" || strings.Contains(csp, "allow-same-origin") {
-			t.Fatalf("%s: CSP %q Set-Cookie %q", path, csp, res.Header.Get("Set-Cookie"))
+		if res.Status != http.StatusOK || csp == "" || res.Header.Get("Set-Cookie") != "" || strings.Contains(csp, "allow-same-origin") {
+			t.Fatalf("%s: %d CSP %q Set-Cookie %q", path, res.Status, csp, res.Header.Get("Set-Cookie"))
 		}
 	}
-	shell := n.ShareGet(t, share, encrypted.ID, "/shell.js")
+	shell := n.ShareGet(t, "-", "/shell.js")
 	if !strings.Contains(string(shell.Body), "sandbox: 'allow-scripts'") || strings.Contains(string(shell.Body), "allow-same-origin") {
-		t.Fatal("the encrypted shell must frame the artifact with sandbox=allow-scripts and no allow-same-origin")
+		t.Fatal("the shell must frame the artifact with sandbox=allow-scripts and no allow-same-origin")
 	}
-	if blob := n.ShareGet(t, share, encrypted.ID, "/blob"); strings.Contains(string(blob.Body), "document.cookie") {
+	if blob := n.ShareGet(t, encrypted.ID, "/blob"); strings.Contains(string(blob.Body), "document.cookie") {
 		t.Fatal("an encrypted share must not be served as readable bytes")
 	}
-	if res := n.ShareGet(t, share, public.ID, "/blob"); res.Status != http.StatusOK || res.Header.Get("Content-Type") != "application/octet-stream" {
+	if res := n.ShareGet(t, public.ID, "/blob"); res.Status != http.StatusOK || res.Header.Get("Content-Type") != "application/octet-stream" {
 		t.Fatalf("a public share's bytes are data, not a document: %s", res)
 	}
-	if res := n.ShareGet(t, share, public.ID, "/admin/"); res.Status != http.StatusNotFound {
-		t.Fatalf("the admin UI must not exist on a share host: %s", res)
+	for _, path := range []string{"/admin/", "/admin/invites", "/v1/shares"} {
+		if res := n.ShareGet(t, public.ID, path); res.Status != http.StatusNotFound {
+			t.Fatalf("%s under a share must not exist: %s", path, res)
+		}
 	}
 }
 
@@ -511,15 +527,15 @@ func TestShareWarningIsAServerSettingThatNoShareCanChange(t *testing.T) {
 		}
 		sh := owner.PublishHTML(t, testkit.ShareOptions{Mode: "public", HTML: artifactHTML})
 		for _, path := range []string{"/meta", "/meta?warning=false"} {
-			res := e.net.ShareGet(t, shareHost, sh.ID, path, "X-Warning", "off", "Cookie", "warning=off")
+			res := e.net.ShareGet(t, sh.ID, path, "X-Warning", "off", "Cookie", "warning=off")
 			if got, ok := res.Map(t)["warning"].(bool); res.Status != http.StatusOK || !ok || got != tc.want {
 				t.Fatalf("share_warning %v, %s: %s", tc.want, path, res)
 			}
 		}
-		if pp := e.net.ShareGet(t, shareHost, sh.ID, "/").Header.Get("Permissions-Policy"); !strings.Contains(pp, "fullscreen=()") {
+		if pp := e.net.ShareGet(t, sh.ID, "/").Header.Get("Permissions-Policy"); !strings.Contains(pp, "fullscreen=()") {
 			t.Fatalf("Permissions-Policy %q", pp)
 		}
-		shell := e.net.ShareGet(t, shareHost, sh.ID, "/")
+		shell := e.net.ShareGet(t, sh.ID, "/")
 		if !strings.Contains(shell.Header.Get("Content-Security-Policy"), "frame-ancestors 'none'") || strings.Contains(string(shell.Body), artifactHTML) {
 			t.Fatalf("the shell stays whatever the setting: %s", shell)
 		}
@@ -531,7 +547,7 @@ func TestShareHostNeverRedirectsToACallerSuppliedURL(t *testing.T) {
 	owner := e.user(t, "desktop")
 	sh := owner.PublishHTML(t, testkit.ShareOptions{Mode: "public", HTML: artifactHTML})
 	for _, path := range []string{"//evil.example/", "/%2f%2fevil.example/", "/../evil.example", "/?next=https://evil.example", "/blob?url=https://evil.example", "/meta?redirect=//evil.example", "/report?to=https://evil.example"} {
-		res := e.net.ShareGet(t, shareHost, sh.ID, path)
+		res := e.net.ShareGet(t, sh.ID, path)
 		if loc := res.Header.Get("Location"); loc != "" || res.Status >= 300 && res.Status < 400 {
 			t.Fatalf("%s: status %d Location %q", path, res.Status, loc)
 		}
@@ -545,20 +561,20 @@ func TestTopLevelNavigationToShareDataIsRefused(t *testing.T) {
 		sh := owner.PublishHTML(t, testkit.ShareOptions{Mode: mode, HTML: artifactHTML})
 		for _, path := range []string{"/blob", "/meta"} {
 			for _, headers := range [][]string{{"Sec-Fetch-Mode", "navigate"}, {"Sec-Fetch-Dest", "document"}} {
-				res := e.net.ShareGet(t, shareHost, sh.ID, path, headers...)
+				res := e.net.ShareGet(t, sh.ID, path, headers...)
 				if res.Status != http.StatusNotFound || strings.Contains(string(res.Body), "Quarterly") || strings.Contains(string(res.Body), artifactHTML) {
 					t.Fatalf("%s %s %v: %s", mode, path, headers, res)
 				}
 			}
-			if res := e.net.ShareGet(t, shareHost, sh.ID, path, "Sec-Fetch-Mode", "same-origin", "Sec-Fetch-Dest", "empty"); res.Status != http.StatusOK {
+			if res := e.net.ShareGet(t, sh.ID, path, "Sec-Fetch-Mode", "same-origin", "Sec-Fetch-Dest", "empty"); res.Status != http.StatusOK {
 				t.Fatalf("%s %s from the shell: %s", mode, path, res)
 			}
 		}
-		if res := e.net.SharePost(t, shareHost, sh.ID, "/view", nil); res.Status != http.StatusNoContent {
+		if res := e.net.SharePost(t, sh.ID, "/view", nil); res.Status != http.StatusNoContent {
 			t.Fatalf("/view: %s", res)
 		}
 	}
-	if res := e.net.SharePost(t, shareHost, "nosuchshare", "/view", nil); res.Status != http.StatusNotFound {
+	if res := e.net.SharePost(t, "nosuchshare", "/view", nil); res.Status != http.StatusNotFound {
 		t.Fatalf("/view of an unknown share: %s", res)
 	}
 }

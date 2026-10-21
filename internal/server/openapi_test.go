@@ -37,7 +37,7 @@ func loadOperations(t *testing.T) []operation {
 	}
 	var out []operation
 	for path, item := range doc.Paths {
-		if _, shareHost := item["servers"]; shareHost {
+		if strings.HasPrefix(path, "/s/") {
 			continue
 		}
 		for method, details := range item {
@@ -56,7 +56,7 @@ func everythingOn(t *testing.T) *Server {
 	account, p8 := fake.WriteCredentials(t, t.TempDir())
 	cfg := config.Default()
 	cfg.DataDir = t.TempDir()
-	cfg.Domains.API, cfg.Domains.Share, cfg.Domains.Relay = "api.test", "shares.test", "r.test"
+	cfg.Domains.API, cfg.Domains.Relay = "api.test", "r.test"
 	cfg.Listen.HTTPS, cfg.Listen.HTTP = "", "127.0.0.1:0"
 	cfg.Modules.Push = true
 	cfg.Push.FCM.ServiceAccountFile = account

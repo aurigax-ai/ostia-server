@@ -12,7 +12,6 @@ import (
 
 const (
 	apiHost   = "api.ostia.test"
-	shareHost = "shares.test"
 	relayHost = "r.ostia.test"
 )
 
@@ -46,9 +45,9 @@ func newEnv(t *testing.T, extra string) *env {
 
 func newEnvModules(t *testing.T, modules, extra string) *env {
 	t.Helper()
-	pki := testkit.NewPKI(t, t.TempDir(), apiHost, "*."+shareHost)
+	pki := testkit.NewPKI(t, t.TempDir(), apiHost)
 	proc := testkit.StartProcess(t, serverBinary, testkit.Config{
-		APIDomain: apiHost, ShareDomain: shareHost, RelayDomain: relayHost,
+		APIDomain: apiHost, RelayDomain: relayHost,
 		CertFile: pki.CertFile, KeyFile: pki.KeyFile, Modules: modules, Extra: extra,
 	})
 	return &env{proc: proc, net: testkit.Net{HTTPSAddr: proc.HTTPSAddr, Roots: pki.Roots, APIHost: apiHost}, accounts: map[string][]*testkit.API{}, joined: map[string]time.Time{}}

@@ -23,7 +23,6 @@ data_dir = "/var/lib/ostia-server"
 
 [domains]
 api = "api.example.com"
-share = "example-share.net"
 relay = "r.example.com"
 
 [tls]
@@ -193,25 +192,19 @@ func TestValidationErrors(t *testing.T) {
 		body string
 		want string
 	}{
-		"missing api":             {strings.Replace(minimal, `api = "api.example.com"`, "", 1), "domains.api"},
-		"share equals api":        {strings.Replace(minimal, "example-share.net", "api.example.com", 1), "domains.share must differ"},
-		"share parent of api":     {strings.Replace(minimal, "example-share.net", "example.com", 1), "must not be a parent"},
-		"share is the suffix":     {strings.Replace(minimal, "example-share.net", "com", 1), "must not be a parent"},
-		"share parent with a dot": {strings.Replace(minimal, "example-share.net", "Example.COM.", 1), "must not be a parent"},
-		"share parent of nested":  {strings.Replace(strings.Replace(minimal, "example-share.net", "ostia.example.com", 1), "api.example.com", "sync.ostia.example.com", 1), "must not be a parent"},
-		"share on co.uk":          {strings.Replace(strings.Replace(minimal, "example-share.net", "a.co.uk", 1), "api.example.com", "api.b.co.uk", 1), ""},
-		"api under relay":         {strings.Replace(minimal, "api.example.com", "api.r.example.com", 1), "must not sit under"},
-		"no certs":                {strings.Replace(minimal, "[[tls.certs]]\ncert = \"/etc/c.pem\"\nkey = \"/etc/k.pem\"\n", "", 1), "tls.certs"},
-		"bad tls mode":            {strings.Replace(minimal, "[tls]\n", "[tls]\nmode = \"acme\"\n", 1), "tls.mode"},
-		"forward needs addr":      {strings.Replace(minimal, "[tls]\n", "[tls]\nmode = \"forward\"\n", 1), "forward_addr"},
-		"push no creds":           {minimal + "\n[modules]\npush = true\n", "push.fcm or push.apns"},
-		"bad scheme":              {strings.Replace(minimal, "[domains]\n", "[domains]\nscheme = \"ftp\"\n", 1), "domains.scheme"},
-		"expiry order":            {minimal + "\n[publish]\nmax_expiry = \"1h\"\n", "max_expiry"},
-		"endless invites":         {minimal + "\n[auth]\ninvite_ttl = \"0s\"\n", "auth.invite_ttl must be positive"},
-		"endless device invites":  {minimal + "\n[auth]\ndevice_invite_ttl = \"0s\"\n", "auth.device_invite_ttl must be positive"},
-		"bad journal":             {minimal + "\n[storage]\nsqlite_journal = \"truncate\"\n", "storage.sqlite_journal"},
-		"empty journal":           {minimal + "\n[storage]\nsqlite_journal = \"\"\n", "storage.sqlite_journal"},
-		"no retention":            {minimal + "\n[auth]\nrevoked_device_retention = \"0s\"\n", "revoked_device_retention"},
+		"missing api":            {strings.Replace(minimal, `api = "api.example.com"`, "", 1), "domains.api"},
+		"api under relay":        {strings.Replace(minimal, "api.example.com", "api.r.example.com", 1), "must not sit under"},
+		"no certs":               {strings.Replace(minimal, "[[tls.certs]]\ncert = \"/etc/c.pem\"\nkey = \"/etc/k.pem\"\n", "", 1), "tls.certs"},
+		"bad tls mode":           {strings.Replace(minimal, "[tls]\n", "[tls]\nmode = \"acme\"\n", 1), "tls.mode"},
+		"forward needs addr":     {strings.Replace(minimal, "[tls]\n", "[tls]\nmode = \"forward\"\n", 1), "forward_addr"},
+		"push no creds":          {minimal + "\n[modules]\npush = true\n", "push.fcm or push.apns"},
+		"bad scheme":             {strings.Replace(minimal, "[domains]\n", "[domains]\nscheme = \"ftp\"\n", 1), "domains.scheme"},
+		"expiry order":           {minimal + "\n[publish]\nmax_expiry = \"1h\"\n", "max_expiry"},
+		"endless invites":        {minimal + "\n[auth]\ninvite_ttl = \"0s\"\n", "auth.invite_ttl must be positive"},
+		"endless device invites": {minimal + "\n[auth]\ndevice_invite_ttl = \"0s\"\n", "auth.device_invite_ttl must be positive"},
+		"bad journal":            {minimal + "\n[storage]\nsqlite_journal = \"truncate\"\n", "storage.sqlite_journal"},
+		"empty journal":          {minimal + "\n[storage]\nsqlite_journal = \"\"\n", "storage.sqlite_journal"},
+		"no retention":           {minimal + "\n[auth]\nrevoked_device_retention = \"0s\"\n", "revoked_device_retention"},
 	}
 	for name, c := range cases {
 		_, err := Load(write(t, c.body))
@@ -232,7 +225,6 @@ func TestRelayListenerReplacesTheSNIRouterForTheRelayModule(t *testing.T) {
 data_dir = "/d"
 [domains]
 api = "sync.ostia.example.com"
-share = "share.ostia.example.com"
 relay = "relay.ostia.example.com"
 [listen]
 https = ""
@@ -270,7 +262,6 @@ func TestPlainHTTPOnlyNeedsNoCertificates(t *testing.T) {
 data_dir = "/d"
 [domains]
 api = "api.example.com"
-share = "example-share.net"
 [listen]
 https = ""
 http = "127.0.0.1:8080"
@@ -282,28 +273,10 @@ relay = false
 	}
 }
 
-func TestShareDomainMayBeADedicatedZoneOnTheSameSite(t *testing.T) {
-	for _, share := range []string{"shares.example.com", "share.api.example.com", "api2.example.com"} {
-		body := strings.Replace(minimal, "example-share.net", share, 1)
-		if _, err := Load(write(t, body)); err != nil {
-			t.Errorf("%s: %v", share, err)
-		}
-	}
-	nested := strings.Replace(strings.Replace(minimal, "example-share.net", "share.ostia.example.com", 1), "api.example.com", "sync.ostia.example.com", 1)
-	if _, err := Load(write(t, nested)); err != nil {
-		t.Fatalf("a sibling zone under the same parent as the api host: %v", err)
-	}
-}
-
-func TestShareDomainMayBeAPublicSuffix(t *testing.T) {
-	body := strings.Replace(minimal, "example-share.net", "usercontent.example.org", 1)
-	body = strings.Replace(body, "api.example.com", "api.example.net", 1)
-	if _, err := Load(write(t, body)); err != nil {
-		t.Fatalf("%v", err)
-	}
-	body = strings.Replace(minimal, "example-share.net", "github.io", 1)
-	if _, err := Load(write(t, body)); err != nil {
-		t.Fatalf("a share domain that is itself a public suffix isolates every share: %v", err)
+func TestTheShareDomainKeyIsGone(t *testing.T) {
+	body := strings.Replace(minimal, "[domains]\n", "[domains]\nshare = \"share.example.com\"\n", 1)
+	if _, err := Load(write(t, body)); err == nil || !strings.Contains(err.Error(), "unknown") {
+		t.Fatalf("shares live on the API host, so domains.share must be refused: %v", err)
 	}
 }
 

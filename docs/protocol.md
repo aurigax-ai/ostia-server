@@ -15,7 +15,7 @@ This is the contract between ostia-server and its clients (the Ostia desktop app
 | Route | Answer |
 |---|---|
 | `GET /healthz` | `{"ok": true}` |
-| `GET /v1/info` | `{api, modules: {relay, publish, sync, push}, auth: {invite, github}, approverMinAgeSeconds, relayDomain, shareDomain, limits}`; the modules are booleans; `approverMinAgeSeconds` is `auth.approver_min_age` in seconds and is informational, see Client rules for device wraps |
+| `GET /v1/info` | `{api, modules: {relay, publish, sync, push}, auth: {invite, github}, approverMinAgeSeconds, relayDomain, limits}`; the modules are booleans; `approverMinAgeSeconds` is `auth.approver_min_age` in seconds and is informational, see Client rules for device wraps |
 
 A disabled module's routes do not exist (`404`).
 
@@ -154,13 +154,13 @@ The Ostia desktop writes `PROXY TCP4|TCP6 <peer ip> 127.0.0.1 <port> <port>\r\n`
 
 ## Publish
 
-A share is one file (the Ostia portable artifact, at most `publish.max_file_bytes`) at `https://<id>.<share domain>/` (plus `:<domains.port>` when that is not the scheme's default port). Every share has its own origin.
+A share is one file (the Ostia portable artifact, at most `publish.max_file_bytes`) at `https://<api domain>/s/<id>` (plus `:<domains.port>` when that is not the scheme's default port). Shares share the API's origin; the shell keeps them apart by id and sandboxes every artifact.
 
 ### Modes
 
 | Mode | Key | Server holds |
 |---|---|---|
-| `link` | 256-bit key in the URL fragment: `https://<id>.<share domain>/#k=<base64url>` | ciphertext |
+| `link` | 256-bit key in the URL fragment: `https://<api domain>/s/<id>#k=<base64url>` | ciphertext |
 | `password` | PBKDF2-HMAC-SHA256 (600000 rounds) of the NFKC-normalised password and a 16-byte salt; optionally combined with a fragment key | ciphertext and salt |
 | `public` | none | the file itself (only when `publish.allow_public` is on, and only when the owner chose it) |
 
@@ -194,20 +194,20 @@ POST /v1/report/{id}  {reason}          204; no authentication
 - Quotas per account: `publish.max_shares_per_account` and `publish.max_bytes_per_account` (`507 quota-exceeded`).
 - `reason` is one of `illegal`, `malware`, `abuse`, `other`. Reports store only the share id, the reason and the time.
 
-### Share host
+### Share routes
 
-All requests are served by Host: `<id>.<share domain>`.
+All share routes are on the API host, under `/s/<id>`. A share id is validated before any lookup; any other path under `/s/` is `404`.
 
 | Path | Answer |
 |---|---|
-| `GET /` | The fixed shell page, for every mode. |
-| `GET /meta` | `{v: 1, mode, size, salt, expiresAt, warning}`; `warning` is the server's `publish.share_warning` and no share can change it; `404` unknown or not uploaded, `410` expired or removed |
-| `GET /blob` | The ciphertext, or the file itself for a public share. Answers `404` to a top-level navigation (`Sec-Fetch-Mode: navigate` or `Sec-Fetch-Dest: document`), as does `/meta`, so a link cannot download it |
-| `POST /view` | Counts one view; the shell calls it once the page is shown, after the visitor accepted the notice. `204`; `404` for an unknown, expired or removed share |
-| `POST /report` | `{reason}` as above, for the shell's report button |
-| `GET /shell.js`, `/crypto.js`, `/shell.css` | The shell's static assets |
+| `GET /s/<id>` (or with a trailing `/`) | The fixed shell page, for every mode. |
+| `GET /s/<id>/meta` | `{v: 1, mode, size, salt, expiresAt, warning}`; `warning` is the server's `publish.share_warning` and no share can change it; `404` unknown or not uploaded, `410` expired or removed |
+| `GET /s/<id>/blob` | The ciphertext, or the file itself for a public share. Answers `404` to a top-level navigation (`Sec-Fetch-Mode: navigate` or `Sec-Fetch-Dest: document`), as does `/meta`, so a link cannot download it |
+| `POST /s/<id>/view` | Counts one view; the shell calls it once the page is shown, after the visitor accepted the notice. `204`; `404` for an unknown, expired or removed share |
+| `POST /s/<id>/report` | `{reason}` as above, for the shell's report button |
+| `GET /s/-/shell.js`, `/s/-/crypto.js`, `/s/-/shell.css` | The shell's static assets; `-` is not a valid share id |
 
-The shell fetches `/meta` and `/blob`, decrypts with WebCrypto (not for public shares), shows a notice bar and a one-time interstitial, and renders the file in `<iframe sandbox="allow-scripts" srcdoc>`. Responses carry `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `Cross-Origin-Opener-Policy: same-origin`, `X-Robots-Tag: noindex`, a `Permissions-Policy` that denies fullscreen and the other powerful features, and `Cache-Control: no-store`. The server sets no cookies and stores no addresses or user agents; it counts views only.
+The shell fetches `/s/<id>/meta` and `/s/<id>/blob`, decrypts with WebCrypto (not for public shares), shows a notice bar and a one-time interstitial, and renders the file in `<iframe sandbox="allow-scripts" srcdoc>`. Responses carry `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `Cross-Origin-Opener-Policy: same-origin`, `X-Robots-Tag: noindex`, a `Permissions-Policy` that denies fullscreen and the other powerful features, and `Cache-Control: no-store`. The server sets no cookies and stores no addresses or user agents; it counts views only.
 
 Artifacts open links with `parent.postMessage({ostiaOpen: url}, '*')`: the shell takes `http(s)` URLs of up to 2048 characters from its own frame only, asks the visitor in a bar outside the frame, and opens the link with `window.open(url, '_blank', 'noopener,noreferrer')` only from the visitor's click on Open. Navigating the frame, popups, forms, downloads and `alert`/`confirm`/`prompt` are blocked; in-page DOM dialogs work.
 

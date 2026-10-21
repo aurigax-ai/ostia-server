@@ -6,9 +6,11 @@ import (
 	"io/fs"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/aurigax-ai/ostia-server/internal/httpx"
+	"github.com/aurigax-ai/ostia-server/internal/ids"
 	"github.com/aurigax-ai/ostia-server/internal/limit"
 	"github.com/aurigax-ai/ostia-server/internal/store"
 	shareshell "github.com/aurigax-ai/ostia-server/web/share-shell"
@@ -27,17 +29,32 @@ var staticAssets = map[string]string{
 	"/shell.css": "text/css; charset=utf-8",
 }
 
+const (
+	SharePrefix = "/s/"
+	assetLabel  = "-"
+)
+
+func shareRoute(urlPath string) (label, rest string, ok bool) {
+	tail, ok := strings.CutPrefix(urlPath, SharePrefix)
+	if !ok {
+		return "", "", false
+	}
+	label, rest, _ = strings.Cut(tail, "/")
+	return label, "/" + rest, true
+}
+
 func (s *Service) ShareHandler() http.Handler {
 	read := limit.Rule{Every: time.Second, Burst: 120}
 	reportRule := limit.Rule{Every: 12 * time.Minute, Burst: 5}
 	return s.Guard.PerIP("share.read", read, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		id, ok := hostLabel(r.Host, s.ShareDomain)
-		if !ok {
+		label, path, ok := shareRoute(r.URL.Path)
+		if !ok || (label != assetLabel && !ids.ValidID(label)) {
 			http.NotFound(w, r)
 			return
 		}
+		id := label
 		setCommonHeaders(w)
-		if r.URL.Path == "/report" && r.Method == http.MethodPost {
+		if path == "/report" && r.Method == http.MethodPost && label != assetLabel {
 			s.Guard.PerIP("share.report", reportRule, httpx.Handle(func(w http.ResponseWriter, r *http.Request) error {
 				var in struct {
 					Reason string `json:"reason"`
@@ -49,7 +66,7 @@ func (s *Service) ShareHandler() http.Handler {
 			})).ServeHTTP(w, r)
 			return
 		}
-		if r.URL.Path == "/view" && r.Method == http.MethodPost {
+		if path == "/view" && r.Method == http.MethodPost && label != assetLabel {
 			s.serveView(w, r, id)
 			return
 		}
@@ -58,12 +75,17 @@ func (s *Service) ShareHandler() http.Handler {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		if contentType, isAsset := staticAssets[r.URL.Path]; isAsset {
-			s.serveAsset(w, r, r.URL.Path[1:], contentType, dataContentSecurityPolicy)
+		if label == assetLabel {
+			contentType, isAsset := staticAssets[path]
+			if !isAsset {
+				http.NotFound(w, r)
+				return
+			}
+			s.serveAsset(w, r, path[1:], contentType, dataContentSecurityPolicy)
 			return
 		}
-		switch r.URL.Path {
-		case "/":
+		switch path {
+		case "/", "":
 			s.serveAsset(w, r, "index.html", "text/html; charset=utf-8", shellContentSecurityPolicy)
 		case "/meta":
 			s.serveMeta(w, r, id)

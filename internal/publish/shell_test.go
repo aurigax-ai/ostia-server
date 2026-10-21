@@ -60,6 +60,8 @@ func TestNoticeBarIsOutsideTheFrameAndCannotBeSkipped(t *testing.T) {
 		"Show the page",
 		"if (warning) document.body.prepend(renderBar())",
 		"localStorage",
+		"`ostia-notice:${shareId}`",
+		"location.pathname.split('/')[2]",
 	} {
 		if !strings.Contains(js, want) {
 			t.Errorf("shell.js lacks %q", want)

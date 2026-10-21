@@ -3,7 +3,6 @@ log_level = "info"
 
 [domains]
 api = "api.example.com"
-share = "example-share.net"
 relay = "r.example.com"
 scheme = "https"
 port = 443
@@ -23,10 +22,6 @@ forward_proxy_protocol = true
 [[tls.certs]]
 cert = "/etc/ostia-server/certs/api.pem"
 key = "/etc/ostia-server/certs/api.key"
-
-[[tls.certs]]
-cert = "/etc/ostia-server/certs/share.pem"
-key = "/etc/ostia-server/certs/share.key"
 
 [modules]
 relay = true

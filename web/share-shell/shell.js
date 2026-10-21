@@ -12,7 +12,8 @@ const REPORT_REASONS = [
 ]
 
 const root = document.getElementById('root')
-const shareId = location.hostname.split('.')[0]
+const shareId = location.pathname.split('/')[2]
+const shareBase = `/s/${shareId}`
 
 function element(tag, attributes = {}, text = '') {
   const node = document.createElement(tag)
@@ -26,7 +27,7 @@ function showMessage(text) {
 }
 
 async function fetchMeta() {
-  const response = await fetch('/meta', { cache: 'no-store' })
+  const response = await fetch(`${shareBase}/meta`, { cache: 'no-store' })
   if (!response.ok) {
     showMessage(MESSAGES[response.status] ?? 'This share could not be loaded.')
     return null
@@ -35,7 +36,7 @@ async function fetchMeta() {
 }
 
 async function fetchBlob() {
-  const response = await fetch('/blob', { cache: 'no-store' })
+  const response = await fetch(`${shareBase}/blob`, { cache: 'no-store' })
   if (!response.ok) {
     showMessage(MESSAGES[response.status] ?? 'This share could not be loaded.')
     return null
@@ -58,7 +59,7 @@ function withArtifactPolicy(html) {
 }
 
 function countView() {
-  fetch('/view', { method: 'POST' }).catch(() => {})
+  fetch(`${shareBase}/view`, { method: 'POST' }).catch(() => {})
 }
 
 function renderDocument(html) {
@@ -180,7 +181,7 @@ function renderBar() {
     const send = element('button', { type: 'button' }, 'Send report')
     const status = element('span', { role: 'status' })
     send.addEventListener('click', async () => {
-      const response = await fetch('/report', {
+      const response = await fetch(`${shareBase}/report`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ reason: select.value }),

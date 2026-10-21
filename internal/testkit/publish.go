@@ -84,9 +84,9 @@ func (a *API) UploadShare(t testing.TB, id string, payload []byte) Response {
 	return res
 }
 
-func (n Net) ShareGet(t testing.TB, shareDomain, id, path string, headers ...string) Response {
+func (n Net) ShareGet(t testing.TB, id, path string, headers ...string) Response {
 	t.Helper()
-	req, err := http.NewRequest("GET", n.scheme()+"://"+id+"."+shareDomain+path, nil)
+	req, err := http.NewRequest("GET", n.URL("/s/"+id+path), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,10 +102,10 @@ func (n Net) ShareGet(t testing.TB, shareDomain, id, path string, headers ...str
 	return Response{Status: res.StatusCode, Header: res.Header, Body: data}
 }
 
-func (n Net) SharePost(t testing.TB, shareDomain, id, path string, body any) Response {
+func (n Net) SharePost(t testing.TB, id, path string, body any) Response {
 	t.Helper()
 	raw, _ := json.Marshal(body)
-	req, err := http.NewRequest("POST", n.scheme()+"://"+id+"."+shareDomain+path, bytes.NewReader(raw))
+	req, err := http.NewRequest("POST", n.URL("/s/"+id+path), bytes.NewReader(raw))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,16 +121,16 @@ func (n Net) SharePost(t testing.TB, shareDomain, id, path string, body any) Res
 
 var ErrShareUnavailable = errors.New("share unavailable")
 
-func (n Net) OpenShare(t testing.TB, shareDomain string, sh Share) (string, error) {
+func (n Net) OpenShare(t testing.TB, sh Share) (string, error) {
 	t.Helper()
 	if sh.Mode == "public" {
-		res := n.ShareGet(t, shareDomain, sh.ID, "/")
+		res := n.ShareGet(t, sh.ID, "/blob")
 		if res.Status != http.StatusOK {
 			return "", fmt.Errorf("%w: %d", ErrShareUnavailable, res.Status)
 		}
 		return string(res.Body), nil
 	}
-	meta := n.ShareGet(t, shareDomain, sh.ID, "/meta")
+	meta := n.ShareGet(t, sh.ID, "/meta")
 	if meta.Status != http.StatusOK {
 		return "", fmt.Errorf("%w: %d", ErrShareUnavailable, meta.Status)
 	}
@@ -139,7 +139,7 @@ func (n Net) OpenShare(t testing.TB, shareDomain string, sh Share) (string, erro
 	if s, _ := m["salt"].(string); s != "" {
 		salt, _ = DecodeB64(s)
 	}
-	blob := n.ShareGet(t, shareDomain, sh.ID, "/blob")
+	blob := n.ShareGet(t, sh.ID, "/blob")
 	if blob.Status != http.StatusOK {
 		return "", fmt.Errorf("%w: %d", ErrShareUnavailable, blob.Status)
 	}

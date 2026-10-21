@@ -60,8 +60,12 @@ before(async () => {
   })
   await new Promise((resolve) => evilServer.listen(0, '127.0.0.1', resolve))
   server = createServer((req, res) => {
-    const id = req.headers.host.split('.')[0]
-    const path = req.url.split('?')[0]
+    const [, prefix, id, ...tail] = req.url.split('?')[0].split('/')
+    const path = `/${tail.join('/')}`
+    if (prefix !== 's') {
+      res.writeHead(404).end()
+      return
+    }
     const headers = {}
     let body
     let type = 'text/plain'
@@ -80,12 +84,12 @@ before(async () => {
       views++
       res.writeHead(204).end()
       return
-    } else if (path === '/') {
+    } else if (path === '/' && id !== '-') {
       type = 'text/html'
       body = readFileSync(new URL('index.html', dir))
       headers['Content-Security-Policy'] = shellCsp
       headers['Permissions-Policy'] = permissionsPolicy
-    } else if (['/shell.js', '/crypto.js', '/shell.css'].includes(path)) {
+    } else if (id === '-' && ['/shell.js', '/crypto.js', '/shell.css'].includes(path)) {
       type = path.endsWith('.css') ? 'text/css' : 'text/javascript'
       body = readFileSync(new URL(`.${path}`, dir))
     } else {
@@ -108,7 +112,7 @@ after(async () => {
 async function openShare(id, { accept = true } = {}) {
   const context = await browser.newContext()
   const page = await context.newPage()
-  const url = `http://${id}.localhost:${base}/`
+  const url = `http://localhost:${base}/s/${id}`
   await page.goto(url)
   if (accept) await page.getByRole('button', { name: 'Show the page' }).click()
   return { context, page, url }
@@ -203,5 +207,20 @@ test('the confirm shows the registrable domain and cuts a long subdomain in the 
   assert.match(prefix, /…/)
   assert.equal(await confirm.locator('.host').innerText(), prefix + domain)
   assert.equal(new URL(`https://${await confirm.locator('.host').getAttribute('title')}/`).hostname, fullHost)
+  await context.close()
+})
+
+test('accepting the notice for one share does not accept it for another on the same origin', { skip }, async () => {
+  const context = await browser.newContext()
+  const page = await context.newPage()
+  await page.goto(`http://localhost:${base}/s/head`)
+  await page.getByRole('button', { name: 'Show the page' }).click()
+  await page.locator('iframe').waitFor()
+  await page.goto(`http://localhost:${base}/s/bad`)
+  await page.getByRole('button', { name: 'Show the page' }).waitFor()
+  assert.equal(await page.locator('iframe').count(), 0)
+  await page.goto(`http://localhost:${base}/s/head`)
+  await page.locator('iframe').waitFor()
+  assert.equal(await page.getByRole('button', { name: 'Show the page' }).count(), 0)
   await context.close()
 })
