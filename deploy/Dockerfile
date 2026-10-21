@@ -10,9 +10,10 @@ RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags 
 RUN mkdir -p /out/data
 
 FROM gcr.io/distroless/static-debian12:nonroot
+LABEL org.opencontainers.image.source=https://github.com/aurigax-ai/ostia-server
+ENV OSTIA_SERVER_CONFIG=/etc/ostia-server/ostia-server.toml
 COPY --from=build /out/ostia-server /usr/local/bin/ostia-server
 COPY --from=build --chown=65532:65532 /out/data /var/lib/ostia-server
 VOLUME /var/lib/ostia-server
 EXPOSE 443
 ENTRYPOINT ["/usr/local/bin/ostia-server"]
-CMD ["-config", "/etc/ostia-server/ostia-server.toml"]
