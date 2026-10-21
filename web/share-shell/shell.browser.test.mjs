@@ -20,7 +20,7 @@ const playwright = process.env.CHROME_PATH ? await loadPlaywright() : null
 const skip = playwright ? false : 'set CHROME_PATH and make playwright-core importable (or PLAYWRIGHT_CORE) to run browser tests'
 
 const EVIL = 'http://evil.localhost'
-const artifacts = {
+const artifacts = new Map(Object.entries({
   loc: (evil) => `<p>stay</p><script>setTimeout(() => { location.href = '${evil}/loc' }, 50)</script>`,
   refresh: (evil) => `<meta http-equiv="refresh" content="0;url=${evil}/refresh"><p>stay</p>`,
   top: (evil) => `<p>stay</p><a id="a" target="_top" href="${evil}/top">x</a><script>setTimeout(() => document.getElementById('a').click(), 50)</script>`,
@@ -31,7 +31,7 @@ const artifacts = {
   long: () => `<p>stay</p><script>parent.postMessage({ ostiaOpen: 'https://accounts.google.com.secure-login.verification.example.org/x' }, '*')</script>`,
   early: (evil) => `<script>parent.postMessage({ ostiaOpen: '${evil}/ok' }, '*')</script><p>stay</p>`,
   head: () => `<script>window.headFirst = document.head.firstElementChild.outerHTML</script><p>stay</p>`,
-}
+}))
 
 let server, evilServer, browser, base, evilHits, views
 const evilPort = () => evilServer.address().port
@@ -55,8 +55,13 @@ before(async () => {
       type = 'application/json'
       body = JSON.stringify({ v: 1, mode: 'public', size: 1, salt: '', expiresAt: 0, warning: true })
     } else if (path === '/blob') {
+      const artifact = artifacts.get(id)
+      if (!artifact) {
+        res.writeHead(404).end()
+        return
+      }
       type = 'application/octet-stream'
-      body = `<!doctype html><body>${artifacts[id](`${EVIL}:${evilPort()}`)}`
+      body = `<!doctype html><body>${artifact(`${EVIL}:${evilPort()}`)}`
     } else if (path === '/view') {
       views++
       res.writeHead(204).end()
@@ -177,10 +182,12 @@ test('the confirm shows the registrable domain and cuts a long subdomain in the 
   const { context, page } = await openShare('long')
   const confirm = page.getByRole('alertdialog')
   await confirm.waitFor()
-  assert.equal(await confirm.locator('strong').innerText(), 'example.org')
-  const shown = await confirm.locator('.host').innerText()
-  assert.match(shown, /…/)
-  assert.ok(shown.endsWith('example.org'))
-  assert.equal(await confirm.locator('.host').getAttribute('title'), 'accounts.google.com.secure-login.verification.example.org')
+  const fullHost = 'accounts.google.com.secure-login.verification.example.org'
+  const domain = await confirm.locator('strong').innerText()
+  const prefix = await confirm.locator('.host').evaluate((node) => node.firstChild.textContent)
+  assert.equal(domain, 'example.org')
+  assert.match(prefix, /…/)
+  assert.equal(await confirm.locator('.host').innerText(), prefix + domain)
+  assert.equal(new URL(`https://${await confirm.locator('.host').getAttribute('title')}/`).hostname, fullHost)
   await context.close()
 })
