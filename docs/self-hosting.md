@@ -62,6 +62,8 @@ docker compose up -d --build
 docker compose exec ostia-server /usr/local/bin/ostia-server admin invite
 ```
 
+Every push to `main` publishes `ghcr.io/aurigax-ai/ostia-server:main-<short-sha>` and `:main` for `linux/amd64` and `linux/arm64` (the `publish` job in `.github/workflows/ci.yml`). Pin deployments to a `main-<short-sha>` tag. The image reads `/etc/ostia-server/ostia-server.toml` by default, so mount the config there and set `data_dir = "/var/lib/ostia-server"`, which is the volume the image owns.
+
 The image is distroless and runs as a non-root user; the compose file lowers `net.ipv4.ip_unprivileged_port_start` so it can bind 443.
 
 ## systemd
