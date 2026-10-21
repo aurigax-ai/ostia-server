@@ -4165,7 +4165,7 @@
           },
           "approverMinAgeSeconds": {
             "type": "integer",
-            "description": "How long a device must belong to the account before its approvals and signed wraps count (auth.approver_min_age, in seconds; 0 when switched off)"
+            "description": "How long a device must belong to the account before its approvals and signed wraps count (auth.approver_min_age, in seconds). Informational: clients enforce max(24 h, this value) and never act on a lower one"
           }
         }
       }

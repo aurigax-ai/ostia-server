@@ -576,3 +576,42 @@ func TestUnseenDevicesAndEstablishedCounts(t *testing.T) {
 		t.Fatalf("the oldest device has nothing older: %d", n)
 	}
 }
+
+func TestOpeningTheDatabaseDeletesVersionOneDeviceWraps(t *testing.T) {
+	c := &clock{t: time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC)}
+	path := filepath.Join(t.TempDir(), "db.sqlite")
+	d, err := Open(path, c.now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, _ := register(t, d, "github", "h")
+	for slot, blob := range map[string][]byte{
+		"device:old":  {1, 2, 3},
+		"device:new":  {2, 2, 3},
+		"passphrase":  {1, 2, 3},
+		"device:zero": {},
+	} {
+		if err := d.PutWrap(t.Context(), a.ID, slot, blob); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := d.Close(); err != nil {
+		t.Fatal(err)
+	}
+	d, err = Open(path, c.now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = d.Close() })
+	wraps, err := d.Wraps(t.Context(), a.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var slots []string
+	for _, w := range wraps {
+		slots = append(slots, w.Slot)
+	}
+	if fmt.Sprint(slots) != "[device:new device:zero passphrase]" {
+		t.Fatalf("slots after reopening: %v", slots)
+	}
+}

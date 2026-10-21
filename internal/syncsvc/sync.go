@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"io"
+	"maps"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -330,7 +332,8 @@ func (s *Service) rotate(w http.ResponseWriter, r *http.Request, p auth.Principa
 		return httpx.Errf(http.StatusBadRequest, "bad-request", "manifest size is outside the allowed range")
 	}
 	rotation := store.Rotation{IfMatch: in.IfMatch, Manifest: in.Manifest, Wraps: map[string][]byte{}, DeleteSlots: in.DeleteSlots, Retention: s.retention()}
-	for slot, wrap := range in.Wraps {
+	for _, slot := range slices.Sorted(maps.Keys(in.Wraps)) {
+		wrap := in.Wraps[slot]
 		if err := s.validSlot(r.Context(), p.AccountID, slot); err != nil {
 			return err
 		}

@@ -45,6 +45,10 @@ func Open(path string, now func() time.Time) (*DB, error) {
 		_ = conn.Close()
 		return nil, err
 	}
+	if err := d.dropV1DeviceWraps(context.Background()); err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
 	return d, nil
 }
 

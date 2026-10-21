@@ -17,6 +17,7 @@ import {
 const read = (name) => JSON.parse(readFileSync(new URL(name, import.meta.url), 'utf8'))
 const sync = read('sync.json')
 const auth = read('auth.json')
+const link = read('link.json')
 
 const b64 = (text) => Buffer.from(text, 'base64url')
 const toB64 = (bytes) => Buffer.from(bytes).toString('base64url')
@@ -136,6 +137,25 @@ test('forged and tampered device wraps fail the signature', () => {
     const parts = splitDeviceWrap(b64(blob))
     assert.ok(!verify(null, wrapSignatureMessage(sync.wrapSlot, parts.signed), signerPub, parts.signature))
   }
+})
+
+const base32 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567'
+
+function linkCode(joinerSignPub, joinerBoxPub, approverSignPub) {
+  const digest = createHash('sha256')
+    .update(Buffer.concat([Buffer.from(link.tag), b64(joinerSignPub), b64(joinerBoxPub), b64(approverSignPub)]))
+    .digest()
+  const bits = [...digest.subarray(0, 16)].map((byte) => byte.toString(2).padStart(8, '0')).join('')
+  const chars = Array.from({ length: 25 }, (_, i) => base32[parseInt(bits.slice(i * 5, i * 5 + 5), 2)])
+  return Array.from({ length: 5 }, (_, i) => chars.slice(i * 5, i * 5 + 5).join('')).join('-')
+}
+
+test('link code matches and binds the joiner box key', () => {
+  assert.equal(link.tag, 'ostia-sync/link-code/v1\n')
+  assert.match(link.linkCode, /^([A-Z2-7]{5}-){4}[A-Z2-7]{5}$/)
+  assert.equal(linkCode(link.joinerSignPub, link.joinerBoxPub, link.approverSignPub), link.linkCode)
+  assert.equal(linkCode(link.joinerSignPub, link.swappedJoinerBoxPub, link.approverSignPub), link.swappedBoxLinkCode)
+  assert.notEqual(link.linkCode, link.swappedBoxLinkCode)
 })
 
 test('registration proof and challenge signature verify', () => {

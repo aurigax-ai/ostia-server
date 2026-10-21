@@ -9,9 +9,11 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base32"
 	"encoding/binary"
 	"encoding/json/v2"
 	"errors"
+	"strings"
 
 	"golang.org/x/crypto/argon2"
 )
@@ -27,6 +29,9 @@ const (
 	labelPathKey      = "ostia-sync/path"
 	labelDeviceWrap   = "ostia-sync/wrap/device"
 	labelWrapSig      = "ostia-sync/wrap/sig/v1\n"
+	labelLinkCode     = "ostia-sync/link-code/v1\n"
+	linkCodeChars     = 25
+	linkCodeGroup     = 5
 	aadBlob           = "ostia-sync/blob/v1\n"
 	aadManifest       = "ostia-sync/manifest/v1"
 	aadPassphraseWrap = "ostia-sync/wrap/passphrase/v1"
@@ -105,8 +110,11 @@ type ManifestFile struct {
 }
 
 type ManifestDevice struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	SignPub   string `json:"signPub"`
+	BoxPub    string `json:"boxPub"`
+	CreatedAt int64  `json:"createdAt"`
 }
 
 type Manifest struct {
@@ -226,7 +234,7 @@ func UnwrapForDevice(wrap []byte, slot string, box *ecdh.PrivateKey, signerSignP
 		return DeviceWrap{}, ErrWrongKey
 	}
 	sigAt := len(wrap) - ed25519.SignatureSize
-	if !ed25519.Verify(signerSignPub, wrapSignatureMessage(slot, wrap[:sigAt]), wrap[sigAt:]) {
+	if len(signerSignPub) != ed25519.PublicKeySize || !ed25519.Verify(signerSignPub, wrapSignatureMessage(slot, wrap[:sigAt]), wrap[sigAt:]) {
 		return DeviceWrap{}, ErrBadWrapSignature
 	}
 	counterAt := 2 + idLen
@@ -245,4 +253,18 @@ func UnwrapForDevice(wrap []byte, slot string, box *ecdh.PrivateKey, signerSignP
 		return DeviceWrap{}, err
 	}
 	return DeviceWrap{SignerID: string(wrap[2:counterAt]), Counter: binary.BigEndian.Uint64(wrap[counterAt:]), Key: plain}, nil
+}
+
+func LinkCode(joinerSignPub, joinerBoxPub, approverSignPub []byte) string {
+	digest := sha256.New()
+	digest.Write([]byte(labelLinkCode))
+	digest.Write(joinerSignPub)
+	digest.Write(joinerBoxPub)
+	digest.Write(approverSignPub)
+	encoded := base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(digest.Sum(nil)[:16])[:linkCodeChars]
+	groups := make([]string, 0, linkCodeChars/linkCodeGroup)
+	for start := 0; start < linkCodeChars; start += linkCodeGroup {
+		groups = append(groups, encoded[start:start+linkCodeGroup])
+	}
+	return strings.Join(groups, "-")
 }

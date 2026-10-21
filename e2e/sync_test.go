@@ -32,8 +32,8 @@ func (f *syncFixture) addDevice(t *testing.T, name string) *testkit.SyncDevice {
 	t.Helper()
 	api := f.env.device(t, f.a.API, name)
 	d := testkit.NewSyncDevice(api)
-	f.a.GrantDevice(t, api.ID.DeviceID, api.ID.BoxPub())
-	if err := d.UnlockFromDeviceWrap(t); err != nil {
+	f.a.GrantDevice(t, api)
+	if err := d.JoinFromDeviceWrap(t, f.a.API.ID.SignPub()); err != nil {
 		t.Fatal(err)
 	}
 	return d
@@ -472,7 +472,7 @@ func TestWrapsOfOtherDevicesCannotBeReplacedWithoutApproval(t *testing.T) {
 		}
 	}
 	f.a.API.ElevateByApproval(t, b.API)
-	f.a.GrantDevice(t, f.a.API.ID.DeviceID, f.a.API.ID.BoxPub())
+	f.a.GrantDevice(t, f.a.API)
 }
 
 func TestFloodingManifestsCannotEraseEarlierHistory(t *testing.T) {
@@ -516,7 +516,7 @@ func errorCode(t *testing.T, res testkit.Response) any {
 func TestHonestLinkStoresASignedWrapTheJoinerOpens(t *testing.T) {
 	f := newSyncFixture(t, "")
 	api := f.env.device(t, f.a.API, "phone")
-	f.a.GrantDevice(t, api.ID.DeviceID, api.ID.BoxPub())
+	f.a.GrantDevice(t, api)
 	slot := "/v1/sync/wraps/device:" + api.ID.DeviceID
 	stored := f.a.API.Must(t, http.StatusOK, "GET", slot, nil).Map(t)["blob"].(string)
 	raw, err := testkit.DecodeB64(stored)
@@ -527,8 +527,61 @@ func TestHonestLinkStoresASignedWrapTheJoinerOpens(t *testing.T) {
 		t.Fatalf("stored wrap signer %q", signer)
 	}
 	joiner := testkit.NewSyncDevice(api)
-	if err := joiner.UnlockFromDeviceWrap(t); err != nil || !bytes.Equal(joiner.Key, f.a.Key) {
+	if err := joiner.JoinFromDeviceWrap(t, f.a.API.ID.SignPub()); err != nil || !bytes.Equal(joiner.Key, f.a.Key) {
 		t.Fatalf("the joiner must open the approver's signed wrap: %v", err)
+	}
+}
+
+func TestJoinerTrustsOnlyTheApproverKeyItWasGiven(t *testing.T) {
+	f := newSyncFixture(t, "")
+	api := f.env.device(t, f.a.API, "phone")
+	f.a.GrantDevice(t, api)
+	attacker := testkit.NewIdentity("attacker")
+	for name, pub := range map[string][]byte{"swapped key": attacker.SignPub(), "unknown key": nil, "short key": {1, 2, 3}} {
+		joiner := testkit.NewSyncDevice(api)
+		if err := joiner.JoinFromDeviceWrap(t, pub); !errors.Is(err, testkit.ErrBadWrapSignature) || joiner.Key != nil {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+}
+
+func TestJoinerRefusesAWrapWithAnOldCounter(t *testing.T) {
+	f := newSyncFixture(t, "")
+	b := f.addDevice(t, "second laptop")
+	api := f.env.device(t, f.a.API, "phone")
+	slot := "/v1/sync/wraps/device:" + api.ID.DeviceID
+	asA := testkit.WrapSigner{ID: f.a.API.ID.DeviceID, Sign: f.a.API.ID.Sign}
+	f.a.API.Must(t, http.StatusNoContent, "PUT", slot, map[string]string{"blob": wrapBlob(t, asA, f.a.Key, 0, api)})
+	if err := testkit.NewSyncDevice(api).JoinFromDeviceWrap(t, f.a.API.ID.SignPub()); !errors.Is(err, testkit.ErrBadWrapCounter) {
+		t.Fatalf("counter 0: %v", err)
+	}
+	if _, err := f.a.Sync(t, settings("theme", "dark")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.a.Sync(t, settings("theme", "light")); err != nil {
+		t.Fatal(err)
+	}
+	f.a.API.ElevateByApproval(t, b.API)
+	f.a.API.Must(t, http.StatusNoContent, "PUT", slot, map[string]string{"blob": wrapBlob(t, asA, f.a.Key, 1, api)})
+	if err := testkit.NewSyncDevice(api).JoinFromDeviceWrap(t, f.a.API.ID.SignPub()); !errors.Is(err, testkit.ErrBadWrapCounter) {
+		t.Fatalf("a counter below the manifest it opens: %v", err)
+	}
+}
+
+func TestRekeyOnlyFollowsASignerPinnedInTheLastManifest(t *testing.T) {
+	f := newSyncFixture(t, "")
+	b := f.addDevice(t, "second laptop")
+	c := f.addDevice(t, "third laptop")
+	if _, err := f.a.Sync(t, settings("theme", "dark")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.Pull(t); err != nil {
+		t.Fatal(err)
+	}
+	b.Approved = nil
+	f.a.RemoveDeviceAndRotate(t, b.API, c.API.ID.DeviceID, "correct horse", "")
+	if _, err := b.Pull(t); !errors.Is(err, testkit.ErrKeyUnknown) {
+		t.Fatalf("a wrap from a signer that is not pinned must not be adopted: %v", err)
 	}
 }
 
@@ -598,6 +651,19 @@ func TestRotationWithABadWrapSignatureChangesNothing(t *testing.T) {
 	})
 	if res.Status != http.StatusBadRequest || errorCode(t, res) != "bad-wrap" {
 		t.Fatalf("rotation with a forged wrap: %s", res)
+	}
+	good := wrapBlob(t, testkit.WrapSigner{ID: f.a.API.ID.DeviceID, Sign: f.a.API.ID.Sign}, newKey, 2, b.API)
+	c := f.env.device(t, f.a.API, "third")
+	res = f.a.API.Do(t, "POST", "/v1/sync/rotate", map[string]any{
+		"ifMatch":  1,
+		"manifest": testkit.EncodeB64(testkit.SealManifest(newKey, testkit.Manifest{Counter: 2})),
+		"wraps": map[string]string{
+			"device:" + b.API.ID.DeviceID: good,
+			"device:" + c.ID.DeviceID:     wrapBlob(t, testkit.WrapSigner{ID: f.a.API.ID.DeviceID, Sign: attacker.Sign}, newKey, 2, c),
+		},
+	})
+	if res.Status != http.StatusBadRequest || errorCode(t, res) != "bad-wrap" {
+		t.Fatalf("rotation with one valid and one forged wrap: %s", res)
 	}
 	asB := testkit.WrapSigner{ID: b.API.ID.DeviceID, Sign: b.API.ID.Sign}
 	res = f.a.API.Do(t, "POST", "/v1/sync/rotate", map[string]any{

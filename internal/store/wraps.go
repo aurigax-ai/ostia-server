@@ -54,3 +54,8 @@ func putWrapTx(ctx context.Context, tx *sql.Tx, now int64, accountID, slot strin
 		accountID, slot, blob, now)
 	return err
 }
+
+func (d *DB) dropV1DeviceWraps(ctx context.Context) error {
+	_, err := d.sql.ExecContext(ctx, `DELETE FROM key_wraps WHERE slot LIKE 'device:%' AND hex(substr(blob, 1, 1)) = '01'`)
+	return err
+}
