@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"errors"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -14,6 +15,12 @@ type AuditEntry struct {
 	Admin  string
 	Action string
 	Target string
+	Count  int
+}
+
+type AdminIdentity struct {
+	GitHubID int64
+	Login    string
 }
 
 type AdminInvite struct {
@@ -65,7 +72,7 @@ func (d *DB) SetupCodeValid(ctx context.Context, hash []byte) error {
 	return notFound(err)
 }
 
-func (d *DB) ClaimFirstAdmin(ctx context.Context, codeHash []byte, githubID int64, login string) (hint string, err error) {
+func (d *DB) ClaimFirstAdmin(ctx context.Context, codeHash []byte, githubID int64, login string, tokenHash []byte, ttl time.Duration) (hint string, err error) {
 	err = d.tx(ctx, func(tx *sql.Tx) error {
 		if exists, err := adminExists(ctx, tx); err != nil {
 			return err
@@ -76,8 +83,10 @@ func (d *DB) ClaimFirstAdmin(ctx context.Context, codeHash []byte, githubID int6
 		if err != nil {
 			return notFound(err)
 		}
-		_, err = tx.ExecContext(ctx, `INSERT INTO admins (github_id, login, created_at) VALUES (?, ?, ?)`, githubID, login, d.ms())
-		return err
+		if _, err = tx.ExecContext(ctx, `INSERT INTO admins (github_id, login, created_at) VALUES (?, ?, ?)`, githubID, login, d.ms()); err != nil {
+			return err
+		}
+		return d.insertAdminSession(ctx, tx, tokenHash, githubID, ttl)
 	})
 	return hint, err
 }
@@ -88,17 +97,24 @@ func adminExists(ctx context.Context, tx *sql.Tx) (bool, error) {
 	return n > 0, err
 }
 
-func (d *DB) SignInAdmin(ctx context.Context, githubID int64, login string) error {
-	res, err := d.sql.ExecContext(ctx, `UPDATE admins SET login = ? WHERE github_id = ?`, login, githubID)
-	if err != nil {
-		return err
-	}
-	if n, err := res.RowsAffected(); err != nil {
-		return err
-	} else if n == 0 {
-		return ErrNotFound
-	}
-	return nil
+func (d *DB) SignInAdmin(ctx context.Context, githubID int64, login string, tokenHash []byte, ttl time.Duration) error {
+	return d.tx(ctx, func(tx *sql.Tx) error {
+		res, err := tx.ExecContext(ctx, `UPDATE admins SET login = ? WHERE github_id = ?`, login, githubID)
+		if err != nil {
+			return err
+		}
+		if n, err := res.RowsAffected(); err != nil {
+			return err
+		} else if n == 0 {
+			return ErrNotFound
+		}
+		return d.insertAdminSession(ctx, tx, tokenHash, githubID, ttl)
+	})
+}
+
+func (d *DB) insertAdminSession(ctx context.Context, tx *sql.Tx, tokenHash []byte, githubID int64, ttl time.Duration) error {
+	_, err := tx.ExecContext(ctx, `INSERT INTO admin_sessions (token_hash, admin, github_id, expires_at) VALUES (?, ?, ?, ?)`, tokenHash, "github:"+strconv.FormatInt(githubID, 10), githubID, d.now().Add(ttl).UnixMilli())
+	return err
 }
 
 func (d *DB) ResetAdmins(ctx context.Context) (admins, sessions int64, err error) {
@@ -137,14 +153,10 @@ func (d *DB) TakeAdminOAuth(ctx context.Context, stateHash []byte) (verifier str
 	return verifier, codeHash, notFound(err)
 }
 
-func (d *DB) CreateAdminSession(ctx context.Context, tokenHash []byte, admin string, ttl time.Duration) error {
-	_, err := d.sql.ExecContext(ctx, `INSERT INTO admin_sessions (token_hash, admin, expires_at) VALUES (?, ?, ?)`, tokenHash, admin, d.now().Add(ttl).UnixMilli())
-	return err
-}
-
-func (d *DB) AdminSession(ctx context.Context, tokenHash []byte) (admin string, err error) {
-	err = d.sql.QueryRowContext(ctx, `SELECT admin FROM admin_sessions WHERE token_hash = ? AND expires_at > ?`, tokenHash, d.ms()).Scan(&admin)
-	return admin, notFound(err)
+func (d *DB) AdminSession(ctx context.Context, tokenHash []byte) (AdminIdentity, error) {
+	var who AdminIdentity
+	err := d.sql.QueryRowContext(ctx, `SELECT a.github_id, a.login FROM admin_sessions s JOIN admins a ON a.github_id = s.github_id WHERE s.token_hash = ? AND s.expires_at > ?`, tokenHash, d.ms()).Scan(&who.GitHubID, &who.Login)
+	return who, notFound(err)
 }
 
 func (d *DB) DeleteAdminSession(ctx context.Context, tokenHash []byte) error {
@@ -178,8 +190,24 @@ func (d *DB) AddAudit(ctx context.Context, admin, action, target string) error {
 	return err
 }
 
+const countWindow = time.Minute
+
+func (d *DB) CountAudit(ctx context.Context, admin, action, target string) error {
+	return d.tx(ctx, func(tx *sql.Tx) error {
+		res, err := tx.ExecContext(ctx, `UPDATE admin_audit SET count = count + 1, at = ? WHERE id = (SELECT MAX(id) FROM admin_audit WHERE admin = ? AND action = ? AND target = ? AND at > ?)`, d.ms(), admin, action, target, d.now().Add(-countWindow).UnixMilli())
+		if err != nil {
+			return err
+		}
+		if n, err := res.RowsAffected(); err != nil || n > 0 {
+			return err
+		}
+		_, err = tx.ExecContext(ctx, `INSERT INTO admin_audit (at, admin, action, target) VALUES (?, ?, ?, ?)`, d.ms(), admin, action, target)
+		return err
+	})
+}
+
 func (d *DB) Audit(ctx context.Context, limit int) ([]AuditEntry, error) {
-	rows, err := d.sql.QueryContext(ctx, `SELECT at, admin, action, target FROM admin_audit ORDER BY id DESC LIMIT ?`, limit)
+	rows, err := d.sql.QueryContext(ctx, `SELECT at, admin, action, target, count FROM admin_audit ORDER BY id DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -187,7 +215,7 @@ func (d *DB) Audit(ctx context.Context, limit int) ([]AuditEntry, error) {
 	var out []AuditEntry
 	for rows.Next() {
 		var e AuditEntry
-		if err := rows.Scan(&e.At, &e.Admin, &e.Action, &e.Target); err != nil {
+		if err := rows.Scan(&e.At, &e.Admin, &e.Action, &e.Target, &e.Count); err != nil {
 			return nil, err
 		}
 		out = append(out, e)

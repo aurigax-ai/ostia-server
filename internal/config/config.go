@@ -285,13 +285,24 @@ func (c *Config) loadAdminSecret() error {
 	case fromEnv != "":
 		c.Admin.GitHubClientSecret = fromEnv
 	case c.Admin.GitHubClientSecretFile != "":
-		raw, err := os.ReadFile(c.Admin.GitHubClientSecretFile)
+		raw, err := readPrivate(c.Admin.GitHubClientSecretFile)
 		if err != nil {
 			return fmt.Errorf("admin.github_client_secret_file: %w", err)
 		}
 		c.Admin.GitHubClientSecret = strings.TrimSpace(string(raw))
 	}
 	return nil
+}
+
+func readPrivate(path string) ([]byte, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, err
+	}
+	if info.Mode().Perm()&0o077 != 0 {
+		return nil, fmt.Errorf("%s is readable by group or others (mode %04o); make it 0600 or 0400", path, info.Mode().Perm())
+	}
+	return os.ReadFile(path)
 }
 
 func (c Config) APIOrigin() string {

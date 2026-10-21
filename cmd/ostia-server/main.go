@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -175,7 +176,11 @@ func admin(args []string) error {
 			return err
 		}
 		for _, e := range entries {
-			fmt.Printf("%s\t%s\t%s\t%s\n", time.UnixMilli(e.At).UTC().Format(time.RFC3339), e.Admin, e.Action, e.Target)
+			target := e.Target
+			if e.Count > 1 {
+				target += " x" + strconv.Itoa(e.Count)
+			}
+			fmt.Printf("%s\t%s\t%s\t%s\n", time.UnixMilli(e.At).UTC().Format(time.RFC3339), e.Admin, e.Action, target)
 		}
 		return nil
 	case "accounts":

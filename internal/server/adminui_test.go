@@ -22,8 +22,9 @@ import (
 )
 
 const (
-	adminGitHubID = 1000
-	adminLogin    = "octocat"
+	oauthCookieName = "__Host-ostia_admin_oauth"
+	adminGitHubID   = 1000
+	adminLogin      = "octocat"
 )
 
 type adminEnv struct {
@@ -127,6 +128,15 @@ func (e *adminEnv) post(path string, form url.Values, cookie *http.Cookie) reply
 	return e.send("POST", "api.test", path, form, cookie)
 }
 
+func (e *adminEnv) isAdmin(id int64, login string) bool {
+	e.t.Helper()
+	err := e.srv.DB.SignInAdmin(e.t.Context(), id, login, ids.Hash(ids.Token()), time.Hour)
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		e.t.Fatal(err)
+	}
+	return err == nil
+}
+
 func (e *adminEnv) setupCode() string {
 	e.t.Helper()
 	code, err := adminui.IssueSetupCode(e.t.Context(), e.srv.DB)
@@ -145,7 +155,7 @@ type flow struct {
 func (e *adminEnv) begin(code string) flow {
 	e.t.Helper()
 	res := e.post("/admin/github/start", url.Values{"code": {code}}, nil)
-	cookie, next := res.named("ostia_admin_oauth"), res.next()
+	cookie, next := res.named(oauthCookieName), res.next()
 	if res.Code != http.StatusOK || cookie == nil || next == "" {
 		e.t.Fatalf("start failed: %d %s", res.Code, res.Body)
 	}
@@ -350,7 +360,7 @@ func TestSetupWithTheCodeMakesTheGitHubUserTheAdminAndSpendsTheCode(t *testing.T
 	code := e.setupCode()
 	f := e.begin(strings.ToLower(code))
 	c := f.cookie
-	if !c.HttpOnly || !c.Secure || c.SameSite != http.SameSiteStrictMode || c.Path != "/admin/github" || c.MaxAge != 600 {
+	if !c.HttpOnly || !c.Secure || c.SameSite != http.SameSiteStrictMode || c.Path != "/" || c.Domain != "" || c.MaxAge != 600 {
 		t.Fatalf("state cookie %+v", c)
 	}
 	u, err := url.Parse(f.authorizeURL)
@@ -371,17 +381,20 @@ func TestSetupWithTheCodeMakesTheGitHubUserTheAdminAndSpendsTheCode(t *testing.T
 	if session == nil || !session.HttpOnly || !session.Secure || session.SameSite != http.SameSiteStrictMode || session.Path != "/admin" || session.MaxAge != int(adminui.SessionTTL/time.Second) {
 		t.Fatalf("session cookie %+v", session)
 	}
-	if cleared := res.named("ostia_admin_oauth"); cleared == nil || cleared.MaxAge >= 0 {
+	if cleared := res.named(oauthCookieName); cleared == nil || cleared.MaxAge >= 0 {
 		t.Fatalf("the state cookie must be cleared: %+v", cleared)
 	}
-	if page := e.get("/admin/invites", session); page.Code != http.StatusOK || !strings.Contains(page.Body.String(), "github:octocat") {
+	if page := e.get("/admin/invites", session); page.Code != http.StatusOK || !strings.Contains(page.Body.String(), "<span>octocat ·</span>") {
 		t.Fatalf("the new session must work: %d", page.Code)
 	}
-	if err := e.srv.DB.SignInAdmin(t.Context(), 4242, "octocat"); err != nil {
-		t.Fatalf("the GitHub id was not stored as an admin: %v", err)
+	if !e.isAdmin(4242, "octocat") {
+		t.Fatal("the GitHub id was not stored as an admin")
 	}
-	if err := e.srv.DB.SignInAdmin(t.Context(), 4243, "octocat"); !errors.Is(err, store.ErrNotFound) {
-		t.Fatalf("a login match must not make an admin: %v", err)
+	if e.isAdmin(4243, "octocat") {
+		t.Fatal("a login match must not make an admin")
+	}
+	if len(e.gh.Revoked) != 1 {
+		t.Fatalf("the GitHub access token must be revoked after /user: %v", e.gh.Revoked)
 	}
 	if err := e.srv.DB.SetupCodeValid(t.Context(), ids.Hash(auth.NormalizeCode(code))); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("the code survived the setup: %v", err)
@@ -399,7 +412,7 @@ func TestSetupRefusesAWrongUsedOrExpiredCode(t *testing.T) {
 	good := e.setupCode()
 	for name, guess := range map[string]string{"empty": "", "unknown": "AAAAA-BBBBB-CCCCC-DDDDD", "injection": "' OR 1=1 --"} {
 		res := e.post("/admin/github/start", url.Values{"code": {guess}}, nil)
-		if res.Code != http.StatusUnauthorized || res.named("ostia_admin_oauth") != nil || res.Header().Get("Location") != "" || !strings.Contains(res.Body.String(), "Set up admin") {
+		if res.Code != http.StatusUnauthorized || res.named(oauthCookieName) != nil || res.Header().Get("Location") != "" || !strings.Contains(res.Body.String(), "Set up admin") {
 			t.Errorf("%s code answered %d", name, res.Code)
 		}
 		if strings.Contains(res.Body.String(), "OR 1=1") {
@@ -413,13 +426,13 @@ func TestSetupRefusesAWrongUsedOrExpiredCode(t *testing.T) {
 	if _, _, err := e.srv.DB.ResetAdmins(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	if res := e.post("/admin/github/start", url.Values{"code": {good}}, nil); res.Code != http.StatusUnauthorized || res.named("ostia_admin_oauth") != nil {
+	if res := e.post("/admin/github/start", url.Values{"code": {good}}, nil); res.Code != http.StatusUnauthorized || res.named(oauthCookieName) != nil {
 		t.Fatalf("a used code started a setup: %d", res.Code)
 	}
 
 	late := e.setupCode()
 	e.now = e.now.Add(adminui.CodeTTL + time.Second)
-	if res := e.post("/admin/github/start", url.Values{"code": {late}}, nil); res.Code != http.StatusUnauthorized || res.named("ostia_admin_oauth") != nil {
+	if res := e.post("/admin/github/start", url.Values{"code": {late}}, nil); res.Code != http.StatusUnauthorized || res.named(oauthCookieName) != nil {
 		t.Fatalf("an expired code started a setup: %d", res.Code)
 	}
 	if has, _ := e.srv.DB.HasAdmin(t.Context()); has {
@@ -453,10 +466,10 @@ func TestSetupIsRefusedOnceAnAdminExists(t *testing.T) {
 	if res.Code != http.StatusConflict || res.cookie() != nil || !strings.Contains(res.Body.String(), "already set up") {
 		t.Fatalf("a second setup answered %d %s", res.Code, res.Body)
 	}
-	if err := e.srv.DB.SignInAdmin(t.Context(), 2, "second"); !errors.Is(err, store.ErrNotFound) {
-		t.Fatalf("a second admin was stored: %v", err)
+	if e.isAdmin(2, "second") {
+		t.Fatal("a second admin was stored")
 	}
-	if res := e.post("/admin/github/start", url.Values{"code": {code}}, nil); res.Code != http.StatusConflict || res.named("ostia_admin_oauth") != nil {
+	if res := e.post("/admin/github/start", url.Values{"code": {code}}, nil); res.Code != http.StatusConflict || res.named(oauthCookieName) != nil {
 		t.Fatalf("a setup code was accepted with an admin present: %d", res.Code)
 	}
 	if _, err := adminui.IssueSetupCode(t.Context(), e.srv.DB); !errors.Is(err, store.ErrAdminExists) {
@@ -480,8 +493,11 @@ func TestOnlyStoredGitHubIdsGetASession(t *testing.T) {
 	if res.Code != http.StatusSeeOther || res.cookie() == nil {
 		t.Fatalf("the admin must get in after a rename: %d", res.Code)
 	}
-	if page := e.get("/admin/invites", res.cookie()); !strings.Contains(page.Body.String(), "github:renamed") {
+	if page := e.get("/admin/invites", res.cookie()); !strings.Contains(page.Body.String(), "<span>renamed ·</span>") {
 		t.Fatalf("the session shows %s", page.Body)
+	}
+	if entries, _ := e.srv.DB.Audit(t.Context(), 1); len(entries) != 1 || entries[0].Admin != "github:1000" || entries[0].Target != "renamed" {
+		t.Fatalf("the audit names the admin by id and shows the login as a label: %+v", entries)
 	}
 }
 
@@ -492,7 +508,7 @@ func TestSignInStateMustBelongToTheBrowserThatStartedIt(t *testing.T) {
 	callback := e.authorize(f, adminGitHubID, adminLogin)
 	for name, cookie := range map[string]*http.Cookie{
 		"no cookie":                  nil,
-		"a wrong cookie":             {Name: "ostia_admin_oauth", Value: ids.Token()},
+		"a wrong cookie":             {Name: oauthCookieName, Value: ids.Token()},
 		"another flow's cookie":      other.cookie,
 		"a cookie of the wrong name": {Name: "ostia_admin", Value: f.state},
 	} {
@@ -595,10 +611,10 @@ func TestSetupCodeIsHashedAtRestAndANewOneReplacesTheOld(t *testing.T) {
 	if err := d.SetupCodeValid(t.Context(), ids.Hash(auth.NormalizeCode(old))); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("an older code survived: %v", err)
 	}
-	if _, err := d.ClaimFirstAdmin(t.Context(), []byte(code), 1, "a"); !errors.Is(err, store.ErrNotFound) {
+	if _, err := d.ClaimFirstAdmin(t.Context(), []byte(code), 1, "a", ids.Hash("tok"), time.Hour); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("the plain code must not be what is stored: %v", err)
 	}
-	hint, err := d.ClaimFirstAdmin(t.Context(), ids.Hash(auth.NormalizeCode(code)), 1, "a")
+	hint, err := d.ClaimFirstAdmin(t.Context(), ids.Hash(auth.NormalizeCode(code)), 1, "a", ids.Hash("tok"), time.Hour)
 	if err != nil || hint != strings.ToUpper(auth.NormalizeCode(code)[:4]) {
 		t.Fatalf("%q %v", hint, err)
 	}
@@ -644,7 +660,7 @@ func TestWrongSetupCodesAreLimitedOverallButAValidCodeGetsIn(t *testing.T) {
 	if res.Code != http.StatusTooManyRequests || res.Header().Get("Retry-After") != "2" {
 		t.Fatalf("Retry-After must match the refill of the overall limit: %d %q", res.Code, res.Header().Get("Retry-After"))
 	}
-	if res := e.from("203.0.113.251", "POST", "/admin/github/start", url.Values{"code": {code}}); res.Code != http.StatusOK || res.named("ostia_admin_oauth") == nil {
+	if res := e.from("203.0.113.251", "POST", "/admin/github/start", url.Values{"code": {code}}); res.Code != http.StatusOK || res.named(oauthCookieName) == nil {
 		t.Fatalf("a valid code must get in while the overall limit is exhausted: %d", res.Code)
 	}
 }
@@ -990,15 +1006,15 @@ func TestEveryAdminActionIsAudited(t *testing.T) {
 			t.Errorf("entry %+v lacks the time", entries[i])
 		}
 	}
-	who := "github:octocat"
+	who := "github:4242"
 	want := []string{
 		"cli setup-code " + hint,
-		who + " setup 4242",
+		who + " setup octocat",
 		who + " invite.create " + open[0].Hint,
 		who + " invite.revoke " + open[0].Hint,
 		who + " account.delete " + a.ID,
 		who + " logout ",
-		who + " login 4242",
+		who + " login octocat",
 	}
 	if strings.Join(got, "|") != strings.Join(want, "|") {
 		t.Fatalf("audit\n got %q\nwant %q", got, want)
@@ -1034,17 +1050,20 @@ func TestEverySetupRefusalAndTheResetAreAudited(t *testing.T) {
 	entries, _ := e.srv.DB.Audit(t.Context(), 50)
 	var got []string
 	for i := len(entries) - 1; i >= 0; i-- {
-		got = append(got, entries[i].Admin+" "+entries[i].Action+" "+entries[i].Target)
+		line := entries[i].Admin + " " + entries[i].Action + " " + entries[i].Target
+		if entries[i].Count > 1 {
+			line += fmt.Sprintf(" x%d", entries[i].Count)
+		}
+		got = append(got, line)
 	}
 	want := []string{
 		"anonymous refused setup-code",
 		"cli setup-code " + hint,
-		"github:octocat setup 4242",
+		"github:4242 setup octocat",
 		"anonymous refused admin-exists 99",
 		"anonymous refused admin-exists",
 		"anonymous refused not-admin 99",
-		"anonymous refused state-mismatch",
-		"anonymous refused state-mismatch",
+		"anonymous refused state-mismatch x2",
 		"anonymous refused github-denied",
 		"anonymous refused github-unavailable",
 		"cli reset 1 admins, 1 sessions",
@@ -1083,14 +1102,14 @@ func TestResetReturnsTheServerToSetup(t *testing.T) {
 	if res := e.complete(pending, adminGitHubID, adminLogin); res.Code == http.StatusSeeOther {
 		t.Fatalf("a sign-in started before the reset finished after it: %d", res.Code)
 	}
-	if res := e.post("/admin/github/start", url.Values{}, nil); res.Code != http.StatusUnauthorized || res.named("ostia_admin_oauth") != nil {
+	if res := e.post("/admin/github/start", url.Values{}, nil); res.Code != http.StatusUnauthorized || res.named(oauthCookieName) != nil {
 		t.Fatalf("after a reset sign-in needs a setup code: %d", res.Code)
 	}
 	if res := e.complete(e.begin(code), 5000, "newcomer"); res.Code != http.StatusSeeOther {
 		t.Fatalf("setup after a reset: %d", res.Code)
 	}
-	if err := e.srv.DB.SignInAdmin(t.Context(), adminGitHubID, adminLogin); !errors.Is(err, store.ErrNotFound) {
-		t.Fatalf("the old admin id is back: %v", err)
+	if e.isAdmin(adminGitHubID, adminLogin) {
+		t.Fatal("the old admin id is back")
 	}
 }
 
@@ -1223,4 +1242,98 @@ func TestAdminRequestsGetTheJSONDeadlines(t *testing.T) {
 			}
 		}
 	}
+}
+
+func TestCheapRefusalsAreCountedNotWrittenOneRowEach(t *testing.T) {
+	var log strings.Builder
+	restore := captureLog(&log)
+	defer restore()
+	e := newAdminEnv(t, nil, Options{})
+	e.signIn()
+	for i := range 30 {
+		e.from(fmt.Sprintf("198.51.100.%d", i+1), "GET", "/admin/github/finish?code=x&state=unknown"+fmt.Sprint(i), nil)
+	}
+	f := e.begin("")
+	for i := range 10 {
+		e.land(e.authorize(f, adminGitHubID, adminLogin), &http.Cookie{Name: oauthCookieName, Value: fmt.Sprint("wrong", i)})
+	}
+	if strings.Count(log.String(), "reason=state-mismatch") != 40 {
+		t.Fatal("every refusal must still be logged")
+	}
+	entries, _ := e.srv.DB.Audit(t.Context(), 50)
+	rows := map[string]int{}
+	for _, entry := range entries {
+		if entry.Action == "refused" {
+			rows[entry.Target] += entry.Count
+			if entry.Count < 2 {
+				t.Errorf("a counted refusal has its own row: %+v", entry)
+			}
+		}
+	}
+	if len(rows) != 1 || rows["state-mismatch"] != 40 {
+		t.Fatalf("%v", rows)
+	}
+	e.now = e.now.Add(2 * time.Minute)
+	e.get("/admin/github/finish?code=x&state=again", nil)
+	if entries, _ = e.srv.DB.Audit(t.Context(), 50); entries[0].Count != 1 || entries[0].Target != "state-mismatch" {
+		t.Fatalf("a later minute starts a new row: %+v", entries[0])
+	}
+}
+
+func TestTheGitHubTokenIsRevokedEvenWhenTheSignInIsRefusedAndRevokeFailuresDoNotBlock(t *testing.T) {
+	var log strings.Builder
+	restore := captureLog(&log)
+	defer restore()
+	e := newAdminEnv(t, nil, Options{})
+	e.signIn()
+	before := len(e.gh.Revoked)
+	if res := e.complete(e.begin(""), 2000, "mallory"); res.Code != http.StatusForbidden {
+		t.Fatalf("%d", res.Code)
+	}
+	if len(e.gh.Revoked) != before+1 {
+		t.Fatalf("a refused sign-in left its token alive: %v", e.gh.Revoked)
+	}
+	e.gh.RevokeStatus = http.StatusInternalServerError
+	res := e.complete(e.begin(""), adminGitHubID, adminLogin)
+	if res.Code != http.StatusSeeOther || res.cookie() == nil {
+		t.Fatalf("a failing revoke must not block the admin: %d", res.Code)
+	}
+	if !strings.Contains(log.String(), "could not revoke") || strings.Contains(log.String(), "gho_web") {
+		t.Fatalf("the failure must be logged without the token: %s", log.String())
+	}
+}
+
+func TestSessionsDieWithTheirAdminAndNameHimByNumericID(t *testing.T) {
+	e := newAdminEnv(t, nil, Options{})
+	s := e.signIn()
+	admin, err := OpenAdmin(e.srv.Cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = admin.ResetAdmins(t.Context())
+	_ = admin.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res := e.get("/admin/invites", s.cookie); res.Code != http.StatusSeeOther {
+		t.Fatalf("a session outlived its admin: %d", res.Code)
+	}
+	var left int
+	for _, entry := range mustAudit(t, e) {
+		if strings.HasPrefix(entry.Admin, "github:") && entry.Admin != fmt.Sprintf("github:%d", adminGitHubID) {
+			left++
+		}
+	}
+	if left != 0 {
+		t.Fatal("the audit must name the admin by numeric id")
+	}
+}
+
+func mustAudit(t *testing.T, e *adminEnv) []store.AuditEntry {
+	t.Helper()
+	entries, err := e.srv.DB.Audit(t.Context(), 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return entries
 }

@@ -21,7 +21,7 @@ import (
 const (
 	CallbackPath = "/admin/github/callback"
 	finishPath   = "/admin/github/finish"
-	oauthCookie  = "ostia_admin_oauth"
+	oauthCookie  = "__Host-ostia_admin_oauth"
 	oauthTTL     = 10 * time.Minute
 
 	maxCodeLen  = 512
@@ -57,6 +57,14 @@ func (s *Service) refuse(w http.ResponseWriter, r *http.Request, status int, rea
 	s.renderLogin(w, r, status, message)
 }
 
+func (s *Service) refuseCheaply(w http.ResponseWriter, r *http.Request, status int, reason, message string) {
+	slog.Warn("admin sign-in refused", "reason", reason)
+	if err := s.DB.CountAudit(r.Context(), "anonymous", "refused", reason); err != nil {
+		slog.Error("count admin refusal", "reason", reason, "err", err)
+	}
+	s.renderLogin(w, r, status, message)
+}
+
 func (s *Service) start(w http.ResponseWriter, r *http.Request) {
 	if err := parseForm(w, r); err != nil {
 		s.fail(w, r, err)
@@ -85,7 +93,7 @@ func (s *Service) start(w http.ResponseWriter, r *http.Request) {
 				s.fail(w, r, httpx.ErrRateLimited)
 				return
 			}
-			s.refuse(w, r, http.StatusUnauthorized, "setup-code", "", "That setup code is unknown, used or expired.")
+			s.refuseCheaply(w, r, http.StatusUnauthorized, "setup-code", "That setup code is unknown, used or expired.")
 			return
 		}
 	}
@@ -125,12 +133,12 @@ func (s *Service) finish(w http.ResponseWriter, r *http.Request) {
 	}
 	setOAuthCookie(w, "", -1)
 	if !bound {
-		s.refuse(w, r, http.StatusBadRequest, "state-mismatch", "", "This sign-in did not start in this browser. Start again.")
+		s.refuseCheaply(w, r, http.StatusBadRequest, "state-mismatch", "This sign-in did not start in this browser. Start again.")
 		return
 	}
 	verifier, codeHash, err := s.DB.TakeAdminOAuth(r.Context(), ids.Hash(state))
 	if errors.Is(err, store.ErrNotFound) {
-		s.refuse(w, r, http.StatusBadRequest, "state-unknown", "", "This sign-in was already used or has expired. Start again.")
+		s.refuseCheaply(w, r, http.StatusBadRequest, "state-unknown", "This sign-in was already used or has expired. Start again.")
 		return
 	}
 	if err != nil {
@@ -147,27 +155,25 @@ func (s *Service) finish(w http.ResponseWriter, r *http.Request) {
 		s.refuse(w, r, http.StatusBadGateway, "github-unavailable", "", "GitHub could not be reached or refused the code. Try again.")
 		return
 	}
-	id := strconv.FormatInt(user.ID, 10)
-	name := "github:" + user.Login
+	token := ids.Token()
 	if len(codeHash) > 0 {
-		s.claim(w, r, codeHash, user, name, id)
+		s.claim(w, r, codeHash, user, token)
 		return
 	}
-	if err := s.DB.SignInAdmin(r.Context(), user.ID, user.Login); err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			s.refuse(w, r, http.StatusForbidden, "not-admin", id, "That GitHub account is not an admin of this server.")
-			return
-		}
+	err = s.DB.SignInAdmin(r.Context(), user.ID, user.Login, ids.Hash(token), SessionTTL)
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		s.refuse(w, r, http.StatusForbidden, "not-admin", strconv.FormatInt(user.ID, 10), "That GitHub account is not an admin of this server.")
+	case err != nil:
 		s.fail(w, r, err)
-		return
-	}
-	if err := s.startSession(w, r, name, "login", id); err != nil {
-		s.fail(w, r, err)
+	default:
+		s.openSession(w, r, token, user.ID, user.Login, "login")
 	}
 }
 
-func (s *Service) claim(w http.ResponseWriter, r *http.Request, codeHash []byte, user auth.GitHubUser, name, id string) {
-	_, err := s.DB.ClaimFirstAdmin(r.Context(), codeHash, user.ID, user.Login)
+func (s *Service) claim(w http.ResponseWriter, r *http.Request, codeHash []byte, user auth.GitHubUser, token string) {
+	id := strconv.FormatInt(user.ID, 10)
+	_, err := s.DB.ClaimFirstAdmin(r.Context(), codeHash, user.ID, user.Login, ids.Hash(token), SessionTTL)
 	switch {
 	case errors.Is(err, store.ErrAdminExists):
 		s.refuse(w, r, http.StatusConflict, "admin-exists", id, "An admin is already set up on this server.")
@@ -176,9 +182,7 @@ func (s *Service) claim(w http.ResponseWriter, r *http.Request, codeHash []byte,
 	case err != nil:
 		s.fail(w, r, err)
 	default:
-		if err := s.startSession(w, r, name, "setup", id); err != nil {
-			s.fail(w, r, err)
-		}
+		s.openSession(w, r, token, user.ID, user.Login, "setup")
 	}
 }
 
@@ -187,11 +191,16 @@ func (s *Service) githubUser(r *http.Request, code, verifier string) (auth.GitHu
 	if err != nil {
 		return auth.GitHubUser{}, err
 	}
+	defer func() {
+		if err := s.GitHub.RevokeToken(r.Context(), s.ClientSecret, token); err != nil {
+			slog.Warn("admin sign-in: could not revoke the github token", "err", err)
+		}
+	}()
 	return s.GitHub.User(r.Context(), token)
 }
 
 func setOAuthCookie(w http.ResponseWriter, value string, maxAge int) {
-	http.SetCookie(w, &http.Cookie{Name: oauthCookie, Value: value, Path: "/admin/github", MaxAge: maxAge, HttpOnly: true, Secure: true, SameSite: http.SameSiteStrictMode})
+	http.SetCookie(w, &http.Cookie{Name: oauthCookie, Value: value, Path: "/", MaxAge: maxAge, HttpOnly: true, Secure: true, SameSite: http.SameSiteStrictMode})
 }
 
 func retryAfter(rule limit.Rule) string { return strconv.Itoa(max(1, int(rule.Every/time.Second))) }

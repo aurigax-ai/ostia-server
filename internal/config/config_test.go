@@ -130,6 +130,26 @@ func TestAdminNeedsAClientIDAndASecretWhenEnabled(t *testing.T) {
 	}
 }
 
+func TestAdminSecretFileWiderThan0600IsRefused(t *testing.T) {
+	t.Setenv(AdminSecretEnv, "")
+	secret := filepath.Join(t.TempDir(), "secret")
+	if err := os.WriteFile(secret, []byte("s3cret"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	body := minimal + "\n[admin]\nenabled = true\ngithub_client_id = \"Iv1.abc\"\ngithub_client_secret_file = " + strconv.Quote(secret) + "\n"
+	if _, err := Load(write(t, body)); err == nil || !strings.Contains(err.Error(), "readable by group or others") {
+		t.Fatalf("a world-readable secret file must be refused: %v", err)
+	}
+	for _, mode := range []os.FileMode{0o600, 0o400} {
+		if err := os.Chmod(secret, mode); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Load(write(t, body)); err != nil {
+			t.Fatalf("mode %o: %v", mode, err)
+		}
+	}
+}
+
 func TestAdminSecretIsNotReadWhileAdminIsOff(t *testing.T) {
 	t.Setenv(AdminSecretEnv, "")
 	cfg, err := Load(write(t, minimal+"\n[admin]\ngithub_client_id = \"Iv1.abc\"\ngithub_client_secret_file = \"/nonexistent/secret\"\n"))

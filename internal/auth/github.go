@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"bytes"
 	"context"
 	"encoding/json/v2"
 	"errors"
@@ -124,6 +125,29 @@ func (g GitHub) Exchange(ctx context.Context, secret, code, redirectURI, verifie
 		return "", fmt.Errorf("%w: %s", errGitHub, out.Error)
 	}
 	return out.AccessToken, nil
+}
+
+func (g GitHub) RevokeToken(ctx context.Context, secret, token string) error {
+	body, err := json.Marshal(map[string]string{"access_token": token})
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, strings.TrimRight(g.APIURL, "/")+"/applications/"+url.PathEscape(g.ClientID)+"/token", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.SetBasicAuth(g.ClientID, secret)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("Content-Type", "application/json")
+	res, err := g.Client.Do(req)
+	if err != nil {
+		return fmt.Errorf("%w: %v", errGitHub, err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusNoContent {
+		return fmt.Errorf("%w: revoke status %d", errGitHub, res.StatusCode)
+	}
+	return nil
 }
 
 func (g GitHub) UserID(ctx context.Context, token string) (int64, error) {

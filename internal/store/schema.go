@@ -137,6 +137,7 @@ CREATE TABLE admin_oauth (
 CREATE TABLE admin_sessions (
 	token_hash BLOB PRIMARY KEY,
 	admin TEXT NOT NULL,
+	github_id INTEGER NOT NULL,
 	expires_at INTEGER NOT NULL
 );
 CREATE TABLE admin_audit (
@@ -144,6 +145,7 @@ CREATE TABLE admin_audit (
 	at INTEGER NOT NULL,
 	admin TEXT NOT NULL,
 	action TEXT NOT NULL,
-	target TEXT NOT NULL DEFAULT ''
+	target TEXT NOT NULL DEFAULT '',
+	count INTEGER NOT NULL DEFAULT 1
 );
 `

@@ -34,6 +34,9 @@ type FakeGitHub struct {
 	grants  map[string]webGrant
 	tokens  map[string]webGrant
 	issued  int
+
+	Revoked      []string
+	RevokeStatus int
 }
 
 func NewFakeGitHub(t testing.TB, userID int64) *FakeGitHub {
@@ -81,6 +84,25 @@ func NewFakeGitHub(t testing.TB, userID int64) *FakeGitHub {
 			return
 		}
 		writeJSON(w, map[string]any{"id": id, "login": "someone"})
+	})
+	mux.HandleFunc("DELETE /applications/{client}/token", func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			AccessToken string `json:"access_token"`
+		}
+		user, pass, ok := r.BasicAuth()
+		if !ok || user != WebClientID || pass != WebClientSecret || r.PathValue("client") != WebClientID || json.UnmarshalRead(r.Body, &body) != nil {
+			http.Error(w, "bad request", http.StatusUnauthorized)
+			return
+		}
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		if f.RevokeStatus != 0 {
+			w.WriteHeader(f.RevokeStatus)
+			return
+		}
+		f.Revoked = append(f.Revoked, body.AccessToken)
+		delete(f.tokens, "Bearer "+body.AccessToken)
+		w.WriteHeader(http.StatusNoContent)
 	})
 	f.Server = httptest.NewServer(mux)
 	t.Cleanup(f.Server.Close)

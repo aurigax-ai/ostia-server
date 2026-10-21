@@ -627,20 +627,29 @@ func TestSetupCodeClaimsTheFirstAdminOnce(t *testing.T) {
 	if err := d.SetupCodeValid(t.Context(), hash); err != nil {
 		t.Fatal(err)
 	}
-	if hint, err := d.ClaimFirstAdmin(t.Context(), hash, 42, "octo"); err != nil || hint != "AB12" {
+	if hint, err := d.ClaimFirstAdmin(t.Context(), hash, 42, "octo", ids.Hash("tok"), time.Hour); err != nil || hint != "AB12" {
 		t.Fatalf("%q %v", hint, err)
 	}
 	if err := d.SetupCodeValid(t.Context(), hash); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("a spent code still validates: %v", err)
 	}
-	if _, err := d.ClaimFirstAdmin(t.Context(), hash, 43, "other"); !errors.Is(err, ErrAdminExists) {
+	if _, err := d.ClaimFirstAdmin(t.Context(), hash, 43, "other", ids.Hash("tok"), time.Hour); !errors.Is(err, ErrAdminExists) {
 		t.Fatalf("a second admin was set up: %v", err)
 	}
-	if err := d.SignInAdmin(t.Context(), 43, "other"); !errors.Is(err, ErrNotFound) {
+	if err := d.SignInAdmin(t.Context(), 43, "other", ids.Hash("tok"), time.Hour); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("%v", err)
 	}
-	if err := d.SignInAdmin(t.Context(), 42, "octo-renamed"); err != nil {
+	if err := d.SignInAdmin(t.Context(), 42, "octo-renamed", ids.Hash("renamed"), time.Hour); err != nil {
 		t.Fatal(err)
+	}
+	if who, err := d.AdminSession(t.Context(), ids.Hash("renamed")); err != nil || who.GitHubID != 42 || who.Login != "octo-renamed" {
+		t.Fatalf("%+v %v", who, err)
+	}
+	if who, err := d.AdminSession(t.Context(), ids.Hash("tok")); err != nil || who.GitHubID != 42 {
+		t.Fatalf("claiming the first admin opens a session in the same transaction: %+v %v", who, err)
+	}
+	if _, err := d.AdminSession(t.Context(), ids.Hash("nope")); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("a refused sign-in left a session: %v", err)
 	}
 }
 
@@ -648,19 +657,19 @@ func TestSetupCodeIsRefusedOnceUsedOrExpired(t *testing.T) {
 	d, c := open(t)
 	used := ids.Hash("used")
 	_ = d.CreateSetupCode(t.Context(), used, "USED", 10*time.Minute)
-	if _, err := d.ClaimFirstAdmin(t.Context(), used, 1, "a"); err != nil {
+	if _, err := d.ClaimFirstAdmin(t.Context(), used, 1, "a", ids.Hash("tok"), time.Hour); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, err := d.ResetAdmins(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := d.ClaimFirstAdmin(t.Context(), used, 2, "b"); !errors.Is(err, ErrNotFound) {
+	if _, err := d.ClaimFirstAdmin(t.Context(), used, 2, "b", ids.Hash("tok"), time.Hour); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("a spent code was accepted: %v", err)
 	}
 	late := ids.Hash("late")
 	_ = d.CreateSetupCode(t.Context(), late, "LATE", 10*time.Minute)
 	c.t = c.t.Add(11 * time.Minute)
-	if _, err := d.ClaimFirstAdmin(t.Context(), late, 2, "b"); !errors.Is(err, ErrNotFound) {
+	if _, err := d.ClaimFirstAdmin(t.Context(), late, 2, "b", ids.Hash("tok"), time.Hour); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("an expired code was accepted: %v", err)
 	}
 	if has, _ := d.HasAdmin(t.Context()); has {
@@ -676,7 +685,7 @@ func TestSetupCodeCannotBeIssuedWhileAnAdminExistsAndANewOneReplacesTheOld(t *te
 	if err := d.SetupCodeValid(t.Context(), first); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("an older code survived a new one: %v", err)
 	}
-	if _, err := d.ClaimFirstAdmin(t.Context(), second, 1, "a"); err != nil {
+	if _, err := d.ClaimFirstAdmin(t.Context(), second, 1, "a", ids.Hash("tok"), time.Hour); err != nil {
 		t.Fatal(err)
 	}
 	if err := d.CreateSetupCode(t.Context(), ids.Hash("third"), "THREE", time.Minute); !errors.Is(err, ErrAdminExists) {
@@ -688,9 +697,8 @@ func TestResetAdminsRemovesAdminsSessionsCodesAndPendingSignIns(t *testing.T) {
 	d, _ := open(t)
 	code := ids.Hash("code")
 	_ = d.CreateSetupCode(t.Context(), code, "CODE", time.Hour)
-	_, _ = d.ClaimFirstAdmin(t.Context(), code, 1, "a")
+	_, _ = d.ClaimFirstAdmin(t.Context(), code, 1, "a", ids.Hash("s"), time.Hour)
 	_ = d.CreateSetupCode(t.Context(), ids.Hash("other"), "O", time.Hour)
-	_ = d.CreateAdminSession(t.Context(), ids.Hash("s"), "github:a", time.Hour)
 	_ = d.CreateAdminOAuth(t.Context(), ids.Hash("state"), "verifier", nil, time.Hour)
 	admins, sessions, err := d.ResetAdmins(t.Context())
 	if err != nil || admins != 1 || sessions != 1 {
@@ -739,14 +747,23 @@ func TestAdminOAuthStateIsSingleUseAndExpires(t *testing.T) {
 	}
 }
 
-func TestAdminSessionsExpireAndAreSwept(t *testing.T) {
-	d, c := open(t)
-	token := ids.Hash("session")
-	if err := d.CreateAdminSession(t.Context(), token, "admin", time.Hour); err != nil {
+func newAdmin(t *testing.T, d *DB, id int64, token string) {
+	t.Helper()
+	code := ids.Hash(fmt.Sprint("setup", id))
+	if err := d.CreateSetupCode(t.Context(), code, "CODE", time.Hour); err != nil {
 		t.Fatal(err)
 	}
-	if who, err := d.AdminSession(t.Context(), token); err != nil || who != "admin" {
-		t.Fatalf("%q %v", who, err)
+	if _, err := d.ClaimFirstAdmin(t.Context(), code, id, "admin", ids.Hash(token), time.Hour); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAdminSessionsExpireAndAreSwept(t *testing.T) {
+	d, c := open(t)
+	newAdmin(t, d, 7, "session")
+	token := ids.Hash("session")
+	if who, err := d.AdminSession(t.Context(), token); err != nil || who.GitHubID != 7 || who.Login != "admin" {
+		t.Fatalf("%+v %v", who, err)
 	}
 	c.t = c.t.Add(2 * time.Hour)
 	if _, err := d.AdminSession(t.Context(), token); !errors.Is(err, ErrNotFound) {
@@ -754,6 +771,36 @@ func TestAdminSessionsExpireAndAreSwept(t *testing.T) {
 	}
 	if err := d.SweepAdmin(t.Context()); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestSessionOfARemovedAdminStopsWorkingAtOnce(t *testing.T) {
+	d, _ := open(t)
+	newAdmin(t, d, 7, "session")
+	if _, err := d.sql.ExecContext(t.Context(), `DELETE FROM admins`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.AdminSession(t.Context(), ids.Hash("session")); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("a session outlived its admin: %v", err)
+	}
+}
+
+func TestCountedAuditRowsMergeWithinAMinute(t *testing.T) {
+	d, c := open(t)
+	for range 5 {
+		if err := d.CountAudit(t.Context(), "anonymous", "refused", "state-mismatch"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_ = d.CountAudit(t.Context(), "anonymous", "refused", "state-unknown")
+	got, _ := d.Audit(t.Context(), 10)
+	if len(got) != 2 || got[1].Target != "state-mismatch" || got[1].Count != 5 || got[0].Count != 1 {
+		t.Fatalf("%+v", got)
+	}
+	c.t = c.t.Add(2 * time.Minute)
+	_ = d.CountAudit(t.Context(), "anonymous", "refused", "state-mismatch")
+	if got, _ = d.Audit(t.Context(), 10); len(got) != 3 || got[0].Count != 1 {
+		t.Fatalf("a new minute starts a new row: %+v", got)
 	}
 }
 
@@ -773,8 +820,9 @@ func TestAuditListsTheNewestFirst(t *testing.T) {
 
 func TestDeleteAdminSessionsEndsEveryOne(t *testing.T) {
 	d, _ := open(t)
-	for _, name := range []string{"a", "b", "c"} {
-		if err := d.CreateAdminSession(t.Context(), ids.Hash(name), "admin", time.Hour); err != nil {
+	newAdmin(t, d, 7, "a")
+	for _, name := range []string{"b", "c"} {
+		if err := d.SignInAdmin(t.Context(), 7, "admin", ids.Hash(name), time.Hour); err != nil {
 			t.Fatal(err)
 		}
 	}

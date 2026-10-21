@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -54,6 +55,7 @@ type Service struct {
 
 type session struct {
 	admin string
+	label string
 	token string
 	csrf  string
 }
@@ -132,22 +134,19 @@ func (s *Service) session(r *http.Request) (session, bool) {
 		if cookie.Value == "" {
 			continue
 		}
-		if admin, err := s.DB.AdminSession(r.Context(), ids.Hash(cookie.Value)); err == nil {
-			return session{admin: admin, token: cookie.Value, csrf: csrfToken(s.Key, cookie.Value)}, true
+		if who, err := s.DB.AdminSession(r.Context(), ids.Hash(cookie.Value)); err == nil {
+			return session{admin: adminName(who.GitHubID), label: who.Login, token: cookie.Value, csrf: csrfToken(s.Key, cookie.Value)}, true
 		}
 	}
 	return session{}, false
 }
 
-func (s *Service) startSession(w http.ResponseWriter, r *http.Request, admin, action, target string) error {
-	token := ids.Token()
-	if err := s.DB.CreateAdminSession(r.Context(), ids.Hash(token), admin, SessionTTL); err != nil {
-		return err
-	}
+func adminName(githubID int64) string { return "github:" + strconv.FormatInt(githubID, 10) }
+
+func (s *Service) openSession(w http.ResponseWriter, r *http.Request, token string, githubID int64, login, action string) {
 	http.SetCookie(w, &http.Cookie{Name: cookieName, Value: token, Path: "/admin", MaxAge: int(SessionTTL / time.Second), HttpOnly: true, Secure: true, SameSite: http.SameSiteStrictMode})
-	s.audit(r.Context(), admin, action, target)
+	s.audit(r.Context(), adminName(githubID), action, login)
 	http.Redirect(w, r, "/admin/invites", http.StatusSeeOther)
-	return nil
 }
 
 func (s *Service) logout(w http.ResponseWriter, r *http.Request, sess session) error {
@@ -204,7 +203,7 @@ func (s *Service) render(w http.ResponseWriter, status int, name string, data pa
 }
 
 func (s *Service) base(sess session, nav string) page {
-	return page{Host: s.Host, Admin: sess.admin, CSRF: sess.csrf, Nav: nav}
+	return page{Host: s.Host, Admin: sess.label, CSRF: sess.csrf, Nav: nav}
 }
 
 var assets = map[string]string{"admin.css": "text/css; charset=utf-8", "admin.js": "text/javascript; charset=utf-8"}

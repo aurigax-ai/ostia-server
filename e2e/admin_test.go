@@ -82,7 +82,7 @@ func setupCode(t *testing.T, e *env) string {
 func gitHubSignIn(t *testing.T, e *env, gh *testkit.FakeGitHub, code string, id int64, login string) (*http.Response, string) {
 	t.Helper()
 	res, body := adminRequest(t, e, "POST", "/admin/github/start", url.Values{"code": {code}}, nil)
-	state := cookieNamed(res, "ostia_admin_oauth")
+	state := cookieNamed(res, "__Host-ostia_admin_oauth")
 	if res.StatusCode != http.StatusOK || state == nil || !state.Secure || !state.HttpOnly || state.SameSite != http.SameSiteStrictMode {
 		t.Fatalf("start: %d %v %s", res.StatusCode, res.Header, body)
 	}
@@ -143,7 +143,7 @@ func TestAdminSetupAndGitHubSignInToTheWebUI(t *testing.T) {
 	}
 
 	audit := e.proc.Admin(t, "audit")
-	for _, want := range []string{"cli\tsetup-code", "github:octocat\tsetup\t4242", "github:octocat\tlogin\t4242", "anonymous\trefused\tsetup-code", "anonymous\trefused\tnot-admin 9"} {
+	for _, want := range []string{"cli\tsetup-code", "github:4242\tsetup\toctocat", "github:4242\tlogin\toctocat", "anonymous\trefused\tsetup-code", "anonymous\trefused\tnot-admin 9"} {
 		if !strings.Contains(audit, want) {
 			t.Fatalf("audit lacks %q:\n%s", want, audit)
 		}
