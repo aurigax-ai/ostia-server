@@ -208,6 +208,8 @@ All requests are served by Host: `<id>.<share domain>`.
 
 The shell fetches `/meta` and `/blob`, decrypts with WebCrypto (not for public shares), shows a notice bar and a one-time interstitial, and renders the file in `<iframe sandbox="allow-scripts" srcdoc>`. Responses carry `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `Cross-Origin-Opener-Policy: same-origin`, `X-Robots-Tag: noindex`, a `Permissions-Policy` that denies fullscreen and the other powerful features, and `Cache-Control: no-store`. The server sets no cookies and stores no addresses or user agents; it counts views only.
 
+Artifacts open links with `parent.postMessage({ostiaOpen: url}, '*')`: the shell takes `http(s)` URLs of up to 2048 characters from its own frame only, asks the visitor in a bar outside the frame, and opens the link with `window.open(url, '_blank', 'noopener,noreferrer')` only from the visitor's click on Open. Navigating the frame, popups, forms, downloads and `alert`/`confirm`/`prompt` are blocked; in-page DOM dialogs work.
+
 Expired shares are removed hourly (`publish.sweep_interval`). `ostia-server admin takedown <id>` disables a share and deletes its content at once.
 
 ## WebSocket messages
