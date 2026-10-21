@@ -387,13 +387,19 @@ func (s *Service) heartbeat(w http.ResponseWriter, r *http.Request, p Principal)
 }
 
 func (s *Service) RevokeInactive(ctx context.Context) error {
+	if s.InactiveAfter <= 0 {
+		return nil
+	}
 	devices, err := s.DB.InactiveDevices(ctx, s.InactiveAfter)
 	if err != nil {
 		return err
 	}
+	cutoff := s.Now().Add(-s.InactiveAfter).UnixMilli()
 	for _, d := range devices {
-		if _, err := s.DB.RevokeDevice(ctx, d.AccountID, d.ID); err != nil && !errors.Is(err, store.ErrNotFound) {
-			slog.Error("revoke an inactive device", "err", err)
+		if err := s.DB.RevokeInactiveDevice(ctx, d.AccountID, d.ID, cutoff); err != nil {
+			if !errors.Is(err, store.ErrNotFound) {
+				slog.Error("revoke an inactive device", "err", err)
+			}
 			continue
 		}
 		if s.Hooks.DeviceRevoked != nil {

@@ -130,8 +130,23 @@ func (d *DB) RegisterProvider(ctx context.Context, provider, idHash string, nd N
 }
 
 func (d *DB) RevokeDevice(ctx context.Context, accountID, id string) (label string, err error) {
+	return d.revoke(ctx, accountID, id, 0)
+}
+
+func (d *DB) RevokeInactiveDevice(ctx context.Context, accountID, id string, silentSince int64) error {
+	_, err := d.revoke(ctx, accountID, id, silentSince)
+	return err
+}
+
+func (d *DB) revoke(ctx context.Context, accountID, id string, silentSince int64) (label string, err error) {
 	err = d.tx(ctx, func(tx *sql.Tx) error {
-		res, err := tx.ExecContext(ctx, `UPDATE devices SET revoked_at = ? WHERE id = ? AND account_id = ? AND revoked_at = 0`, d.ms(), id, accountID)
+		query := `UPDATE devices SET revoked_at = ? WHERE id = ? AND account_id = ? AND revoked_at = 0`
+		args := []any{d.ms(), id, accountID}
+		if silentSince > 0 {
+			query += ` AND last_seen_at < ?`
+			args = append(args, silentSince)
+		}
+		res, err := tx.ExecContext(ctx, query, args...)
 		if err := affected(res, err); err != nil {
 			return err
 		}

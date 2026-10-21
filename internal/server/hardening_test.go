@@ -360,3 +360,29 @@ func TestSweepRemovesSilentDevicesThenPurgesAccountsLeftEmpty(t *testing.T) {
 	}
 	_ = lone
 }
+
+func TestSweepDoesNothingWhenTheInactivityLimitIsNotPositive(t *testing.T) {
+	now := time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC)
+	cfg := config.Default()
+	cfg.DataDir = t.TempDir()
+	cfg.Domains.API = "api.test"
+	cfg.Listen.HTTPS, cfg.Listen.HTTP = "", "127.0.0.1:0"
+	cfg.Modules = config.Modules{Sync: true}
+	srv, err := New(cfg, Options{Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = srv.DB.Close() })
+	_, dev, err := srv.DB.RegisterProvider(t.Context(), "github", "h", store.NewDevice{Name: "a", SignPub: make([]byte, 32), BoxPub: make([]byte, 32)}, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.Auth.InactiveAfter = 0
+	now = now.Add(1000 * 24 * time.Hour)
+	if err := srv.Auth.RevokeInactive(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := srv.DB.Device(t.Context(), dev.ID); got.RevokedAt != 0 {
+		t.Fatal("with no limit configured the sweep must remove nothing")
+	}
+}

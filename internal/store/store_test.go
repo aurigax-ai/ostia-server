@@ -984,3 +984,28 @@ func TestADatabaseAtSchemaV1UpgradesToV2(t *testing.T) {
 		t.Fatalf("existing devices must start their inactivity clock at the upgrade, not at their old last seen: %d of 2", backfilled)
 	}
 }
+
+func TestAHeartbeatBetweenTheListAndTheRevokeSavesTheDevice(t *testing.T) {
+	d, c := open(t)
+	_, dev := register(t, d, "github", "h")
+	limit := 90 * 24 * time.Hour
+	c.t = c.t.Add(limit + 24*time.Hour)
+	silent, err := d.InactiveDevices(t.Context(), limit)
+	if err != nil || len(silent) != 1 {
+		t.Fatalf("%v %v", silent, err)
+	}
+	cutoff := c.t.Add(-limit).UnixMilli()
+	if err := d.TouchDevice(t.Context(), dev.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.RevokeInactiveDevice(t.Context(), silent[0].AccountID, silent[0].ID, cutoff); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("a device that checked in after the list must be skipped: %v", err)
+	}
+	if got, _ := d.Device(t.Context(), dev.ID); got.RevokedAt != 0 {
+		t.Fatal("the device was revoked after it checked in")
+	}
+	c.t = c.t.Add(limit + 24*time.Hour)
+	if err := d.RevokeInactiveDevice(t.Context(), dev.AccountID, dev.ID, c.t.Add(-limit).UnixMilli()); err != nil {
+		t.Fatalf("a device that stayed silent is revoked: %v", err)
+	}
+}
