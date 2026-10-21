@@ -2,10 +2,13 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
+	"strconv"
 	"time"
 
+	"github.com/aurigax-ai/ostia-server/internal/adminui"
 	"github.com/aurigax-ai/ostia-server/internal/auth"
 	"github.com/aurigax-ai/ostia-server/internal/blob"
 	"github.com/aurigax-ai/ostia-server/internal/config"
@@ -50,6 +53,25 @@ func (a *Admin) Invite(ctx context.Context, ttl time.Duration) (code string, exp
 		return "", 0, fmt.Errorf("an invite code may live at most auth.invite_ttl (%s), not %s", max, ttl)
 	}
 	return a.Auth.CreateInvite(ctx, "", ttl, false)
+}
+
+func (a *Admin) LoginCode(ctx context.Context) (string, error) {
+	if !a.Cfg.Admin.Enabled {
+		return "", errors.New("the admin web UI is off; set admin.enabled = true in the config")
+	}
+	return adminui.IssueCode(ctx, a.DB)
+}
+
+func (a *Admin) LogoutAll(ctx context.Context) (int64, error) {
+	n, err := a.DB.DeleteAdminSessions(ctx)
+	if err != nil {
+		return 0, err
+	}
+	return n, a.DB.AddAudit(ctx, "cli", "logout-all", strconv.FormatInt(n, 10))
+}
+
+func (a *Admin) Audit(ctx context.Context, limit int) ([]store.AuditEntry, error) {
+	return a.DB.Audit(ctx, limit)
 }
 
 func (a *Admin) Accounts(ctx context.Context) ([]store.Account, error) { return a.DB.Accounts(ctx) }

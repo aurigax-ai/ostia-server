@@ -63,8 +63,19 @@ func TestExampleConfigLoadsAndMatchesTheDefaults(t *testing.T) {
 		t.Fatal(err)
 	}
 	defaults := Default()
-	if cfg.Relay != defaults.Relay || cfg.Publish != defaults.Publish || cfg.Sync != defaults.Sync || cfg.Auth.SessionTTL != defaults.Auth.SessionTTL || cfg.Auth.MaxDevices != defaults.Auth.MaxDevices {
+	if cfg.Relay != defaults.Relay || cfg.Publish != defaults.Publish || cfg.Sync != defaults.Sync || cfg.Auth.SessionTTL != defaults.Auth.SessionTTL || cfg.Auth.MaxDevices != defaults.Auth.MaxDevices || cfg.Admin.Enabled != defaults.Admin.Enabled {
 		t.Fatal("the example config must list the real defaults so the documentation does not drift")
+	}
+}
+
+func TestAdminIsOffByDefaultAndReadsItsKeys(t *testing.T) {
+	cfg, err := Load(write(t, minimal))
+	if err != nil || cfg.Admin.Enabled {
+		t.Fatalf("the admin UI must be off by default: %v %+v", err, cfg.Admin)
+	}
+	cfg, err = Load(write(t, minimal+"\n[admin]\nenabled = true\n"))
+	if err != nil || !cfg.Admin.Enabled {
+		t.Fatalf("%v %+v", err, cfg.Admin)
 	}
 }
 

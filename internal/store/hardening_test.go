@@ -127,7 +127,7 @@ func TestRevokedDevicesAreDeletedAfterTheRetention(t *testing.T) {
 func TestInvitesRefuseANonPositiveTTL(t *testing.T) {
 	d, _ := open(t)
 	for _, ttl := range []time.Duration{0, -time.Minute} {
-		if _, err := d.CreateInvite(t.Context(), ids.Hash("code"), "", ttl, false); !errors.Is(err, ErrInvalidTTL) {
+		if _, err := d.CreateInvite(t.Context(), ids.Hash("code"), "", ttl, false, ""); !errors.Is(err, ErrInvalidTTL) {
 			t.Fatalf("ttl %v: %v", ttl, err)
 		}
 	}

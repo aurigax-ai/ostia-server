@@ -28,6 +28,7 @@ type Config struct {
 	TLS      TLS     `toml:"tls"`
 	Modules  Modules `toml:"modules"`
 	Auth     Auth    `toml:"auth"`
+	Admin    Admin   `toml:"admin"`
 	Relay    Relay   `toml:"relay"`
 	Publish  Publish `toml:"publish"`
 	Sync     Sync    `toml:"sync"`
@@ -82,6 +83,11 @@ type Auth struct {
 	ApproverMinAge  Duration `toml:"approver_min_age"`
 
 	RevokedDeviceRetention Duration `toml:"revoked_device_retention"`
+}
+
+type Admin struct {
+	Enabled     bool    `toml:"enabled"`
+	GitHubUsers []int64 `toml:"github_users"`
 }
 
 type Relay struct {

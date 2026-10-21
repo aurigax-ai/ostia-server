@@ -190,7 +190,7 @@ func (s *Service) registerInvite(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	acct, dev, err := s.DB.RegisterWithInvite(r.Context(), ids.Hash(normalizeCode(in.Code)), nd, s.Cfg.MaxDevices)
+	acct, dev, err := s.DB.RegisterWithInvite(r.Context(), ids.Hash(NormalizeCode(in.Code)), nd, s.Cfg.MaxDevices)
 	switch {
 	case err == nil:
 	case errors.Is(err, store.ErrNotFound):
@@ -215,12 +215,12 @@ func (s *Service) announceDevice(r *http.Request, accountID string, dev store.De
 }
 
 func (s *Service) CreateInvite(ctx context.Context, accountID string, ttl time.Duration, elevated bool) (code string, expiresAt int64, err error) {
-	code = formatCode(ids.New()[:20])
-	expiresAt, err = s.DB.CreateInvite(ctx, ids.Hash(normalizeCode(code)), accountID, ttl, elevated)
+	code = FormatCode(ids.New()[:25])
+	expiresAt, err = s.DB.CreateInvite(ctx, ids.Hash(NormalizeCode(code)), accountID, ttl, elevated, CodeHint(code))
 	return code, expiresAt, err
 }
 
-func formatCode(raw string) string {
+func FormatCode(raw string) string {
 	var parts []string
 	for i := 0; i < len(raw); i += 5 {
 		parts = append(parts, raw[i:i+5])
@@ -228,7 +228,12 @@ func formatCode(raw string) string {
 	return strings.Join(parts, "-")
 }
 
-func normalizeCode(code string) string {
+func CodeHint(code string) string {
+	plain := strings.ToUpper(NormalizeCode(code))
+	return plain[:4] + "-…-" + plain[len(plain)-4:]
+}
+
+func NormalizeCode(code string) string {
 	return strings.Map(func(r rune) rune {
 		if r == '-' || unicode.IsSpace(r) {
 			return -1

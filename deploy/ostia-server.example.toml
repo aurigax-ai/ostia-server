@@ -46,6 +46,9 @@ approval_ttl = "5m0s"
 approver_min_age = "24h0m0s"
 revoked_device_retention = "720h0m0s"
 
+[admin]
+enabled = false
+
 [relay]
 max_streams_per_label = 8
 max_unconfirmed_per_label = 4

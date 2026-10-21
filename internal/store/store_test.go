@@ -71,7 +71,7 @@ func TestDeviceLimit(t *testing.T) {
 func TestInviteIsSingleUseAndExpires(t *testing.T) {
 	d, c := open(t)
 	hash := ids.Hash("code-1")
-	if _, err := d.CreateInvite(t.Context(), hash, "", time.Hour, false); err != nil {
+	if _, err := d.CreateInvite(t.Context(), hash, "", time.Hour, false, ""); err != nil {
 		t.Fatal(err)
 	}
 	acct, _, err := d.RegisterWithInvite(t.Context(), hash, newDevice("a"), 10)
@@ -83,7 +83,7 @@ func TestInviteIsSingleUseAndExpires(t *testing.T) {
 	}
 
 	bound := ids.Hash("code-2")
-	if _, err := d.CreateInvite(t.Context(), bound, acct.ID, time.Minute, false); err != nil {
+	if _, err := d.CreateInvite(t.Context(), bound, acct.ID, time.Minute, false, ""); err != nil {
 		t.Fatal(err)
 	}
 	a2, _, err := d.RegisterWithInvite(t.Context(), bound, newDevice("b"), 10)
@@ -92,7 +92,7 @@ func TestInviteIsSingleUseAndExpires(t *testing.T) {
 	}
 
 	late := ids.Hash("code-3")
-	_, _ = d.CreateInvite(t.Context(), late, "", time.Minute, false)
+	_, _ = d.CreateInvite(t.Context(), late, "", time.Minute, false, "")
 	c.t = c.t.Add(2 * time.Minute)
 	if _, _, err := d.RegisterWithInvite(t.Context(), late, newDevice("c"), 10); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("expired invite accepted: %v", err)
@@ -103,7 +103,7 @@ func TestInviteStaysUnusedWhenDeviceLimitHit(t *testing.T) {
 	d, _ := open(t)
 	a, _ := register(t, d, "github", "h")
 	code := ids.Hash("bound")
-	_, _ = d.CreateInvite(t.Context(), code, a.ID, time.Hour, false)
+	_, _ = d.CreateInvite(t.Context(), code, a.ID, time.Hour, false, "")
 	if _, _, err := d.RegisterWithInvite(t.Context(), code, newDevice("x"), 1); !errors.Is(err, ErrLimit) {
 		t.Fatalf("want ErrLimit, got %v", err)
 	}
@@ -533,8 +533,8 @@ func TestUnelevatedInviteIsRefusedOnceTheAccountHasTwoDevices(t *testing.T) {
 	d, _ := open(t)
 	a, _ := register(t, d, "github", "h")
 	plain, elevated := ids.Hash("plain"), ids.Hash("elevated")
-	_, _ = d.CreateInvite(t.Context(), plain, a.ID, time.Hour, false)
-	_, _ = d.CreateInvite(t.Context(), elevated, a.ID, time.Hour, true)
+	_, _ = d.CreateInvite(t.Context(), plain, a.ID, time.Hour, false, "")
+	_, _ = d.CreateInvite(t.Context(), elevated, a.ID, time.Hour, true, "")
 	if n, _ := d.LiveInvites(t.Context(), a.ID); n != 2 {
 		t.Fatalf("live invites %d", n)
 	}
@@ -544,7 +544,7 @@ func TestUnelevatedInviteIsRefusedOnceTheAccountHasTwoDevices(t *testing.T) {
 	other, _ := d.AddDevice(t.Context(), a.ID, newDevice("c"), 10)
 	_ = other
 	again := ids.Hash("again")
-	_, _ = d.CreateInvite(t.Context(), again, a.ID, time.Hour, false)
+	_, _ = d.CreateInvite(t.Context(), again, a.ID, time.Hour, false, "")
 	if _, _, err := d.RegisterWithInvite(t.Context(), again, newDevice("d"), 10); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("an invite minted without elevation must not work once there are two devices: %v", err)
 	}
@@ -574,5 +574,113 @@ func TestUnseenDevicesAndEstablishedCounts(t *testing.T) {
 	}
 	if n, _ := d.OlderActiveDevices(t.Context(), first); n != 0 {
 		t.Fatalf("the oldest device has nothing older: %d", n)
+	}
+}
+
+func TestUsedAccountInvitesStayUntilTheAccountIsGone(t *testing.T) {
+	d, c := open(t)
+	hash := ids.Hash("code-keep")
+	if _, err := d.CreateInvite(t.Context(), hash, "", time.Hour, false, "KEEP-…-CODE"); err != nil {
+		t.Fatal(err)
+	}
+	acct, _, err := d.RegisterWithInvite(t.Context(), hash, newDevice("a"), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bound := ids.Hash("code-bound")
+	_, _ = d.CreateInvite(t.Context(), bound, acct.ID, time.Hour, false, "")
+	if _, _, err := d.RegisterWithInvite(t.Context(), bound, newDevice("b"), 10); err != nil {
+		t.Fatal(err)
+	}
+	c.t = c.t.Add(3 * 24 * time.Hour)
+	if err := d.SweepInvites(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	_, used, err := d.AdminInvites(t.Context())
+	if err != nil || len(used) != 1 || used[0].CreatedAccount != acct.ID || used[0].Hint != "KEEP-…-CODE" {
+		t.Fatalf("the invite that created a live account must stay: %+v %v", used, err)
+	}
+	sums, _ := d.AccountSummaries(t.Context())
+	if len(sums) != 1 || sums[0].InviteHint != "KEEP-…-CODE" || sums[0].Devices != 2 {
+		t.Fatalf("%+v", sums)
+	}
+	if err := d.DeleteAccount(t.Context(), acct.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, used, _ = d.AdminInvites(t.Context()); len(used) != 1 || used[0].CreatedAccount != "" {
+		t.Fatalf("a deleted account must leave the invite without an account: %+v", used)
+	}
+	c.t = c.t.Add(2 * 24 * time.Hour)
+	_ = d.SweepInvites(t.Context())
+	if _, used, _ = d.AdminInvites(t.Context()); len(used) != 0 {
+		t.Fatalf("an orphaned used invite is swept after a day: %+v", used)
+	}
+}
+
+func TestAdminCodeWorksOnceAndExpires(t *testing.T) {
+	d, c := open(t)
+	hash := ids.Hash("login")
+	if err := d.CreateAdminCode(t.Context(), hash, "AB12", 10*time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if hint, err := d.ConsumeAdminCode(t.Context(), hash); err != nil || hint != "AB12" {
+		t.Fatalf("%q %v", hint, err)
+	}
+	if _, err := d.ConsumeAdminCode(t.Context(), hash); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("a code was used twice: %v", err)
+	}
+	late := ids.Hash("late")
+	_ = d.CreateAdminCode(t.Context(), late, "LATE", 10*time.Minute)
+	c.t = c.t.Add(11 * time.Minute)
+	if _, err := d.ConsumeAdminCode(t.Context(), late); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("an expired code was accepted: %v", err)
+	}
+}
+
+func TestAdminSessionsExpireAndAreSwept(t *testing.T) {
+	d, c := open(t)
+	token := ids.Hash("session")
+	if err := d.CreateAdminSession(t.Context(), token, "admin", time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if who, err := d.AdminSession(t.Context(), token); err != nil || who != "admin" {
+		t.Fatalf("%q %v", who, err)
+	}
+	c.t = c.t.Add(2 * time.Hour)
+	if _, err := d.AdminSession(t.Context(), token); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("an expired session was accepted: %v", err)
+	}
+	if err := d.SweepAdmin(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAuditListsTheNewestFirst(t *testing.T) {
+	d, c := open(t)
+	for _, action := range []string{"login", "invite.create", "logout"} {
+		c.t = c.t.Add(time.Second)
+		if err := d.AddAudit(t.Context(), "admin", action, "x"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := d.Audit(t.Context(), 2)
+	if err != nil || len(got) != 2 || got[0].Action != "logout" || got[1].Action != "invite.create" || got[0].At <= got[1].At {
+		t.Fatalf("%+v %v", got, err)
+	}
+}
+
+func TestDeleteAdminSessionsEndsEveryOne(t *testing.T) {
+	d, _ := open(t)
+	for _, name := range []string{"a", "b", "c"} {
+		if err := d.CreateAdminSession(t.Context(), ids.Hash(name), "admin", time.Hour); err != nil {
+			t.Fatal(err)
+		}
+	}
+	n, err := d.DeleteAdminSessions(t.Context())
+	if err != nil || n != 3 {
+		t.Fatalf("%d %v", n, err)
+	}
+	if _, err := d.AdminSession(t.Context(), ids.Hash("a")); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("%v", err)
 	}
 }

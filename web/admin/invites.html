@@ -1,0 +1,52 @@
+{{define "body"}}{{template "shell" .}}{{end}}
+
+{{define "content"}}
+<header class="head">
+<div class="grow">
+<h1>Invites</h1>
+<p class="sub">A code creates a new account. Codes work once.</p>
+</div>
+<form method="post" action="/admin/invites" class="inline">
+<input type="hidden" name="csrf" value="{{.CSRF}}">
+<select name="ttl" aria-label="Expires">
+{{range $i, $c := .TTLs}}<option value="{{$c.Value}}">{{if eq $i 0}}Expires in {{end}}{{$c.Label}}</option>
+{{end}}
+</select>
+<button class="btn">New invite</button>
+</form>
+</header>
+{{if .Error}}<p class="err" role="alert">{{.Error}}</p>{{end}}
+{{if .NewCode}}
+<div class="fresh">
+<span class="mono bigcode">{{upper .NewCode}}</span>
+<span class="muted">expires {{stamp .NewExpires}} UTC · shown once</span>
+<span class="grow"></span>
+<button class="quiet" type="button" data-copy="{{upper .NewCode}}" hidden>Copy</button>
+</div>
+{{end}}
+<h2 class="lbl">Open</h2>
+{{range .Open}}
+<div class="row">
+<span class="c1 mono">{{hint .Hint}}</span>
+<span class="c2">created {{ago .CreatedAt}}</span>
+<span class="c3">expires {{until .ExpiresAt}}</span>
+<form method="post" action="/admin/invites/revoke">
+<input type="hidden" name="csrf" value="{{$.CSRF}}">
+<input type="hidden" name="id" value="{{.ID}}">
+<button class="quiet">Revoke</button>
+</form>
+</div>
+{{else}}
+<p class="empty">No open codes.</p>
+{{end}}
+<h2 class="lbl spaced">Used</h2>
+{{range .Used}}
+<div class="row">
+<span class="c1 mono">{{hint .Hint}}</span>
+<span class="c2">used {{day .UsedAt}}{{if .CreatedAccount}} by account <a class="mono" href="/admin/accounts/{{.CreatedAccount}}">{{short .CreatedAccount}}</a>{{else}} (account deleted){{end}}</span>
+</div>
+{{else}}
+<p class="empty">No used codes.</p>
+{{end}}
+<script src="/admin/assets/admin.js" defer></script>
+{{end}}

@@ -44,8 +44,11 @@ CREATE TABLE invites (
 	created_at INTEGER NOT NULL,
 	expires_at INTEGER NOT NULL,
 	used_at INTEGER NOT NULL DEFAULT 0,
-	elevated INTEGER NOT NULL DEFAULT 0
+	elevated INTEGER NOT NULL DEFAULT 0,
+	hint TEXT NOT NULL DEFAULT '',
+	created_account TEXT REFERENCES accounts(id) ON DELETE SET NULL
 );
+CREATE INDEX invites_created_account ON invites(created_account);
 CREATE TABLE device_seen (
 	viewer_device_id TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
 	device_id TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
@@ -113,5 +116,23 @@ CREATE TABLE push_tickets (
 	hash BLOB PRIMARY KEY,
 	account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
 	expires_at INTEGER NOT NULL
+);
+CREATE TABLE admin_codes (
+	code_hash BLOB PRIMARY KEY,
+	hint TEXT NOT NULL,
+	expires_at INTEGER NOT NULL,
+	used_at INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE admin_sessions (
+	token_hash BLOB PRIMARY KEY,
+	admin TEXT NOT NULL,
+	expires_at INTEGER NOT NULL
+);
+CREATE TABLE admin_audit (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	at INTEGER NOT NULL,
+	admin TEXT NOT NULL,
+	action TEXT NOT NULL,
+	target TEXT NOT NULL DEFAULT ''
 );
 `
