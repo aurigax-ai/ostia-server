@@ -276,15 +276,6 @@ func TestOwnerCanRemoveAnIntruderDuringItsProbation(t *testing.T) {
 	}
 }
 
-func TestStolenTokenCannotRevokeTheOwnersLastEstablishedDevice(t *testing.T) {
-	e := newEnv(t, "[auth]\nsession_ttl = \"1s\"\napprover_min_age = \"2s\"\n")
-	owner := e.user(t, "laptop")
-	e.waitUntilOlderThan(t, owner, 2*time.Second)
-	owner.SignIn(t)
-	requireElevation(t, owner, "revoking the only established device", "DELETE", "/v1/devices/"+owner.ID.DeviceID, nil)
-	owner.Must(t, http.StatusNoContent, "DELETE", "/v1/auth/session", nil)
-}
-
 func TestDesktopListenerIsToldWhenAnotherDeviceJoins(t *testing.T) {
 	f := newRelayFixture(t, "")
 	code := f.api.Must(t, http.StatusCreated, "POST", "/v1/devices/invite", nil).Map(t)["code"].(string)
@@ -295,56 +286,30 @@ func TestDesktopListenerIsToldWhenAnotherDeviceJoins(t *testing.T) {
 		return len(added) == 1 && added[0] == "new phone"
 	})
 	var list struct {
-		Devices []struct {
-			Name string `json:"name"`
-			New  bool   `json:"new"`
-			ID   string `json:"id"`
-		} `json:"devices"`
+		Devices []map[string]any `json:"devices"`
 	}
 	f.api.Must(t, http.StatusOK, "GET", "/v1/devices", nil).JSON(t, &list)
-	flagged := ""
 	for _, d := range list.Devices {
-		if d.New {
-			flagged = d.ID
+		if _, flagged := d["new"]; flagged {
+			t.Fatalf("the new flag is gone: %+v", d)
 		}
 	}
-	if flagged != joiner.ID.DeviceID {
-		t.Fatalf("the existing device must see the new one flagged: %+v", list.Devices)
-	}
-	forger := testkit.NewAPI(f.env.net, testkit.NewIdentity("holder of a stolen token"))
-	forger.ID = &testkit.Identity{Name: "forger", Sign: testkit.NewIdentity("x").Sign, DeviceID: f.api.ID.DeviceID, AccountID: f.api.ID.AccountID}
-	forger.Token = f.api.Token
-	forger.MarkSeenExpecting(t, flagged, http.StatusForbidden)
-	f.api.MarkSeen(t, flagged)
-	f.api.Must(t, http.StatusOK, "GET", "/v1/devices", nil).JSON(t, &list)
-	for _, d := range list.Devices {
-		if d.New {
-			t.Fatal("still flagged after acknowledging")
-		}
+	if res := f.api.Do(t, "POST", "/v1/devices/"+joiner.ID.DeviceID+"/seen", nil); res.Status != http.StatusNotFound && res.Status != http.StatusMethodNotAllowed {
+		t.Fatalf("the seen route is gone: %s", res)
 	}
 }
 
-func TestAFreshSingleDeviceCannotBeRevokedByItsOwnToken(t *testing.T) {
-	e := newEnv(t, "[auth]\napprover_min_age = \"24h\"\n")
-	owner := e.user(t, "laptop")
-	requireElevation(t, owner, "revoking the only device", "DELETE", "/v1/devices/"+owner.ID.DeviceID, nil)
-	owner.Must(t, http.StatusNoContent, "DELETE", "/v1/auth/session", nil)
-}
-
-func TestDeviceAddedIsReplayedToEveryNewListenerUntilAcknowledged(t *testing.T) {
-	f := newRelayFixture(t, "")
-	code := f.api.Must(t, http.StatusCreated, "POST", "/v1/devices/invite", nil).Map(t)["code"].(string)
-	testkit.NewAPI(f.env.net, testkit.NewIdentity("quiet phone")).Onboard(t, code)
-	waitUntil(t, "the live message arrives", func() bool { return len(f.desktop.AddedDevices()) == 1 })
-	f.desktop.Stop()
-
-	again := &testkit.RelayDesktop{API: f.api, Gateway: f.gateway}
-	again.Prepare(t)
-	again.Listen(t)
-	waitUntil(t, "a reconnecting desktop is told about the unacknowledged device", func() bool {
-		added := again.AddedDevices()
-		return len(added) == 1 && added[0] == "quiet phone"
-	})
+func TestADeviceLeavesWithoutElevationButNeedsItsOwnSignature(t *testing.T) {
+	for _, extra := range []string{"", "[auth]\napprover_min_age = \"24h\"\n"} {
+		e := newEnv(t, extra)
+		owner := e.user(t, "laptop")
+		stolen := stolenCopy(e, owner)
+		requireSignature(t, stolen, "leaving with a bare token", "DELETE", "/v1/devices/"+owner.ID.DeviceID, nil)
+		owner.Must(t, http.StatusNoContent, "DELETE", "/v1/devices/"+owner.ID.DeviceID, nil)
+		if res := owner.Do(t, "GET", "/v1/devices", nil); res.Status != http.StatusUnauthorized {
+			t.Fatalf("a device that left must lose its session: %s", res)
+		}
+	}
 }
 
 func TestSessionTokenAloneCannotRequestAnElevation(t *testing.T) {

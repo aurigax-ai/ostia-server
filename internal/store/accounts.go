@@ -110,6 +110,53 @@ func (d *DB) DeleteAccount(ctx context.Context, id string) error {
 	return affected(res, err)
 }
 
+func (d *DB) PurgeDeparted(ctx context.Context, accountID string) (blobKeys []string, accountDeleted bool, err error) {
+	err = d.tx(ctx, func(tx *sql.Tx) error {
+		rows, err := tx.QueryContext(ctx, `SELECT blob_id FROM sync_blobs WHERE account_id = ?`, accountID)
+		if err != nil {
+			return err
+		}
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				_ = rows.Close()
+				return err
+			}
+			blobKeys = append(blobKeys, SyncBlobKey(accountID, id))
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+		for _, q := range []string{
+			`DELETE FROM sync_blobs WHERE account_id = ?`,
+			`DELETE FROM sync_manifests WHERE account_id = ?`,
+			`DELETE FROM key_wraps WHERE account_id = ?`,
+			`DELETE FROM push_handles WHERE account_id = ?`,
+			`DELETE FROM push_tickets WHERE account_id = ?`,
+			`DELETE FROM invites WHERE account_id = ? AND used_at = 0`,
+		} {
+			if _, err := tx.ExecContext(ctx, q, accountID); err != nil {
+				return err
+			}
+		}
+		var shares int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM shares WHERE account_id = ?`, accountID).Scan(&shares); err != nil {
+			return err
+		}
+		if shares > 0 {
+			return nil
+		}
+		res, err := tx.ExecContext(ctx, `DELETE FROM accounts WHERE id = ?`, accountID)
+		if err != nil {
+			return err
+		}
+		n, err := res.RowsAffected()
+		accountDeleted = n == 1
+		return err
+	})
+	return blobKeys, accountDeleted, err
+}
+
 func SyncBlobKey(accountID, blobID string) string { return "sync/" + accountID + "/" + blobID }
 
 func ShareBlobKey(shareID string) string { return "share/" + shareID }

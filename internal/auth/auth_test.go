@@ -908,9 +908,6 @@ func TestRevokingRulesDuringProbation(t *testing.T) {
 	if status, out := e.call(t, "DELETE", "/v1/devices/"+owner.id, intruderToken, nil); status != 403 || out["error"] != "elevation-required" {
 		t.Fatalf("a young device must not revoke the established one: %d %v", status, out)
 	}
-	if status, out := e.call(t, "DELETE", "/v1/devices/"+owner.id, ownerToken, nil); status != 403 || out["error"] != "elevation-required" {
-		t.Fatalf("revoking the last established device, even as itself, needs elevation: %d %v", status, out)
-	}
 	if status, _ := e.call(t, "DELETE", "/v1/auth/session", e.session(t, owner), nil); status != 204 {
 		t.Fatalf("logging out stays free: %d", status)
 	}
@@ -920,44 +917,7 @@ func TestRevokingRulesDuringProbation(t *testing.T) {
 	}
 }
 
-func TestADeviceMayRevokeItselfOnlyWhileAnOlderDeviceRemains(t *testing.T) {
-	for _, minAge := range []time.Duration{0, 24 * time.Hour} {
-		e := newEnv(t)
-		e.svc.Cfg.ApproverMinAge = config.Duration(minAge)
-		older, younger := newDevice("laptop"), newDevice("phone")
-		e.signIn(t, older, e.invite(t, ""))
-		tokenOlder := e.session(t, older)
-		_, out := e.post(t, "/v1/devices/invite", tokenOlder, nil)
-		*e.clock = e.clock.Add(time.Second)
-		e.signIn(t, younger, out["code"].(string))
-		*e.clock = e.clock.Add(25 * time.Hour)
-		tokenOlder, tokenYounger := e.session(t, older), e.session(t, younger)
-		if status, out := e.call(t, "DELETE", "/v1/devices/"+older.id, tokenOlder, nil); status != 403 || out["error"] != "elevation-required" {
-			t.Fatalf("min age %v: the oldest device has nobody older to fall back on: %d %v", minAge, status, out)
-		}
-		if status, _ := e.call(t, "DELETE", "/v1/devices/"+younger.id, tokenYounger, nil); status != 204 {
-			t.Fatalf("min age %v: a device with an older one remaining may leave: %d", minAge, status)
-		}
-	}
-}
-
-func TestAFreshSingleDeviceCannotBeRevokedByItsToken(t *testing.T) {
-	for _, minAge := range []time.Duration{0, 24 * time.Hour} {
-		e := newEnv(t)
-		e.svc.Cfg.ApproverMinAge = config.Duration(minAge)
-		d := newDevice("laptop")
-		e.signIn(t, d, e.invite(t, ""))
-		token := e.session(t, d)
-		if status, out := e.call(t, "DELETE", "/v1/devices/"+d.id, token, nil); status != 403 || out["error"] != "elevation-required" {
-			t.Fatalf("min age %v: a stolen token removed the account's only device: %d %v", minAge, status, out)
-		}
-		if status, _ := e.call(t, "DELETE", "/v1/auth/session", token, nil); status != 204 {
-			t.Fatalf("logout stays free: %d", status)
-		}
-	}
-}
-
-func TestNewDevicesAreAnnouncedAndFlaggedUntilSeen(t *testing.T) {
+func TestNewDevicesAreAnnounced(t *testing.T) {
 	e := newEnv(t)
 	a, b := newDevice("laptop"), newDevice("phone")
 	e.signIn(t, a, e.invite(t, ""))
@@ -970,36 +930,51 @@ func TestNewDevicesAreAnnouncedAndFlaggedUntilSeen(t *testing.T) {
 		t.Fatalf("hook: %v", announced)
 	}
 	_, list := e.call(t, "GET", "/v1/devices", tokenA, nil)
-	flagged := ""
 	for _, raw := range list["devices"].([]any) {
-		entry := raw.(map[string]any)
-		if entry["new"] == true {
-			flagged = entry["name"].(string)
+		if _, flagged := raw.(map[string]any)["new"]; flagged {
+			t.Fatalf("the new flag is gone: %v", list)
 		}
 	}
-	if flagged != "phone" {
-		t.Fatalf("the other device must be flagged as new: %v", list)
+	if status, _ := e.call(t, "POST", "/v1/devices/"+b.id+"/seen", tokenA, nil); status != 404 && status != 405 {
+		t.Fatalf("the seen route is gone: %d", status)
 	}
-	sign := func(key ed25519.PrivateKey, viewer, target string) map[string]string {
-		return map[string]string{"sig": httpx.EncodeB64(ed25519.Sign(key, SeenMessage(viewer, target)))}
-	}
-	if status, out := e.call(t, "POST", "/v1/devices/"+b.id+"/seen", tokenA, nil); status == 204 {
-		t.Fatalf("a session token alone acknowledged a device: %v", out)
-	}
-	if status, out := e.call(t, "POST", "/v1/devices/"+b.id+"/seen", tokenA, sign(b.sign, a.id, b.id)); status != 403 || out["error"] != "bad-signature" {
-		t.Fatalf("a signature from another key acknowledged a device: %d %v", status, out)
-	}
-	if status, _ := e.call(t, "POST", "/v1/devices/"+b.id+"/seen", tokenA, sign(a.sign, a.id, b.id)); status != 204 {
-		t.Fatalf("mark seen: %d", status)
-	}
-	_, list = e.call(t, "GET", "/v1/devices", tokenA, nil)
-	for _, raw := range list["devices"].([]any) {
-		if raw.(map[string]any)["new"] == true {
-			t.Fatalf("still flagged: %v", list)
+}
+
+func TestEveryDeviceMayLeaveWithoutElevation(t *testing.T) {
+	for _, minAge := range []time.Duration{0, 24 * time.Hour} {
+		e := newEnv(t)
+		e.svc.Cfg.ApproverMinAge = config.Duration(minAge)
+		older, younger := newDevice("laptop"), newDevice("phone")
+		e.signIn(t, older, e.invite(t, ""))
+		tokenOlder := e.session(t, older)
+		_, out := e.post(t, "/v1/devices/invite", tokenOlder, nil)
+		*e.clock = e.clock.Add(time.Second)
+		e.signIn(t, younger, out["code"].(string))
+		*e.clock = e.clock.Add(25 * time.Hour)
+		tokenOlder, tokenYounger := e.session(t, older), e.session(t, younger)
+		if status, _ := e.call(t, "DELETE", "/v1/devices/"+older.id, tokenOlder, nil); status != 204 {
+			t.Fatalf("min age %v: the oldest device must be able to leave: %d", minAge, status)
+		}
+		if status, _ := e.call(t, "DELETE", "/v1/devices/"+younger.id, tokenYounger, nil); status != 204 {
+			t.Fatalf("min age %v: the last device must be able to leave: %d", minAge, status)
 		}
 	}
-	if status, _ := e.call(t, "POST", "/v1/devices/"+strings.Repeat("a", 26)+"/seen", tokenA, sign(a.sign, a.id, strings.Repeat("a", 26))); status != 404 {
-		t.Fatalf("unknown device: %d", status)
+}
+
+func TestTheLastDeviceLeavingDeletesTheAccountAndItsSyncData(t *testing.T) {
+	e := newEnv(t)
+	d := newDevice("laptop")
+	e.signIn(t, d, e.invite(t, ""))
+	token := e.session(t, d)
+	_, devices := e.call(t, "GET", "/v1/devices", token, nil)
+	if len(devices["devices"].([]any)) != 1 {
+		t.Fatalf("%v", devices)
+	}
+	if status, _ := e.call(t, "DELETE", "/v1/devices/"+d.id, token, nil); status != 204 {
+		t.Fatalf("a lone device must be able to leave: %d", status)
+	}
+	if _, err := e.svc.DB.Device(t.Context(), d.id); err == nil {
+		t.Fatal("the account holds nothing else, so it must be gone with its devices")
 	}
 }
 
@@ -1059,16 +1034,5 @@ func TestApprovalIsRefusedForARequesterThatJustJoinedEvenFromAnEstablishedDevice
 	e.unsigned[tokenA] = true
 	if status, out := e.call(t, "POST", "/v1/auth/approvals/"+id+"/approve", tokenA, nil); status != 403 || out["error"] != "device-signature-required" {
 		t.Fatalf("a bare token approving: %d %v", status, out)
-	}
-}
-
-func TestADeviceDoesNotAcknowledgeItself(t *testing.T) {
-	e := newEnv(t)
-	d := newDevice("laptop")
-	e.signIn(t, d, e.invite(t, ""))
-	token := e.session(t, d)
-	sig := httpx.EncodeB64(ed25519.Sign(d.sign, SeenMessage(d.id, d.id)))
-	if status, _ := e.call(t, "POST", "/v1/devices/"+d.id+"/seen", token, map[string]string{"sig": sig}); status != 400 {
-		t.Fatalf("%d", status)
 	}
 }

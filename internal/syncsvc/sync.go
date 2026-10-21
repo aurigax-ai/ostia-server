@@ -373,9 +373,6 @@ func (s *Service) rotate(w http.ResponseWriter, r *http.Request, p auth.Principa
 }
 
 func (s *Service) gc(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
-	if err := s.Auth.NeedElevation(p); err != nil {
-		return err
-	}
 	var in struct {
 		Keep []string `json:"keep"`
 	}

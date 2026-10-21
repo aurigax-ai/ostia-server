@@ -554,27 +554,40 @@ func TestUnelevatedInviteIsRefusedOnceTheAccountHasTwoDevices(t *testing.T) {
 	}
 }
 
-func TestUnseenDevicesAndEstablishedCounts(t *testing.T) {
-	d, c := open(t)
-	a, first := register(t, d, "github", "h")
-	c.t = c.t.Add(time.Hour)
-	second, _ := d.AddDevice(t.Context(), a.ID, newDevice("phone"), 10)
-	unseen, err := d.UnseenDevices(t.Context(), first)
-	if err != nil || !unseen[second.ID] || unseen[first.ID] {
-		t.Fatalf("%v %v", unseen, err)
-	}
-	if got, _ := d.UnseenDevices(t.Context(), second); len(got) != 0 {
-		t.Fatalf("a device is not told about devices that were there before it: %v", got)
-	}
-	_ = d.MarkSeen(t.Context(), first.ID, second.ID)
-	if got, _ := d.UnseenDevices(t.Context(), first); len(got) != 0 {
-		t.Fatalf("seen devices stay flagged: %v", got)
-	}
-	if n, _ := d.OlderActiveDevices(t.Context(), second); n != 1 {
-		t.Fatalf("older devices %d", n)
-	}
-	if n, _ := d.OlderActiveDevices(t.Context(), first); n != 0 {
-		t.Fatalf("the oldest device has nothing older: %d", n)
+func TestPurgeDepartedDeletesSyncDataAndTheAccountUnlessSharesRemain(t *testing.T) {
+	for _, withShare := range []bool{false, true} {
+		d, _ := open(t)
+		a, dev := register(t, d, "github", "h")
+		if err := d.PutWrap(t.Context(), a.ID, "passphrase", []byte("w")); err != nil {
+			t.Fatal(err)
+		}
+		if err := d.AddSyncBlob(t.Context(), a.ID, SyncBlob{ID: "blob1", Size: 3, Sum: make([]byte, 32)}, 100); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := d.PutManifest(t.Context(), a.ID, 0, []byte("m"), Retention{Versions: 3}); err != nil {
+			t.Fatal(err)
+		}
+		if withShare {
+			if err := d.CreateShare(t.Context(), Share{ID: ids.New(), AccountID: a.ID, Mode: "link", Size: 1, DeleteTokenHash: []byte("h")}, ShareQuota{MaxShares: 5, MaxBytes: 100}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, err := d.RevokeDevice(t.Context(), a.ID, dev.ID); err != nil {
+			t.Fatal(err)
+		}
+		keys, deleted, err := d.PurgeDeparted(t.Context(), a.ID)
+		if err != nil || len(keys) != 1 || keys[0] != SyncBlobKey(a.ID, "blob1") {
+			t.Fatalf("share %v: keys %v err %v", withShare, keys, err)
+		}
+		if deleted == withShare {
+			t.Fatalf("share %v: account deleted %v", withShare, deleted)
+		}
+		if _, err := d.Wrap(t.Context(), a.ID, "passphrase"); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("wraps must be gone: %v", err)
+		}
+		if _, err := d.CurrentManifest(t.Context(), a.ID); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("manifests must be gone: %v", err)
+		}
 	}
 }
 

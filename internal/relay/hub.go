@@ -323,7 +323,6 @@ func (h *Hub) serveListen(w http.ResponseWriter, r *http.Request, p auth.Princip
 		return nil
 	}
 	defer h.unregister(l)
-	h.replayDeviceAdded(l)
 
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
@@ -458,28 +457,6 @@ func (h *Hub) serveAccept(w http.ResponseWriter, r *http.Request, p auth.Princip
 	desktop := websocket.NetConn(context.Background(), ws, websocket.MessageBinary)
 	h.splice(pending, desktop, p)
 	return nil
-}
-
-func (h *Hub) replayDeviceAdded(l *listener) {
-	ctx, cancel := context.WithTimeout(context.Background(), controlWriteWait)
-	defer cancel()
-	viewer, err := h.DB.Device(ctx, l.deviceID)
-	if err != nil {
-		return
-	}
-	unseen, err := h.DB.UnseenDevices(ctx, viewer)
-	if err != nil {
-		return
-	}
-	devices, err := h.DB.DevicesOf(ctx, l.accountID)
-	if err != nil {
-		return
-	}
-	for _, dev := range devices {
-		if unseen[dev.ID] {
-			_ = l.send(controlMessage{Type: "device-added", DeviceID: dev.ID, Name: dev.Name, CreatedAt: dev.CreatedAt})
-		}
-	}
 }
 
 func (h *Hub) NotifyDeviceAdded(accountID string, device store.Device) {

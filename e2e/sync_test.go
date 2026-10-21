@@ -343,7 +343,6 @@ func TestBlobsAreWriteOnceAndQuotaLimited(t *testing.T) {
 
 func TestGarbageCollectionKeepsOnlyReferencedBlobs(t *testing.T) {
 	f := newSyncFixture(t, "[sync]\ngc_grace = \"0s\"\n")
-	second := f.addDevice(t, "second laptop")
 	for _, theme := range []string{"dark", "light", "solarized"} {
 		if _, err := f.a.Sync(t, settings("theme", theme)); err != nil {
 			t.Fatal(err)
@@ -353,7 +352,7 @@ func TestGarbageCollectionKeepsOnlyReferencedBlobs(t *testing.T) {
 	if usage["blobs"].(float64) != 3 {
 		t.Fatalf("usage before gc: %v", usage)
 	}
-	if deleted := f.a.CollectGarbage(t, second.API); deleted != 2 {
+	if deleted := f.a.CollectGarbage(t); deleted != 2 {
 		t.Fatalf("deleted %d, want 2", deleted)
 	}
 	if got, err := f.a.Pull(t); err != nil || !testkit.Equal(got, settings("theme", "solarized")) {
@@ -446,7 +445,6 @@ func TestDestructiveSyncActionsNeedAnotherDevicesApproval(t *testing.T) {
 	refused("deleting a wrap", "DELETE", "/v1/sync/wraps/recovery", nil)
 	refused("replacing the passphrase wrap", "PUT", "/v1/sync/wraps/passphrase", wrap)
 	refused("replacing the recovery wrap", "PUT", "/v1/sync/wraps/recovery", wrap)
-	refused("garbage collection", "POST", "/v1/sync/gc", map[string]any{"keep": []string{}})
 	refused("rotation", "POST", "/v1/sync/rotate", map[string]any{"ifMatch": 1, "manifest": "AAAA"})
 	refused("replacing its own device wrap", "PUT", "/v1/sync/wraps/device:"+api.ID.DeviceID, wrap)
 
@@ -715,5 +713,35 @@ func TestRekeyRefusesASignerThatBackdatedItsOwnManifestEntry(t *testing.T) {
 	clock = clock.Add(24 * time.Hour)
 	if _, err := b.Pull(t); err != nil || !bytes.Equal(b.Key, f.a.Key) {
 		t.Fatalf("a signer first seen more than a day ago is accepted: %v", err)
+	}
+}
+
+func TestGarbageCollectionNeedsNoApprovalButACurrentDevice(t *testing.T) {
+	f := newSyncFixture(t, "[sync]\ngc_grace = \"0s\"\n")
+	for _, theme := range []string{"dark", "light"} {
+		if _, err := f.a.Sync(t, settings("theme", theme)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if res := f.env.anonymous().Do(t, "POST", "/v1/sync/gc", map[string]any{"keep": []string{}}); res.Status != http.StatusUnauthorized {
+		t.Fatalf("garbage collection without a session: %s", res)
+	}
+	if f.a.API.Elevated(t) {
+		t.Fatal("the device must not be elevated for this test to mean anything")
+	}
+	if deleted := f.a.CollectGarbage(t); deleted != 1 {
+		t.Fatalf("an unelevated current device must be able to collect garbage: deleted %d", deleted)
+	}
+	if got, err := f.a.Pull(t); err != nil || !testkit.Equal(got, settings("theme", "light")) {
+		t.Fatalf("referenced blob lost: %v %v", got, err)
+	}
+}
+
+func TestADeviceThatLeftCannotCollectGarbage(t *testing.T) {
+	f := newSyncFixture(t, "")
+	second := f.addDevice(t, "second laptop")
+	second.API.Must(t, http.StatusNoContent, "DELETE", "/v1/devices/"+second.API.ID.DeviceID, nil)
+	if res := second.API.Do(t, "POST", "/v1/sync/gc", map[string]any{"keep": []string{}}); res.Status != http.StatusUnauthorized {
+		t.Fatalf("a device that left must not reach the account: %s", res)
 	}
 }
