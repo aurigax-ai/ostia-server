@@ -43,7 +43,10 @@ func TestShellRendersTheArtifactInASandboxedFrameWithoutSameOrigin(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(shellContentSecurityPolicy, "frame-src blob:") || !strings.Contains(shellContentSecurityPolicy, "default-src 'none'") {
-		t.Fatalf("the shell may frame only the artifact it builds: %q", shellContentSecurityPolicy)
+	if !strings.Contains(string(shell), `"connect-src 'none'"`) || !strings.Contains(string(shell), "doc.head.prepend(policy)") {
+		t.Fatal("the artifact document must get its own policy that blocks connections to the share host")
+	}
+	if !strings.Contains(shellContentSecurityPolicy, "default-src 'none'") || !strings.Contains(shellContentSecurityPolicy, "frame-ancestors 'none'") {
+		t.Fatalf("the shell's own policy: %q", shellContentSecurityPolicy)
 	}
 }

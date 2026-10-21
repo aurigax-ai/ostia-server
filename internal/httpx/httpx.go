@@ -150,6 +150,15 @@ func (p *Proxies) trusted(addr netip.Addr) bool {
 	return false
 }
 
+func (p *Proxies) Trusts(addr net.Addr) bool {
+	tcp, ok := addr.(*net.TCPAddr)
+	if !ok || p == nil {
+		return false
+	}
+	ip, ok := netip.AddrFromSlice(tcp.IP)
+	return ok && p.trusted(ip)
+}
+
 func (p *Proxies) ClientIP(r *http.Request) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {

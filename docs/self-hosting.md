@@ -62,14 +62,14 @@ https = ""
 http = ":8080"
 relay = ":8443"
 client_ip_header = "X-Forwarded-For"
-trusted_proxies = ["10.1.0.0/16"]
+trusted_proxies = ["10.1.4.0/28"]
 
 [modules]
 relay = true
 publish = true
 ```
 
-The proxy must send a PROXY protocol v1 or v2 header on the relay connection, because the server cannot see through the phone's TLS to learn who is calling and every per-address limit (connections, unconfirmed opens, pending hellos) keys on that address. The header is believed only from `trusted_proxies`, and a trusted address that sends none is dropped. Anything else that can open a connection to a trusted address can claim any client address, so `trusted_proxies` should list the proxy's addresses and the network should let only the proxy reach `listen.relay` and `listen.http`.
+`trusted_proxies` is the address range of the proxy pods only (a placeholder: use the Envoy pods' real addresses), never a whole pod network. The proxy must send a PROXY protocol v1 or v2 header on the relay connection, because the server cannot see through the phone's TLS to learn who is calling and every per-address limit (connections, unconfirmed opens, pending hellos) keys on that address. The header is believed only from `trusted_proxies`, and a trusted address that sends none is dropped. Anything else that can open a connection to a trusted address can claim any client address, so `trusted_proxies` should list the proxy's addresses and a network policy (or firewall) must restrict who can reach `listen.relay` and `listen.http` to the proxy.
 
 DNS for this layout: `sync.ostia.example.com`, `*.share.ostia.example.com` and `*.relay.ostia.example.com` all point at the proxy. The proxy holds certificates for the first two (the share wildcard needs DNS-01); the relay hosts need none, because the phone checks the desktop's pinned certificate, not a name.
 
@@ -157,7 +157,7 @@ spec:
       targetPort: relay
 ```
 
-The pod exposes `containerPort: 8443` as `relay`. Add `8443` next to `8080` in the NetworkPolicy that admits only the Gateway's Envoy pods, since the PROXY header from a trusted range is believed. The API and share hosts keep their HTTPRoute to `listen.http` (the share HTTPRoute lists `*.share.ostia.example.com`).
+The pod exposes `containerPort: 8443` as `relay`. Add `8443` next to `8080` in a NetworkPolicy that admits only the Gateway's Envoy pods. This is required, not optional: the PROXY header is believed from every address in `trusted_proxies`, so anything else that can open a connection to the relay port could claim any client address. The API and share hosts keep their HTTPRoute to `listen.http` (the share HTTPRoute lists `*.share.ostia.example.com`).
 
 ## Sign-in
 
@@ -287,7 +287,7 @@ What protects it:
 - The GitHub access token is used once to read the account id and login, then revoked at GitHub (`DELETE /applications/{client_id}/token`; a failure is logged and does not block the sign-in) and dropped. The client secret goes only to GitHub's token endpoint.
 - The session cookie is `__Host-ostia_admin`, so the browser accepts it only from this host over HTTPS with `Path=/` and no `Domain`, and refuses a cookie of that name set by any other host, including a sibling under the same registrable domain (a share host, for example). Every such cookie in a request is still checked and the one that matches a live session wins, so a planted cookie cannot sign the admin out.
 - A session is tied to its admin's row: it works only while that admin still exists, so `admin reset` ends every session at once, and sign-in and session creation happen in one transaction. Sessions also end at the next server start, and `ostia-server admin logout-all` ends them at any time (it is audited). Use it if a cookie may have leaked.
-- The session is a random token stored hashed, in a cookie that is `HttpOnly; Secure; SameSite=Strict; Path=/` (required by the `__Host-` prefix; the server reads it only on `/admin`). Every state-changing request also needs a CSRF token that belongs to the session. There is no CORS.
+- The session is a random token stored hashed, in a cookie that is `HttpOnly; Secure; SameSite=Strict; Path=/` (required by the `__Host-` prefix; the server reads it only on `/admin`). Every state-changing request also needs a CSRF token that belongs to the session, and must be same-origin: `Sec-Fetch-Site: same-origin`, or, from a browser that sends no fetch metadata, an `Origin` equal to the API's origin (`Origin: null` is refused). There is no CORS.
 - Pages carry a strict Content-Security-Policy (no inline script or style, no external origin); the assets are embedded in the binary.
 - Every action (setup code issued, setup, sign-in, refusal with its reason, sign-out, invite created or revoked, account deleted, reset) is written with its time, who did it (`github:<numeric id>`, which never changes, with the login as the target of setup and sign-in rows; `anonymous` for a refusal; or `cli`) and the target (the login, the reason with the GitHub id, or the object id). Cheap unauthenticated refusals (`state-mismatch`, `state-unknown`, a wrong setup code at the start) are logged each time but counted in the table: one row per reason per minute, shown as `state-mismatch x37` to the `admin_audit` table and to the log. Read it with `ostia-server admin audit`. The row is written after the action; if the database refuses it the action still stands and the failure is logged.
 - Deleting an account removes its devices, sessions, key wraps, sync blobs and manifests, shares and push registrations, and disconnects its relay streams; the blob files are deleted from disk. It cannot be undone.

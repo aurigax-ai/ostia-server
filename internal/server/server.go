@@ -46,6 +46,7 @@ type Options struct {
 
 type Server struct {
 	Cfg     config.Config
+	proxies *httpx.Proxies
 	DB      *store.DB
 	Blobs   blob.Store
 	Key     *serverkey.Key
@@ -101,6 +102,7 @@ func New(cfg config.Config, opts Options) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
+	s.proxies = proxies
 	s.Guard = &httpx.Guard{IP: proxies.ClientIP, Now: now}
 	s.Auth = &auth.Service{DB: db, Blobs: blobs, Key: key, Cfg: cfg.Auth, Now: now, Guard: s.Guard}
 	if cfg.Auth.GitHubClientID != "" {
@@ -306,10 +308,10 @@ func (s *Server) Run(ctx context.Context) error {
 			return err
 		}
 		closers = append(closers, func() { _ = raw.Close() })
-		ln, err := sni.TrustProxyHeaders(raw, s.Cfg.Listen.TrustedProxies, s.Cfg.Relay.HelloTimeout.Std())
-		if err != nil {
-			return err
+		if len(s.Cfg.Listen.TrustedProxies) == 0 {
+			slog.Warn("listen.relay has no listen.trusted_proxies: no PROXY protocol header is read, so every phone behind a proxy shares the proxy's address and its rate limits")
 		}
+		ln := sni.TrustProxyHeaders(raw, s.proxies.Trusts, s.Cfg.Relay.HelloTimeout.Std())
 		slog.Info("listening", "relay", raw.Addr().String())
 		router := s.sniRouter(func(conn net.Conn) { _ = conn.Close() })
 		wg.Go(func() {

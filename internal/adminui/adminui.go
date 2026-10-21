@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -97,8 +98,25 @@ func (s *Service) Handler() http.Handler {
 		h.Set("X-Frame-Options", "DENY")
 		h.Set("Referrer-Policy", "no-referrer")
 		h.Set("Cache-Control", "no-store")
+		if r.Method == http.MethodPost && !s.sameOrigin(r) {
+			slog.Warn("admin request refused: not from this origin", "pattern", r.Pattern)
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
 		limited.ServeHTTP(w, r)
 	}))
+}
+
+func (s *Service) sameOrigin(r *http.Request) bool {
+	if site := r.Header.Get("Sec-Fetch-Site"); site != "" {
+		return site == "same-origin"
+	}
+	origin, err := url.Parse(r.Header.Get("Origin"))
+	if err != nil || origin.Scheme == "" || origin.Host == "" {
+		return false
+	}
+	want, err := url.Parse(s.RedirectURI)
+	return err == nil && origin.Scheme == want.Scheme && origin.Host == want.Host
 }
 
 func (s *Service) authed(fn handler, mutating bool) http.Handler {
@@ -144,6 +162,7 @@ func (s *Service) session(r *http.Request) (session, bool) {
 func adminName(githubID int64) string { return "github:" + strconv.FormatInt(githubID, 10) }
 
 func (s *Service) openSession(w http.ResponseWriter, r *http.Request, token string, githubID int64, login, action string) {
+	expireLegacyCookie(w)
 	http.SetCookie(w, &http.Cookie{Name: cookieName, Value: token, Path: "/", MaxAge: int(SessionTTL / time.Second), HttpOnly: true, Secure: true, SameSite: http.SameSiteStrictMode})
 	s.audit(r.Context(), adminName(githubID), action, login)
 	http.Redirect(w, r, "/admin/invites", http.StatusSeeOther)
@@ -153,10 +172,15 @@ func (s *Service) logout(w http.ResponseWriter, r *http.Request, sess session) e
 	if err := s.DB.DeleteAdminSession(r.Context(), ids.Hash(sess.token)); err != nil {
 		return err
 	}
+	expireLegacyCookie(w)
 	http.SetCookie(w, &http.Cookie{Name: cookieName, Path: "/", MaxAge: -1, HttpOnly: true, Secure: true, SameSite: http.SameSiteStrictMode})
 	s.audit(r.Context(), sess.admin, "logout", "")
 	http.Redirect(w, r, "/admin/", http.StatusSeeOther)
 	return nil
+}
+
+func expireLegacyCookie(w http.ResponseWriter) {
+	http.SetCookie(w, &http.Cookie{Name: "ostia_admin", Path: "/admin", MaxAge: -1, HttpOnly: true, Secure: true, SameSite: http.SameSiteStrictMode})
 }
 
 func csrfToken(key *serverkey.Key, sessionToken string) string {

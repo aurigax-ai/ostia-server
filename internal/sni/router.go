@@ -37,25 +37,32 @@ func addressOf(conn net.Conn) string {
 	return netkey.Of(host)
 }
 
-func (r *Router) admit(ip string) bool {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.perIP[ip] >= max(r.MaxPendingPerIP, 1) {
-		return false
-	}
+func (r *Router) admit() bool {
 	select {
 	case r.pending <- struct{}{}:
-		r.perIP[ip]++
 		return true
 	default:
 		return false
 	}
 }
 
+func (r *Router) claim(ip string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.perIP[ip] >= max(r.MaxPendingPerIP, 1) {
+		return false
+	}
+	r.perIP[ip]++
+	return true
+}
+
 func (r *Router) release(ip string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	<-r.pending
+	if ip == "" {
+		return
+	}
 	if r.perIP[ip]--; r.perIP[ip] <= 0 {
 		delete(r.perIP, ip)
 	}
@@ -80,18 +87,23 @@ func (r *Router) Serve(ln net.Listener) error {
 			}
 			return err
 		}
-		ip := addressOf(conn)
-		if !r.admit(ip) {
+		if !r.admit() {
 			_ = conn.Close()
 			continue
 		}
-		go r.handle(conn, ip)
+		go r.handle(conn)
 	}
 }
 
-func (r *Router) handle(conn net.Conn, ip string) {
+func (r *Router) handle(conn net.Conn) {
 	deadline := time.Now().Add(r.HelloTimeout)
 	_ = conn.SetReadDeadline(deadline)
+	ip := addressOf(conn)
+	if !r.claim(ip) {
+		_ = conn.Close()
+		r.release("")
+		return
+	}
 	name, hello, err := Peek(conn)
 	_ = conn.SetReadDeadline(time.Time{})
 	if err != nil {

@@ -43,9 +43,21 @@ async function fetchBlob() {
   return new Uint8Array(await response.arrayBuffer())
 }
 
+const ARTIFACT_POLICY = "connect-src 'none'"
+
+function withArtifactPolicy(html) {
+  const doc = new DOMParser().parseFromString(html, 'text/html')
+  const policy = doc.createElement('meta')
+  policy.httpEquiv = 'Content-Security-Policy'
+  policy.content = ARTIFACT_POLICY
+  doc.head.prepend(policy)
+  const type = doc.doctype ? new XMLSerializer().serializeToString(doc.doctype) : ''
+  return type + doc.documentElement.outerHTML
+}
+
 function renderDocument(html) {
   const frame = element('iframe', { sandbox: 'allow-scripts', title: 'Shared artifact', class: 'artifact' })
-  frame.srcdoc = html
+  frame.srcdoc = withArtifactPolicy(html)
   root.replaceChildren(frame, reportBar())
 }
 

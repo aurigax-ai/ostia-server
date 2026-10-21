@@ -101,6 +101,9 @@ func (e *adminEnv) send(method, host, path string, form url.Values, cookie *http
 	if form != nil {
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	}
+	if method == "POST" {
+		req.Header.Set("Sec-Fetch-Site", "same-origin")
+	}
 	if cookie != nil {
 		req.AddCookie(cookie)
 	}
@@ -115,6 +118,9 @@ func (e *adminEnv) from(ip, method, path string, form url.Values) reply {
 	req.Host = "api.test"
 	req.RemoteAddr = ip + ":4000"
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	if method == "POST" {
+		req.Header.Set("Sec-Fetch-Site", "same-origin")
+	}
 	rec := httptest.NewRecorder()
 	e.handler.ServeHTTP(rec, req)
 	return reply{rec}
@@ -380,6 +386,9 @@ func TestSetupWithTheCodeMakesTheGitHubUserTheAdminAndSpendsTheCode(t *testing.T
 	session := res.cookie()
 	if session == nil || !session.HttpOnly || !session.Secure || session.SameSite != http.SameSiteStrictMode || session.Path != "/" || session.Domain != "" || session.MaxAge != int(adminui.SessionTTL/time.Second) {
 		t.Fatalf("session cookie %+v", session)
+	}
+	if old := res.named("ostia_admin"); old == nil || old.MaxAge >= 0 || old.Path != "/admin" {
+		t.Fatalf("the cookie of the earlier release must be expired: %+v", old)
 	}
 	if cleared := res.named(oauthCookieName); cleared == nil || cleared.MaxAge >= 0 {
 		t.Fatalf("the state cookie must be cleared: %+v", cleared)
@@ -1336,4 +1345,41 @@ func mustAudit(t *testing.T, e *adminEnv) []store.AuditEntry {
 		t.Fatal(err)
 	}
 	return entries
+}
+
+func TestAdminPostsNeedASameOriginRequest(t *testing.T) {
+	e := newAdminEnv(t, nil, Options{})
+	s := e.signIn()
+	post := func(headers map[string]string) int {
+		req := httptest.NewRequest("POST", "/admin/invites", strings.NewReader(url.Values{"ttl": {"7d"}, "csrf": {s.csrf}}.Encode()))
+		req.Host = "api.test"
+		req.RemoteAddr = "192.0.2.77:4000"
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.AddCookie(s.cookie)
+		for k, v := range headers {
+			req.Header.Set(k, v)
+		}
+		rec := httptest.NewRecorder()
+		e.handler.ServeHTTP(rec, req)
+		return rec.Code
+	}
+	origin := e.srv.Cfg.APIOrigin()
+	for name, c := range map[string]struct {
+		headers map[string]string
+		ok      bool
+	}{
+		"same-origin fetch metadata":       {map[string]string{"Sec-Fetch-Site": "same-origin"}, true},
+		"matching origin, no metadata":     {map[string]string{"Origin": origin}, true},
+		"cross-site fetch metadata":        {map[string]string{"Sec-Fetch-Site": "cross-site", "Origin": origin}, false},
+		"same-site fetch metadata":         {map[string]string{"Sec-Fetch-Site": "same-site"}, false},
+		"null origin from a sandbox":       {map[string]string{"Origin": "null"}, false},
+		"origin of a sibling host":         {map[string]string{"Origin": "https://abc.share.test"}, false},
+		"origin with the wrong scheme":     {map[string]string{"Origin": "http://api.test"}, false},
+		"neither header":                   {nil, false},
+		"metadata overrides a good origin": {map[string]string{"Sec-Fetch-Site": "none", "Origin": origin}, false},
+	} {
+		if got := post(c.headers); (got != http.StatusForbidden) != c.ok {
+			t.Errorf("%s: answered %d", name, got)
+		}
+	}
 }

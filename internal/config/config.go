@@ -266,9 +266,9 @@ func Load(path string) (Config, error) {
 }
 
 func (c *Config) normalize() {
-	c.Domains.API = strings.ToLower(strings.TrimSpace(c.Domains.API))
-	c.Domains.Share = strings.ToLower(strings.TrimSpace(c.Domains.Share))
-	c.Domains.Relay = strings.ToLower(strings.TrimSpace(c.Domains.Relay))
+	c.Domains.API = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(c.Domains.API)), ".")
+	c.Domains.Share = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(c.Domains.Share)), ".")
+	c.Domains.Relay = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(c.Domains.Relay)), ".")
 	if c.Domains.Port == 0 {
 		c.Domains.Port = defaultPort(c.Domains.Scheme)
 	}

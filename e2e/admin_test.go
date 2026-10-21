@@ -31,6 +31,7 @@ func adminRequest(t *testing.T, e *env, method, path string, form url.Values, co
 	if form != nil {
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	}
+	req.Header.Set("Sec-Fetch-Site", "same-origin")
 	if cookie != nil {
 		req.AddCookie(cookie)
 	}
