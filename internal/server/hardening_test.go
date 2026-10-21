@@ -86,7 +86,7 @@ func TestBackupIsEncryptedToTheRecipientAndRestorable(t *testing.T) {
 	if err := os.WriteFile(restored, plain, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	db, err := store.Open(restored, time.Now)
+	db, err := store.Open(restored, store.JournalWAL, time.Now)
 	if err != nil {
 		t.Fatal(err)
 	}

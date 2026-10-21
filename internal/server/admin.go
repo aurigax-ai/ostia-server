@@ -22,7 +22,7 @@ type Admin struct {
 }
 
 func OpenAdmin(cfg config.Config) (*Admin, error) {
-	db, err := store.Open(filepath.Join(cfg.DataDir, "ostia.sqlite"), time.Now)
+	db, err := store.Open(filepath.Join(cfg.DataDir, "ostia.sqlite"), cfg.Storage.SQLiteJournal, time.Now)
 	if err != nil {
 		return nil, err
 	}

@@ -84,6 +84,12 @@
 | `allow_public` | `true` | Allow plaintext public shares. Owners must still choose them explicitly. |
 | `sweep_interval` | `1h` | How often expired shares are removed. |
 
+## `[storage]`
+
+| Key | Default | |
+|---|---|---|
+| `sqlite_journal` | `wal` | SQLite journal mode, `wal` or `delete`; anything else is refused. Use `delete` when `data_dir` is on NFS or any other network filesystem: WAL keeps a shared-memory index that does not work there. `delete` is slower for concurrent writes and needs exactly one server process on the data. Every process that opens the database, including `ostia-server admin`, reads the same setting; the mode is stored in the file, so opening with the other value converts it. |
+
 ## `[sync]`
 
 | Key | Default | |

@@ -81,7 +81,7 @@ func New(cfg config.Config, opts Options) (*Server, error) {
 	if err := mkdirAll(cfg.DataDir); err != nil {
 		return nil, err
 	}
-	db, err := store.Open(filepath.Join(cfg.DataDir, "ostia.sqlite"), now)
+	db, err := store.Open(filepath.Join(cfg.DataDir, "ostia.sqlite"), cfg.Storage.SQLiteJournal, now)
 	if err != nil {
 		return nil, err
 	}

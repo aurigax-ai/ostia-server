@@ -73,6 +73,9 @@ allow_never = false
 allow_public = true
 sweep_interval = "1h0m0s"
 
+[storage]
+sqlite_journal = "wal"
+
 [sync]
 max_blob_bytes = 16777216
 max_manifest_bytes = 4194304

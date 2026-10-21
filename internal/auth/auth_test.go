@@ -116,7 +116,7 @@ func newEnv(t *testing.T) *env {
 	e := &env{clock: &now, gh: newFakeGitHub(), owners: map[string]*device{}, unsigned: map[string]bool{}}
 	t.Cleanup(e.gh.srv.Close)
 	clock := func() time.Time { return *e.clock }
-	db, err := store.Open(filepath.Join(t.TempDir(), "db"), clock)
+	db, err := store.Open(filepath.Join(t.TempDir(), "db"), store.JournalWAL, clock)
 	if err != nil {
 		t.Fatal(err)
 	}

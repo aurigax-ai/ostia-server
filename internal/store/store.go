@@ -23,7 +23,13 @@ var (
 	ErrInvalidTTL      = errors.New("ttl must be positive")
 )
 
-const fileMode = 0o600
+const (
+	fileMode      = 0o600
+	JournalWAL    = "wal"
+	JournalDelete = "delete"
+)
+
+func ValidJournal(mode string) bool { return mode == JournalWAL || mode == JournalDelete }
 
 var migrations = []string{schemaV1}
 
@@ -32,12 +38,15 @@ type DB struct {
 	now func() time.Time
 }
 
-func Open(path string, now func() time.Time) (*DB, error) {
+func Open(path, journal string, now func() time.Time) (*DB, error) {
+	if !ValidJournal(journal) {
+		return nil, fmt.Errorf("unknown sqlite journal mode %q", journal)
+	}
 	if err := restrictFiles(path); err != nil {
 		return nil, err
 	}
 	q := url.Values{}
-	q.Add("_pragma", "journal_mode(WAL)")
+	q.Add("_pragma", "journal_mode("+journal+")")
 	q.Add("_pragma", "busy_timeout(5000)")
 	q.Add("_pragma", "foreign_keys(1)")
 	q.Add("_pragma", "synchronous(NORMAL)")
@@ -64,7 +73,7 @@ func restrictFiles(path string) error {
 	if err := f.Close(); err != nil {
 		return err
 	}
-	for _, suffix := range []string{"", "-wal", "-shm"} {
+	for _, suffix := range []string{"", "-wal", "-shm", "-journal"} {
 		if err := os.Chmod(path+suffix, fileMode); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}

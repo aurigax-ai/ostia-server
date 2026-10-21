@@ -19,7 +19,7 @@ func TestDatabaseFilesAreOwnerOnlyEvenWhenTheyAlreadyExistWiderOpen(t *testing.T
 	if err := os.WriteFile(path+"-wal", nil, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	d, err := Open(path, time.Now)
+	d, err := Open(path, JournalWAL, time.Now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -38,7 +38,7 @@ func TestDatabaseFilesAreOwnerOnlyEvenWhenTheyAlreadyExistWiderOpen(t *testing.T
 
 func TestDeletedRowsAreOverwrittenOnDisk(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "db.sqlite")
-	d, err := Open(path, time.Now)
+	d, err := Open(path, JournalWAL, time.Now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -157,7 +157,7 @@ func TestVacuumIntoWritesAConsistentCopy(t *testing.T) {
 	if err := d.VacuumInto(t.Context(), out); err != nil {
 		t.Fatal(err)
 	}
-	copyDB, err := Open(out, time.Now)
+	copyDB, err := Open(out, JournalWAL, time.Now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -168,5 +168,65 @@ func TestVacuumIntoWritesAConsistentCopy(t *testing.T) {
 	}
 	if err := d.VacuumInto(t.Context(), out); err == nil {
 		t.Fatal("an existing file was overwritten")
+	}
+}
+
+func pragma(t *testing.T, d *DB, name string) string {
+	t.Helper()
+	var v string
+	if err := d.sql.QueryRow(`PRAGMA ` + name).Scan(&v); err != nil {
+		t.Fatal(err)
+	}
+	return v
+}
+
+func TestJournalModeFollowsTheSettingAndKeepsTheBusyTimeout(t *testing.T) {
+	for mode, want := range map[string]string{JournalWAL: "wal", JournalDelete: "delete"} {
+		path := filepath.Join(t.TempDir(), "db.sqlite")
+		d, err := Open(path, mode, time.Now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		register(t, d, "github", "h")
+		if got := pragma(t, d, "journal_mode"); got != want {
+			t.Errorf("%s: journal_mode is %q", mode, got)
+		}
+		if got := pragma(t, d, "busy_timeout"); got != "5000" {
+			t.Errorf("%s: busy_timeout is %q", mode, got)
+		}
+		_, walErr := os.Stat(path + "-wal")
+		if (walErr == nil) != (mode == JournalWAL) {
+			t.Errorf("%s: wal file present=%v", mode, walErr == nil)
+		}
+		_ = d.Close()
+	}
+}
+
+func TestUnknownJournalModesAreRefused(t *testing.T) {
+	for _, mode := range []string{"", "truncate", "WAL", "memory", "wal); drop table accounts; --"} {
+		if _, err := Open(filepath.Join(t.TempDir(), "db.sqlite"), mode, time.Now); err == nil {
+			t.Errorf("%q was accepted", mode)
+		}
+	}
+}
+
+func TestADatabaseInWALModeConvertsToDeleteMode(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "db.sqlite")
+	d, err := Open(path, JournalWAL, time.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, _ := register(t, d, "github", "h")
+	_ = d.Close()
+	d, err = Open(path, JournalDelete, time.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	if got := pragma(t, d, "journal_mode"); got != "delete" {
+		t.Fatalf("journal_mode is %q", got)
+	}
+	if devices, err := d.DevicesOf(t.Context(), a.ID); err != nil || len(devices) != 1 {
+		t.Fatalf("data lost in the conversion: %v %v", devices, err)
 	}
 }

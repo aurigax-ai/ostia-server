@@ -83,6 +83,17 @@ Point `data_dir` at `/var/lib/ostia-server` (the unit's `StateDirectory`).
 
 Push is off by default. Turn it on with `modules.push = true` and give the server the credentials of the app build whose phones will register. A phone registers only with a ticket that a signed-in desktop of the same account requested, and the desktop's session is needed to ping: a Firebase service account (`push.fcm.service_account_file`) for Android and an Apple token key (`push.apns.*`) for iOS. A self-hosted server therefore pushes to a phone app you built and signed with your own Firebase project and Apple team; the publisher's hosted instance uses the publisher's credentials. The server sees a handle, a timestamp and a platform, nothing else.
 
+## Network filesystems
+
+SQLite's WAL mode needs shared memory and file locks that NFS and other network filesystems do not provide, so a database there can corrupt. If `data_dir` is on one, set
+
+```toml
+[storage]
+sqlite_journal = "delete"
+```
+
+and run exactly one replica (one server process, with no second instance mounting the same directory; `admin` commands on the same host are fine). A database that is already in WAL mode is converted back when the server starts with `delete`, as long as no other process has it open.
+
 ## Backups
 
 Back up `data_dir` as a whole: the database, `blobs/` and `server.key`. `server.key` seals push tokens and keys the GitHub-id hashes; without it GitHub users would get new accounts and push registrations would stop opening.

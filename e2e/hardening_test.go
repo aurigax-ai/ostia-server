@@ -208,7 +208,7 @@ func TestAdminBackupWritesAnEncryptedRestorableCopyOfTheLiveDatabase(t *testing.
 	if err := os.WriteFile(restored, plain, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	db, err := store.Open(restored, time.Now)
+	db, err := store.Open(restored, store.JournalWAL, time.Now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -242,5 +242,24 @@ func TestAdminBackupNeedsARecipientAndAFreshOutputPath(t *testing.T) {
 	}
 	if kept, _ := os.ReadFile(taken); string(kept) != "x" {
 		t.Fatalf("an existing file was overwritten: %q", kept)
+	}
+}
+
+func TestDeleteJournalModeRunsWithoutAWALFile(t *testing.T) {
+	f := newSyncFixture(t, "[storage]\nsqlite_journal = \"delete\"\n")
+	if _, err := f.a.Sync(t, settings("theme", "dark")); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"ostia.sqlite-wal", "ostia.sqlite-shm"} {
+		if _, err := os.Stat(filepath.Join(f.env.proc.DataDir, name)); err == nil {
+			t.Errorf("%s exists in delete mode", name)
+		}
+	}
+	if out := f.env.proc.Admin(t, "accounts"); !strings.Contains(out, f.a.API.ID.AccountID) {
+		t.Fatalf("admin cannot read the database while the server runs: %s", out)
+	}
+	got, err := f.a.Pull(t)
+	if err != nil || !testkit.Equal(got, settings("theme", "dark")) {
+		t.Fatalf("pull: %v %v", got, err)
 	}
 }
