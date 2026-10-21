@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"slices"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -465,6 +466,6 @@ func (d *SyncDevice) CollectGarbage(t testing.TB) int {
 		keep = append(keep, entry.BlobID)
 	}
 	slices.Sort(keep)
-	m := d.API.Must(t, http.StatusOK, "POST", "/v1/sync/gc", map[string]any{"keep": keep}).Map(t)
+	m := d.API.Must(t, http.StatusOK, "POST", "/v1/sync/gc", map[string]any{"keep": keep}, "If-Match", strconv.FormatInt(remote.version, 10)).Map(t)
 	return int(m["deleted"].(float64))
 }

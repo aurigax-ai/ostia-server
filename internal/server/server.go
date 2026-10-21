@@ -190,6 +190,7 @@ func (s *Server) info(w http.ResponseWriter, r *http.Request) error {
 		"auth":                  map[string]bool{"invite": true, "github": s.Auth.GitHub != nil},
 		"approverMinAgeSeconds": int64(s.Cfg.Auth.ApproverMinAge.Std() / time.Second),
 		"relayDomain":           s.Cfg.Domains.Relay,
+		"syncGCBound":           true,
 		"limits": map[string]any{
 			"shareMaxBytes":  s.Cfg.Publish.MaxFileBytes,
 			"allowPublic":    s.Cfg.Publish.AllowPublic,

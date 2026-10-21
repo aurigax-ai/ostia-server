@@ -206,6 +206,9 @@ func (s *Service) putBlob(w http.ResponseWriter, r *http.Request, p auth.Princip
 		if !ids.Equal(existing.Sum, sum[:]) {
 			return httpx.Errf(http.StatusConflict, "blob-exists", "a blob id is write-once; derive a new id for new content")
 		}
+		if err := s.DB.TouchSyncBlob(r.Context(), p.AccountID, id); err != nil {
+			return err
+		}
 		httpx.WriteJSON(w, http.StatusOK, map[string]any{"id": id, "size": existing.Size})
 		return nil
 	case !errors.Is(err, store.ErrNotFound):
@@ -373,6 +376,10 @@ func (s *Service) rotate(w http.ResponseWriter, r *http.Request, p auth.Principa
 }
 
 func (s *Service) gc(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
+	expected, err := ifMatch(r)
+	if err != nil {
+		return err
+	}
 	var in struct {
 		Keep []string `json:"keep"`
 	}
@@ -386,14 +393,14 @@ func (s *Service) gc(w http.ResponseWriter, r *http.Request, p auth.Principal) e
 	for _, id := range in.Keep {
 		keep[id] = true
 	}
-	stale, err := s.DB.UnreferencedSyncBlobs(r.Context(), p.AccountID, keep, s.Cfg.GCGrace.Std())
+	stale, err := s.DB.CollectSyncBlobs(r.Context(), p.AccountID, expected, keep, s.Cfg.GCGrace.Std())
+	if versionMismatch(w, err) {
+		return nil
+	}
 	if err != nil {
 		return err
 	}
 	for _, id := range stale {
-		if err := s.DB.DeleteSyncBlob(r.Context(), p.AccountID, id); err != nil && !errors.Is(err, store.ErrNotFound) {
-			return err
-		}
 		if err := s.Blobs.Delete(r.Context(), store.SyncBlobKey(p.AccountID, id)); err != nil {
 			return err
 		}

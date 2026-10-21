@@ -745,3 +745,28 @@ func TestADeviceThatLeftCannotCollectGarbage(t *testing.T) {
 		t.Fatalf("a device that left must not reach the account: %s", res)
 	}
 }
+
+func TestGarbageCollectionIsBoundToTheManifestVersion(t *testing.T) {
+	f := newSyncFixture(t, "[sync]\ngc_grace = \"0s\"\n")
+	for _, theme := range []string{"dark", "light"} {
+		if _, err := f.a.Sync(t, settings("theme", theme)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	empty := map[string]any{"keep": []string{}}
+	if res := f.a.API.Do(t, "POST", "/v1/sync/gc", empty); res.Status != http.StatusPreconditionRequired {
+		t.Fatalf("gc without If-Match: %s", res)
+	}
+	stale := f.a.API.Do(t, "POST", "/v1/sync/gc", empty, "If-Match", "1")
+	if stale.Status != http.StatusPreconditionFailed || stale.Map(t)["error"] != "version-mismatch" || stale.Map(t)["current"].(float64) != 2 {
+		t.Fatalf("gc against a manifest that moved: %s", stale)
+	}
+	usage := f.a.API.Must(t, http.StatusOK, "GET", "/v1/sync/usage", nil).Map(t)
+	if usage["blobs"].(float64) != 2 {
+		t.Fatalf("a refused gc deleted blobs: %v", usage)
+	}
+	info := f.env.anonymous().Must(t, http.StatusOK, "GET", "/v1/info", nil).Map(t)
+	if info["syncGCBound"] != true {
+		t.Fatalf("/v1/info must advertise the bound gc: %v", info)
+	}
+}

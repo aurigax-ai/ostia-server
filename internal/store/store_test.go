@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -236,13 +237,37 @@ func TestSyncBlobQuotaAndUnreferenced(t *testing.T) {
 	}
 	c.t = c.t.Add(2 * time.Hour)
 	_ = d.AddSyncBlob(t.Context(), a.ID, blob("cccccccccccccccc", 10), 100)
-	stale, _ := d.UnreferencedSyncBlobs(t.Context(), a.ID, map[string]bool{}, time.Hour)
-	if len(stale) != 1 || stale[0] != "aaaaaaaaaaaaaaaa" {
-		t.Fatalf("grace period ignored: %v", stale)
+	stale, err := d.CollectSyncBlobs(t.Context(), a.ID, 0, map[string]bool{"aaaaaaaaaaaaaaaa": true}, time.Hour)
+	if err != nil || len(stale) != 0 {
+		t.Fatalf("kept blob collected: %v %v", stale, err)
 	}
-	stale, _ = d.UnreferencedSyncBlobs(t.Context(), a.ID, map[string]bool{"aaaaaaaaaaaaaaaa": true}, time.Hour)
-	if len(stale) != 0 {
-		t.Fatalf("kept blob listed: %v", stale)
+	if _, err := d.CollectSyncBlobs(t.Context(), a.ID, 7, map[string]bool{}, time.Hour); !errors.Is(err, ErrVersionMismatch) {
+		t.Fatalf("a moved manifest must stop the collection: %v", err)
+	}
+	if err := d.TouchSyncBlob(t.Context(), a.ID, "aaaaaaaaaaaaaaaa"); err != nil {
+		t.Fatal(err)
+	}
+	if stale, _ := d.CollectSyncBlobs(t.Context(), a.ID, 0, map[string]bool{}, time.Hour); len(stale) != 0 {
+		t.Fatalf("a re-uploaded blob is fresh again and must survive the grace period: %v", stale)
+	}
+	c.t = c.t.Add(2 * time.Hour)
+	stale, err = d.CollectSyncBlobs(t.Context(), a.ID, 0, map[string]bool{}, time.Hour)
+	if err != nil || len(stale) != 2 {
+		t.Fatalf("grace period ignored: %v %v", stale, err)
+	}
+	if _, err := d.SyncBlob(t.Context(), a.ID, "aaaaaaaaaaaaaaaa"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("collected rows must be gone: %v", err)
+	}
+}
+
+func TestTheDeployedSchemaIsKeptAndTheSeenTableIsDroppedByALaterMigration(t *testing.T) {
+	if !strings.Contains(schemaV1, "CREATE TABLE device_seen") || !strings.Contains(schemaV2, "DROP TABLE device_seen") {
+		t.Fatal("schemaV1 is deployed and must not change; schemaV2 drops the seen table")
+	}
+	d, _ := open(t)
+	var n int
+	if err := d.sql.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM sqlite_master WHERE name = 'device_seen'`).Scan(&n); err != nil || n != 0 {
+		t.Fatalf("device_seen after migrating: %d %v", n, err)
 	}
 }
 

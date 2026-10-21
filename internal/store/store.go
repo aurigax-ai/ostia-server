@@ -31,7 +31,7 @@ const (
 
 func ValidJournal(mode string) bool { return mode == JournalWAL || mode == JournalDelete }
 
-var migrations = []string{schemaV1}
+var migrations = []string{schemaV1, schemaV2}
 
 type DB struct {
 	sql *sql.DB

@@ -49,6 +49,11 @@ CREATE TABLE invites (
 	created_account TEXT REFERENCES accounts(id) ON DELETE SET NULL
 );
 CREATE INDEX invites_created_account ON invites(created_account);
+CREATE TABLE device_seen (
+	viewer_device_id TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+	device_id TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+	PRIMARY KEY (viewer_device_id, device_id)
+);
 CREATE TABLE key_wraps (
 	account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
 	slot TEXT NOT NULL,
@@ -143,4 +148,8 @@ CREATE TABLE admin_audit (
 	target TEXT NOT NULL DEFAULT '',
 	count INTEGER NOT NULL DEFAULT 1
 );
+`
+
+const schemaV2 = `
+DROP TABLE device_seen;
 `
