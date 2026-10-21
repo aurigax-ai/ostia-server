@@ -40,6 +40,8 @@ jobs:
         with:
           node-version: 24
       - run: node --test 'web/share-shell/*.test.mjs' 'testdata/vectors/*.test.mjs'
+      - run: npm install --no-save --no-package-lock playwright-core
+      - run: CHROME_PATH=/usr/bin/google-chrome node --test web/share-shell/shell.browser.test.mjs
 
   image:
     runs-on: ubuntu-latest

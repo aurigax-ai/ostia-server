@@ -99,6 +99,12 @@ func TestPublicShareIsExplicitAndSandboxed(t *testing.T) {
 	if ct := blob.Header.Get("Content-Type"); ct != "application/octet-stream" || !strings.Contains(blob.Header.Get("Content-Security-Policy"), "sandbox") {
 		t.Fatalf("public bytes must not be a document: %q", ct)
 	}
+	if views := viewsOf(t, owner, sh.ID); views != 0 {
+		t.Fatalf("fetching the bytes is not a view: %d", views)
+	}
+	if res := e.net.SharePost(t, shareHost, sh.ID, "/view", nil); res.Status != http.StatusNoContent {
+		t.Fatalf("/view: %s", res)
+	}
 	if views := viewsOf(t, owner, sh.ID); views != 1 {
 		t.Fatalf("views %d", views)
 	}
@@ -165,6 +171,12 @@ func TestViewsAreCountedWithoutLoggingWho(t *testing.T) {
 	}
 	for range 3 {
 		e.net.ShareGet(t, shareHost, sh.ID, "/blob")
+	}
+	if views := viewsOf(t, owner, sh.ID); views != 0 {
+		t.Fatalf("blob fetches are not views: %d", views)
+	}
+	for range 3 {
+		e.net.SharePost(t, shareHost, sh.ID, "/view", nil)
 	}
 	if views := viewsOf(t, owner, sh.ID); views != 3 {
 		t.Fatalf("views %d", views)
@@ -523,5 +535,30 @@ func TestShareHostNeverRedirectsToACallerSuppliedURL(t *testing.T) {
 		if loc := res.Header.Get("Location"); loc != "" || res.Status >= 300 && res.Status < 400 {
 			t.Fatalf("%s: status %d Location %q", path, res.Status, loc)
 		}
+	}
+}
+
+func TestTopLevelNavigationToShareDataIsRefused(t *testing.T) {
+	e := newEnv(t, "")
+	owner := e.user(t, "desktop")
+	for _, mode := range []string{"public", "link"} {
+		sh := owner.PublishHTML(t, testkit.ShareOptions{Mode: mode, HTML: artifactHTML})
+		for _, path := range []string{"/blob", "/meta"} {
+			for _, headers := range [][]string{{"Sec-Fetch-Mode", "navigate"}, {"Sec-Fetch-Dest", "document"}} {
+				res := e.net.ShareGet(t, shareHost, sh.ID, path, headers...)
+				if res.Status != http.StatusNotFound || strings.Contains(string(res.Body), "Quarterly") || strings.Contains(string(res.Body), artifactHTML) {
+					t.Fatalf("%s %s %v: %s", mode, path, headers, res)
+				}
+			}
+			if res := e.net.ShareGet(t, shareHost, sh.ID, path, "Sec-Fetch-Mode", "same-origin", "Sec-Fetch-Dest", "empty"); res.Status != http.StatusOK {
+				t.Fatalf("%s %s from the shell: %s", mode, path, res)
+			}
+		}
+		if res := e.net.SharePost(t, shareHost, sh.ID, "/view", nil); res.Status != http.StatusNoContent {
+			t.Fatalf("/view: %s", res)
+		}
+	}
+	if res := e.net.SharePost(t, shareHost, "nosuchshare", "/view", nil); res.Status != http.StatusNotFound {
+		t.Fatalf("/view of an unknown share: %s", res)
 	}
 }

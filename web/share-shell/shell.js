@@ -45,6 +45,7 @@ async function fetchBlob() {
 
 const ARTIFACT_POLICY = "connect-src 'none'; form-action 'none'; base-uri 'none'"
 const MAX_LINK_LENGTH = 2048
+const OPEN_DELAY_MS = 1000
 
 function withArtifactPolicy(html) {
   const doc = new DOMParser().parseFromString(html, 'text/html')
@@ -56,10 +57,15 @@ function withArtifactPolicy(html) {
   return type + doc.documentElement.outerHTML
 }
 
+function countView() {
+  fetch('/view', { method: 'POST' }).catch(() => {})
+}
+
 function renderDocument(html) {
   const frame = element('iframe', { sandbox: 'allow-scripts', title: 'Shared artifact', class: 'artifact' })
   frame.srcdoc = withArtifactPolicy(html)
   artifactFrame = frame
+  countView()
   root.replaceChildren(frame)
 }
 
@@ -78,23 +84,49 @@ function parseLink(value) {
   return url
 }
 
+const SHARED_SUFFIXES = new Set(['co', 'com', 'org', 'net', 'gov', 'edu', 'ac'])
+const MAX_PREFIX = 24
+
+function splitHost(hostname) {
+  const labels = hostname.split('.')
+  if (labels.length <= 2 || /^[\d.]+$/.test(hostname) || hostname.includes(':')) return ['', hostname]
+  const keep = labels.at(-1).length === 2 && SHARED_SUFFIXES.has(labels.at(-2)) ? 3 : 2
+  return [labels.slice(0, -keep).join('.') + '.', labels.slice(-keep).join('.')]
+}
+
+function middleTruncate(text) {
+  if (text.length <= MAX_PREFIX) return text
+  const half = (MAX_PREFIX - 1) / 2
+  return `${text.slice(0, Math.ceil(half))}…${text.slice(-Math.floor(half))}`
+}
+
+function hostLabel(url) {
+  const [prefix, domain] = splitHost(url.hostname)
+  const port = url.port ? `:${url.port}` : ''
+  const label = element('span', { class: 'host', title: url.host })
+  label.append(middleTruncate(prefix), element('strong', {}, domain + port))
+  return label
+}
+
 function confirmLink(url) {
-  linkConfirm?.remove()
-  const open = element('button', { type: 'button' }, 'Open')
+  if (linkConfirm) return
+  const open = element('button', { type: 'button', disabled: '' }, 'Open')
   const cancel = element('button', { type: 'button' }, 'Cancel')
   const box = element('div', { class: 'confirm', role: 'alertdialog', 'aria-label': 'Leaving the shared page' })
-  box.append(element('span', {}, `This link leaves the shared page: ${url.host}`), open, cancel)
+  box.append(element('span', {}, 'This link leaves the shared page: '), hostLabel(url), open, cancel)
   const close = () => {
+    clearTimeout(enable)
     box.remove()
     linkConfirm = null
   }
+  const enable = setTimeout(() => open.removeAttribute('disabled'), OPEN_DELAY_MS)
   open.addEventListener('click', () => {
     window.open(url.href, '_blank', 'noopener,noreferrer')
     close()
   })
   cancel.addEventListener('click', close)
   linkConfirm = box
-  root.before(box)
+  document.body.append(box)
   cancel.focus()
 }
 

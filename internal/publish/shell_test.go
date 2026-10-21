@@ -101,7 +101,7 @@ func TestOnlyTheOperatorControlsTheWarning(t *testing.T) {
 	if !strings.Contains(accept, "renderDocument(html)") || strings.Count(js, "renderDocument(html)") != 3 {
 		t.Error("the frame may only be created after the visitor accepts, or when the server turned the warning off")
 	}
-	for _, feature := range []string{"fullscreen=()", "camera=()", "clipboard-write=()", "geolocation=()"} {
+	for _, feature := range []string{"fullscreen=()", "camera=()", "clipboard-write=()", "geolocation=()", "picture-in-picture=()"} {
 		if !strings.Contains(permissionsPolicy, feature) {
 			t.Errorf("Permissions-Policy lacks %s", feature)
 		}
@@ -136,7 +136,11 @@ func TestTheSharedPageCannotLeaveForAnotherHost(t *testing.T) {
 		"'http:'",
 		"'https:'",
 		"url.username || url.password",
-		"This link leaves the shared page: ${url.host}",
+		"This link leaves the shared page: ",
+		"if (linkConfirm) return",
+		"const OPEN_DELAY_MS = 1000",
+		"{ type: 'button', disabled: '' }, 'Open'",
+		"document.body.append(box)",
 		"window.open(url.href, '_blank', 'noopener,noreferrer')",
 		"const MAX_LINK_LENGTH = 2048",
 	} {

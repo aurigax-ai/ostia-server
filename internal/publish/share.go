@@ -19,7 +19,7 @@ const (
 	dataContentSecurityPolicy  = "default-src 'none'; sandbox"
 )
 
-const permissionsPolicy = "fullscreen=(), camera=(), microphone=(), geolocation=(), payment=(), usb=(), serial=(), clipboard-read=(), clipboard-write=(), display-capture=(), screen-wake-lock=()"
+const permissionsPolicy = "fullscreen=(), camera=(), microphone=(), geolocation=(), payment=(), usb=(), serial=(), clipboard-read=(), clipboard-write=(), display-capture=(), screen-wake-lock=(), picture-in-picture=()"
 
 var staticAssets = map[string]string{
 	"/shell.js":  "text/javascript; charset=utf-8",
@@ -47,6 +47,10 @@ func (s *Service) ShareHandler() http.Handler {
 				}
 				return s.report(w, r, id, in.Reason)
 			})).ServeHTTP(w, r)
+			return
+		}
+		if r.URL.Path == "/view" && r.Method == http.MethodPost {
+			s.serveView(w, r, id)
 			return
 		}
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
@@ -120,6 +124,24 @@ func (s *Service) lookup(r *http.Request, id string) (store.Share, availability,
 	return share, available, nil
 }
 
+func isNavigation(r *http.Request) bool {
+	return r.Header.Get("Sec-Fetch-Mode") == "navigate" || r.Header.Get("Sec-Fetch-Dest") == "document"
+}
+
+func (s *Service) serveView(w http.ResponseWriter, r *http.Request, id string) {
+	share, state, err := s.lookup(r, id)
+	if err != nil {
+		httpx.WriteError(w, r, err)
+		return
+	}
+	if state != available {
+		httpx.WriteError(w, r, httpx.ErrNotFound)
+		return
+	}
+	_ = s.DB.CountView(r.Context(), share.ID)
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (s *Service) serveMeta(w http.ResponseWriter, r *http.Request, id string) {
 	share, state, err := s.lookup(r, id)
 	if err != nil {
@@ -127,6 +149,10 @@ func (s *Service) serveMeta(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 	w.Header().Set("Content-Security-Policy", dataContentSecurityPolicy)
+	if isNavigation(r) {
+		httpx.WriteError(w, r, httpx.ErrNotFound)
+		return
+	}
 	switch state {
 	case missing:
 		httpx.WriteError(w, r, httpx.ErrNotFound)
@@ -144,6 +170,10 @@ func (s *Service) serveBlob(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 	w.Header().Set("Content-Security-Policy", dataContentSecurityPolicy)
+	if isNavigation(r) {
+		httpx.WriteError(w, r, httpx.ErrNotFound)
+		return
+	}
 	switch state {
 	case missing:
 		httpx.WriteError(w, r, httpx.ErrNotFound)
@@ -164,6 +194,5 @@ func (s *Service) serveBlob(w http.ResponseWriter, r *http.Request, id string) {
 	if r.Method == http.MethodHead {
 		return
 	}
-	_ = s.DB.CountView(r.Context(), share.ID)
 	_, _ = io.Copy(w, f)
 }

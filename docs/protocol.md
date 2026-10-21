@@ -202,7 +202,8 @@ All requests are served by Host: `<id>.<share domain>`.
 |---|---|
 | `GET /` | The fixed shell page, for every mode. |
 | `GET /meta` | `{v: 1, mode, size, salt, expiresAt, warning}`; `warning` is the server's `publish.share_warning` and no share can change it; `404` unknown or not uploaded, `410` expired or removed |
-| `GET /blob` | The ciphertext, or the file itself for a public share; counts one view |
+| `GET /blob` | The ciphertext, or the file itself for a public share. Answers `404` to a top-level navigation (`Sec-Fetch-Mode: navigate` or `Sec-Fetch-Dest: document`), as does `/meta`, so a link cannot download it |
+| `POST /view` | Counts one view; the shell calls it once the page is shown, after the visitor accepted the notice. `204`; `404` for an unknown, expired or removed share |
 | `POST /report` | `{reason}` as above, for the shell's report button |
 | `GET /shell.js`, `/crypto.js`, `/shell.css` | The shell's static assets |
 
