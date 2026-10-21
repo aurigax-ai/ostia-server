@@ -55,11 +55,22 @@ func (a *Admin) Invite(ctx context.Context, ttl time.Duration) (code string, exp
 	return a.Auth.CreateInvite(ctx, "", ttl, false)
 }
 
-func (a *Admin) LoginCode(ctx context.Context) (string, error) {
+func (a *Admin) SetupCode(ctx context.Context) (string, error) {
 	if !a.Cfg.Admin.Enabled {
 		return "", errors.New("the admin web UI is off; set admin.enabled = true in the config")
 	}
-	return adminui.IssueCode(ctx, a.DB)
+	code, err := adminui.IssueSetupCode(ctx, a.DB)
+	if errors.Is(err, store.ErrAdminExists) {
+		return "", errors.New("an admin already exists; run admin reset first to start over")
+	}
+	return code, err
+}
+
+func (a *Admin) ResetAdmins(ctx context.Context) (admins, sessions int64, err error) {
+	if admins, sessions, err = a.DB.ResetAdmins(ctx); err != nil {
+		return 0, 0, err
+	}
+	return admins, sessions, a.DB.AddAudit(ctx, "cli", "reset", fmt.Sprintf("%d admins, %d sessions", admins, sessions))
 }
 
 func (a *Admin) LogoutAll(ctx context.Context) (int64, error) {

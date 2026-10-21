@@ -142,7 +142,12 @@ func New(cfg config.Config, opts Options) (*Server, error) {
 		slog.Info("admin sessions ended by the restart", "count", n)
 	}
 	if cfg.Admin.Enabled {
-		s.admin = (&adminui.Service{DB: db, Auth: s.Auth, Key: key, Guard: s.Guard, Host: cfg.Domains.API, MaxInviteTTL: cfg.Auth.InviteTTL.Std(), Now: now}).Handler()
+		s.admin = (&adminui.Service{
+			DB: db, Auth: s.Auth, Key: key, Guard: s.Guard, Host: cfg.Domains.API, MaxInviteTTL: cfg.Auth.InviteTTL.Std(), Now: now,
+			GitHub:       auth.GitHub{ClientID: cfg.Admin.GitHubClientID, BaseURL: cfg.Auth.GitHubBaseURL, APIURL: cfg.Auth.GitHubAPIURL, Client: opts.client()},
+			ClientSecret: cfg.Admin.GitHubClientSecret,
+			RedirectURI:  cfg.APIOrigin() + adminui.CallbackPath,
+		}).Handler()
 	}
 	if cfg.Listen.HTTPS != "" && cfg.TLS.Mode == config.TLSFiles {
 		if s.certs, err = newCertSet(cfg.TLS.Certs); err != nil {

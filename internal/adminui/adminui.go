@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -44,25 +45,30 @@ type Service struct {
 	MaxInviteTTL time.Duration
 	Now          func() time.Time
 
+	GitHub       auth.GitHub
+	ClientSecret string
+	RedirectURI  string
+
 	pages    map[string]*template.Template
 	loginAll *limit.Limiter
 }
 
 type session struct {
 	admin string
+	label string
 	token string
 	csrf  string
 }
 
 type handler func(w http.ResponseWriter, r *http.Request, sess session) error
 
-func IssueCode(ctx context.Context, db *store.DB) (string, error) {
+func IssueSetupCode(ctx context.Context, db *store.DB) (string, error) {
 	code := auth.FormatCode(ids.New()[:20])
 	hint := strings.ToUpper(auth.NormalizeCode(code)[:4])
-	if err := db.CreateAdminCode(ctx, ids.Hash(auth.NormalizeCode(code)), hint, CodeTTL); err != nil {
+	if err := db.CreateSetupCode(ctx, ids.Hash(auth.NormalizeCode(code)), hint, CodeTTL); err != nil {
 		return "", err
 	}
-	return code, db.AddAudit(ctx, "cli", "login-code", hint)
+	return code, db.AddAudit(ctx, "cli", "setup-code", hint)
 }
 
 func (s *Service) Handler() http.Handler {
@@ -72,8 +78,9 @@ func (s *Service) Handler() http.Handler {
 	mux.HandleFunc("GET /admin", func(w http.ResponseWriter, r *http.Request) { http.Redirect(w, r, "/admin/", http.StatusSeeOther) })
 	mux.HandleFunc("GET /admin/{$}", s.home)
 	mux.HandleFunc("GET /admin/assets/{name}", s.asset)
-	slow := limit.Rule{Every: 12 * time.Second, Burst: 5}
-	mux.Handle("POST /admin/login", s.Guard.PerIP("admin.login", slow, http.HandlerFunc(s.login)))
+	mux.Handle("POST /admin/github/start", s.Guard.PerIP("admin.github.start", startRule, http.HandlerFunc(s.start)))
+	mux.Handle("GET "+CallbackPath, s.Guard.PerIP("admin.github.return", returnRule, http.HandlerFunc(s.callback)))
+	mux.Handle("GET "+finishPath, s.Guard.PerIP("admin.github.return", returnRule, http.HandlerFunc(s.finish)))
 	mux.Handle("POST /admin/logout", s.authed(s.logout, true))
 	mux.Handle("GET /admin/invites", s.authed(s.invites, false))
 	mux.Handle("POST /admin/invites", s.authed(s.createInvite, true))
@@ -127,22 +134,19 @@ func (s *Service) session(r *http.Request) (session, bool) {
 		if cookie.Value == "" {
 			continue
 		}
-		if admin, err := s.DB.AdminSession(r.Context(), ids.Hash(cookie.Value)); err == nil {
-			return session{admin: admin, token: cookie.Value, csrf: csrfToken(s.Key, cookie.Value)}, true
+		if who, err := s.DB.AdminSession(r.Context(), ids.Hash(cookie.Value)); err == nil {
+			return session{admin: adminName(who.GitHubID), label: who.Login, token: cookie.Value, csrf: csrfToken(s.Key, cookie.Value)}, true
 		}
 	}
 	return session{}, false
 }
 
-func (s *Service) startSession(w http.ResponseWriter, r *http.Request, admin string) error {
-	token := ids.Token()
-	if err := s.DB.CreateAdminSession(r.Context(), ids.Hash(token), admin, SessionTTL); err != nil {
-		return err
-	}
+func adminName(githubID int64) string { return "github:" + strconv.FormatInt(githubID, 10) }
+
+func (s *Service) openSession(w http.ResponseWriter, r *http.Request, token string, githubID int64, login, action string) {
 	http.SetCookie(w, &http.Cookie{Name: cookieName, Value: token, Path: "/admin", MaxAge: int(SessionTTL / time.Second), HttpOnly: true, Secure: true, SameSite: http.SameSiteStrictMode})
-	s.audit(r.Context(), admin, "login", "")
+	s.audit(r.Context(), adminName(githubID), action, login)
 	http.Redirect(w, r, "/admin/invites", http.StatusSeeOther)
-	return nil
 }
 
 func (s *Service) logout(w http.ResponseWriter, r *http.Request, sess session) error {
@@ -199,7 +203,7 @@ func (s *Service) render(w http.ResponseWriter, status int, name string, data pa
 }
 
 func (s *Service) base(sess session, nav string) page {
-	return page{Host: s.Host, Admin: sess.admin, CSRF: sess.csrf, Nav: nav}
+	return page{Host: s.Host, Admin: sess.label, CSRF: sess.csrf, Nav: nav}
 }
 
 var assets = map[string]string{"admin.css": "text/css; charset=utf-8", "admin.js": "text/javascript; charset=utf-8"}

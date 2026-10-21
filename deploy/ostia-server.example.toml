@@ -48,6 +48,8 @@ revoked_device_retention = "720h0m0s"
 
 [admin]
 enabled = false
+github_client_id = ""
+github_client_secret_file = ""
 
 [relay]
 max_streams_per_label = 8

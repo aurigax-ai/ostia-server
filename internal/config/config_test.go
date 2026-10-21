@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -69,20 +70,114 @@ func TestExampleConfigLoadsAndMatchesTheDefaults(t *testing.T) {
 }
 
 func TestAdminIsOffByDefaultAndReadsItsKeys(t *testing.T) {
+	t.Setenv(AdminSecretEnv, "")
 	cfg, err := Load(write(t, minimal))
 	if err != nil || cfg.Admin.Enabled {
 		t.Fatalf("the admin UI must be off by default: %v %+v", err, cfg.Admin)
 	}
-	cfg, err = Load(write(t, minimal+"\n[admin]\nenabled = true\n"))
-	if err != nil || !cfg.Admin.Enabled {
+	secret := filepath.Join(t.TempDir(), "secret")
+	if err := os.WriteFile(secret, []byte("  s3cret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err = Load(write(t, minimal+"\n[admin]\nenabled = true\ngithub_client_id = \"Iv1.abc\"\ngithub_client_secret_file = "+strconv.Quote(secret)+"\n"))
+	if err != nil || !cfg.Admin.Enabled || cfg.Admin.GitHubClientID != "Iv1.abc" || cfg.Admin.GitHubClientSecret != "s3cret" {
 		t.Fatalf("%v %+v", err, cfg.Admin)
 	}
 }
 
+func TestAdminGitHubSecretComesFromTheEnvironment(t *testing.T) {
+	t.Setenv(AdminSecretEnv, " from-env ")
+	cfg, err := Load(write(t, minimal+"\n[admin]\nenabled = true\ngithub_client_id = \"Iv1.abc\"\n"))
+	if err != nil || cfg.Admin.GitHubClientSecret != "from-env" {
+		t.Fatalf("%v %+v", err, cfg.Admin)
+	}
+}
+
+func TestAdminNeedsAClientIDAndASecretWhenEnabled(t *testing.T) {
+	t.Setenv(AdminSecretEnv, "")
+	secret := filepath.Join(t.TempDir(), "secret")
+	if err := os.WriteFile(secret, []byte("s3cret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	empty := filepath.Join(t.TempDir(), "empty")
+	if err := os.WriteFile(empty, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cases := map[string]struct {
+		extra string
+		want  string
+	}{
+		"no id":          {"github_client_secret_file = " + strconv.Quote(secret), "admin.github_client_id"},
+		"no secret":      {`github_client_id = "Iv1.abc"`, "client secret is required"},
+		"empty file":     {"github_client_id = \"Iv1.abc\"\ngithub_client_secret_file = " + strconv.Quote(empty), "client secret is required"},
+		"missing file":   {"github_client_id = \"Iv1.abc\"\ngithub_client_secret_file = \"/nonexistent/secret\"", "github_client_secret_file"},
+		"secret in toml": {"github_client_id = \"Iv1.abc\"\ngithub_client_secret = \"leak\"", "github_client_secret"},
+	}
+	for name, c := range cases {
+		body := minimal + "\n[admin]\nenabled = true\n" + c.extra + "\n"
+		if _, err := Load(write(t, body)); err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s: want error containing %q, got %v", name, c.want, err)
+		}
+	}
+	hosts := minimal + "\n[auth]\ngithub_base_url = \"\"\n[admin]\nenabled = true\ngithub_client_id = \"Iv1.abc\"\ngithub_client_secret_file = " + strconv.Quote(secret) + "\n"
+	if _, err := Load(write(t, hosts)); err == nil || !strings.Contains(err.Error(), "auth.github_base_url") {
+		t.Fatalf("the admin sign-in needs the GitHub hosts: %v", err)
+	}
+	both := minimal + "\n[admin]\nenabled = true\ngithub_client_id = \"Iv1.abc\"\ngithub_client_secret_file = " + strconv.Quote(secret) + "\n"
+	t.Setenv(AdminSecretEnv, "also")
+	if _, err := Load(write(t, both)); err == nil || !strings.Contains(err.Error(), "not both") {
+		t.Fatalf("a secret in both places must be refused: %v", err)
+	}
+}
+
+func TestAdminSecretFileWiderThan0600IsRefused(t *testing.T) {
+	t.Setenv(AdminSecretEnv, "")
+	secret := filepath.Join(t.TempDir(), "secret")
+	if err := os.WriteFile(secret, []byte("s3cret"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	body := minimal + "\n[admin]\nenabled = true\ngithub_client_id = \"Iv1.abc\"\ngithub_client_secret_file = " + strconv.Quote(secret) + "\n"
+	if _, err := Load(write(t, body)); err == nil || !strings.Contains(err.Error(), "readable by group or others") {
+		t.Fatalf("a world-readable secret file must be refused: %v", err)
+	}
+	for _, mode := range []os.FileMode{0o600, 0o400} {
+		if err := os.Chmod(secret, mode); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Load(write(t, body)); err != nil {
+			t.Fatalf("mode %o: %v", mode, err)
+		}
+	}
+}
+
+func TestAdminSecretIsNotReadWhileAdminIsOff(t *testing.T) {
+	t.Setenv(AdminSecretEnv, "")
+	cfg, err := Load(write(t, minimal+"\n[admin]\ngithub_client_id = \"Iv1.abc\"\ngithub_client_secret_file = \"/nonexistent/secret\"\n"))
+	if err != nil || cfg.Admin.GitHubClientSecret != "" {
+		t.Fatalf("%v %+v", err, cfg.Admin)
+	}
+}
+
+func TestAPIOriginFollowsSchemeAndPort(t *testing.T) {
+	cfg := Default()
+	cfg.Domains.API = "api.example.com"
+	for _, c := range []struct {
+		scheme string
+		port   int
+		want   string
+	}{{"https", 443, "https://api.example.com"}, {"https", 8443, "https://api.example.com:8443"}, {"http", 80, "http://api.example.com"}, {"http", 8080, "http://api.example.com:8080"}, {"http", 443, "http://api.example.com:443"}} {
+		cfg.Domains.Scheme, cfg.Domains.Port = c.scheme, c.port
+		if got := cfg.APIOrigin(); got != c.want {
+			t.Errorf("%s %d: %s", c.scheme, c.port, got)
+		}
+	}
+}
+
 func TestAdminGitHubUsersIsAnUnknownKey(t *testing.T) {
+	t.Setenv(AdminSecretEnv, "x")
 	_, err := Load(write(t, minimal+"\n[admin]\nenabled = true\ngithub_users = [4242]\n"))
 	if err == nil || !strings.Contains(err.Error(), "github_users") {
-		t.Fatalf("GitHub admin sign-in does not exist, so its key must not load: %v", err)
+		t.Fatalf("an allow-list of users does not exist, so its key must not load: %v", err)
 	}
 }
 

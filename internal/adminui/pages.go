@@ -22,6 +22,8 @@ type page struct {
 	CSRF  string
 	Nav   string
 	Error string
+	Setup bool
+	Next  string
 
 	TTLs       []ttlChoice
 	NewCode    string
@@ -76,7 +78,7 @@ func parsePages(now func() time.Time) map[string]*template.Template {
 		},
 	}
 	pages := map[string]*template.Template{}
-	for _, name := range []string{"login", "invites", "accounts"} {
+	for _, name := range []string{"login", "hop", "invites", "accounts"} {
 		pages[name] = template.Must(template.New(name).Funcs(funcs).ParseFS(adminweb.Files, "base.html", name+".html"))
 	}
 	return pages

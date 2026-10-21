@@ -51,6 +51,7 @@ Without the relay you can drop `listen.https` entirely and run only `listen.http
 
 - **Invite codes** (always on): `ostia-server admin invite`, then paste the code into the desktop app.
 - **GitHub**: create a GitHub OAuth App, tick "Enable Device Flow", put its client id in `auth.github_client_id`. No client secret is stored.
+- The admin web UI signs in with GitHub through its own OAuth App, see [Admin web UI](#admin-web-ui).
 
 ## Docker
 
@@ -121,7 +122,8 @@ Everything the server writes is owner-only (the process sets umask 077, and the 
 ```
 ostia-server admin invite [-ttl 168h]
 ostia-server admin backup -recipient <age1...> -out <file>
-ostia-server admin login
+ostia-server admin setup
+ostia-server admin reset
 ostia-server admin logout-all
 ostia-server admin audit [-n 50]
 ostia-server admin accounts
@@ -141,26 +143,41 @@ A small web UI for the operator: create and revoke invites, list accounts, see a
 ```toml
 [admin]
 enabled = true
+github_client_id = "Ov23liAbCdEfGhIjKlMn"
+github_client_secret_file = "/run/secrets/ostia-admin-github-client-secret"
 ```
 
-Restart the server, then get a one-time code on the server and sign in:
+Sign-in is GitHub only. Register a GitHub OAuth App for it (separate from the app behind `auth.github_client_id`, which the desktop app uses with the device flow):
+
+1. GitHub, Settings, Developer settings, OAuth Apps, New OAuth App. An organisation's own settings work too.
+2. Homepage URL `https://<domains.api>/admin/`. Authorization callback URL exactly `https://<domains.api>/admin/github/callback`, with the same scheme and port as `domains.scheme` and `domains.port` (for `sync.ostia.apogex.dev`: `https://sync.ostia.apogex.dev/admin/github/callback`). Leave "Enable Device Flow" off.
+3. Copy the client id into `admin.github_client_id`.
+4. Generate a client secret and give it to the server as a file (`admin.github_client_secret_file`, mounted from a secret store; trailing whitespace is ignored; the server refuses a file readable by group or others, so mount a Kubernetes secret with `defaultMode: 0400` and no `fsGroup` read bit, or use the variable) or as the environment variable `OSTIA_ADMIN_GITHUB_CLIENT_SECRET`. Set one, not both. The secret is never read from the TOML, which is meant to live in git. With `admin.enabled = true` the server refuses to start without the id and the secret. A GitHub Enterprise server uses `auth.github_base_url` and `auth.github_api_url`.
+
+First-time setup, on a server that has no admin yet:
 
 ```sh
-ostia-server admin login
-# docker compose exec ostia-server /usr/local/bin/ostia-server admin login
-# kubectl -n <namespace> exec -it deploy/<ostia-server> -- /usr/local/bin/ostia-server admin login
+ostia-server admin setup
+# docker compose exec ostia-server /usr/local/bin/ostia-server admin setup
+# kubectl -n <namespace> exec -it deploy/<ostia-server> -- /usr/local/bin/ostia-server admin setup
 ```
 
-The command prints the code and the address. Open `https://<domains.api>/admin/`, paste the code. A code works once and for 10 minutes; the session lasts 8 hours. For the deployment at `sync.ostia.apogex.dev` that is <https://sync.ostia.apogex.dev/admin/>; the code comes from `ostia-server admin login` run in that deployment's pod. The route is on the API host only, so it is reachable wherever the API is, and nowhere on the share or relay domains. Behind a proxy that terminates TLS, forward `/admin` like the rest of the API, keep HTTPS (the session cookie is `Secure`) and list the proxy under `listen.trusted_proxies`. A proxy that is not listed makes every client share the proxy's address, so the per-address sign-in limit below applies to everyone together and even a valid code from that address is refused while it is exhausted.
+The command prints a one-time setup code and the address. The code works once, for 10 minutes, and only while no admin exists; asking for a new one voids the old one. Open `https://<domains.api>/admin/`: with no admin the page reads **Set up admin**. Enter the code, choose **Continue with GitHub** and authorise the app. The GitHub account that returns becomes the site admin: its numeric id (not its name, which can change) is stored in the database and the code is spent. From then on the page only offers **Sign in with GitHub**, and only that stored id gets a session (8 hours).
+
+If the admin account is lost or must change hands, run `ostia-server admin reset` in the pod. It removes every admin, every admin session and every pending code or sign-in, and is audited. The server is then back at first-time setup. Nothing else is touched: accounts, invites and synced data stay.
+
+The route is on the API host only, so it is reachable wherever the API is, and nowhere on the share or relay domains. Behind a proxy that terminates TLS, forward `/admin` like the rest of the API, keep HTTPS (the cookies are `Secure`) and list the proxy under `listen.trusted_proxies`. A proxy that is not listed makes every client share the proxy's address, so the per-address limits below apply to everyone together.
 
 What protects it:
 
-- The only way in is the login code. It carries 100 bits, is stored hashed, is consumed on first use and is refused after 10 minutes. Attempts are limited per address (five, then one every 12 seconds). Failed attempts are also limited overall (30, then one every 2 seconds); a valid code is never held back by that overall limit, so guessing from many addresses cannot lock the operator out. A refused attempt is logged without the code and without an address.
+- GitHub uses the web redirect flow (never the device flow) with a one-time `state` and PKCE (S256). The state is random, stored hashed, single use and valid for 10 minutes, and it is bound to the browser that started the sign-in by a `__Host-ostia_admin_oauth` cookie (`HttpOnly; Secure; SameSite=Strict; Path=/`, ten minutes) that is compared in constant time. The PKCE verifier waits next to the hashed state in the database for those ten minutes; it is useless without the matching GitHub code. GitHub returns to `/admin/github/callback`, which holds no secret and only hands the browser on to `/admin/github/finish` as a navigation from this site; that is what lets the Strict cookie travel. A callback without the cookie, with another browser's state, with a used or expired state, or with an error from GitHub is refused and signs nobody in.
+- Setup needs both the code and a GitHub sign-in in the same flow. The code carries 100 bits, is stored hashed, is checked when the flow starts and spent in one database transaction together with storing the admin, and that transaction fails if an admin exists by then. Failed code attempts are limited per address (five, then one every 12 seconds) and overall (30, then one every 2 seconds); a valid code is never held back by the overall limit. The start and callback routes are limited per address. A refused attempt is logged without the code, the state, any GitHub code or token, and without an address.
+- The GitHub access token is used once to read the account id and login, then revoked at GitHub (`DELETE /applications/{client_id}/token`; a failure is logged and does not block the sign-in) and dropped. The client secret goes only to GitHub's token endpoint.
 - Every `ostia_admin` cookie in a request is checked and the one that matches a live session wins, so a cookie planted from a sibling host cannot sign the admin out.
-- Sessions end at the next server start, and `ostia-server admin logout-all` ends them at any time (it is audited). Use it if a cookie may have leaked.
+- A session is tied to its admin's row: it works only while that admin still exists, so `admin reset` ends every session at once, and sign-in and session creation happen in one transaction. Sessions also end at the next server start, and `ostia-server admin logout-all` ends them at any time (it is audited). Use it if a cookie may have leaked.
 - The session is a random token stored hashed, in a cookie that is `HttpOnly; Secure; SameSite=Strict; Path=/admin`. Every state-changing request also needs a CSRF token that belongs to the session. There is no CORS.
 - Pages carry a strict Content-Security-Policy (no inline script or style, no external origin); the assets are embedded in the binary.
-- Every action (code issued, sign-in, sign-out, invite created or revoked, account deleted) is written with its time, who did it (`code:<first four characters of the code used>` or `cli`) and the target id to the `admin_audit` table and to the log. Read it with `ostia-server admin audit`. The row is written after the action; if the database refuses it the action still stands and the failure is logged.
+- Every action (setup code issued, setup, sign-in, refusal with its reason, sign-out, invite created or revoked, account deleted, reset) is written with its time, who did it (`github:<numeric id>`, which never changes, with the login as the target of setup and sign-in rows; `anonymous` for a refusal; or `cli`) and the target (the login, the reason with the GitHub id, or the object id). Cheap unauthenticated refusals (`state-mismatch`, `state-unknown`, a wrong setup code at the start) are logged each time but counted in the table: one row per reason per minute, shown as `state-mismatch x37` to the `admin_audit` table and to the log. Read it with `ostia-server admin audit`. The row is written after the action; if the database refuses it the action still stands and the failure is logged.
 - Deleting an account removes its devices, sessions, key wraps, sync blobs and manifests, shares and push registrations, and disconnects its relay streams; the blob files are deleted from disk. It cannot be undone.
 
 ## Privacy defaults

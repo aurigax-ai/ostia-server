@@ -60,7 +60,9 @@ The admin web UI at `https://<domains.api>/admin/`. See [Administration](self-ho
 
 | Key | Default | |
 |---|---|---|
-| `enabled` | `false` | Serve the admin UI. Off, `/admin` does not exist (404) and `ostia-server admin login` refuses to print a code. The UI is served on `domains.api` only, never on the share or relay domains. Needs a restart to change. |
+| `enabled` | `false` | Serve the admin UI. Off, `/admin` does not exist (404) and `ostia-server admin setup` refuses to print a code. The UI is served on `domains.api` only, never on the share or relay domains. Needs a restart to change. Requires the client id and secret below. |
+| `github_client_id` | empty | Client id of the GitHub OAuth App used for admin sign-in (web redirect flow). Its callback URL is `https://<domains.api>/admin/github/callback`. Separate from `auth.github_client_id`. Required when `enabled`. |
+| `github_client_secret_file` | empty | File holding that app's client secret. The environment variable `OSTIA_ADMIN_GITHUB_CLIENT_SECRET` works instead; set one, not both. The file must not be readable by group or others (0600 or 0400). The secret is never read from the TOML. Required (file or variable) when `enabled`. |
 
 ## `[relay]`
 
