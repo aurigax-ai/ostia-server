@@ -13,9 +13,10 @@
 
 | Key | Default | |
 |---|---|---|
-| `api` | required | Host of the HTTP API. |
+| `api` | required | Host name of the HTTP API (not an IP address). |
 | `share` | required with `publish` | A different registrable domain than `api`, judged with the public suffix list (`api.example.com` and `shares.example.com` are refused; the server will not start). A share domain that is itself a public suffix is fine. Each share is `<id>.<share>`. |
 | `relay` | required with `relay` | Phones connect to `<label>.<relay>`. Must not be a parent of `api`. |
+| `port` | `443`, or `80` with `scheme = "http"` | The port clients use to reach this server from outside (for example a mapped port); it goes into the share and upload URLs and into the relay label answer. |
 | `scheme` | `https` | `http` only for local development; it changes the URLs the server hands out. |
 
 ## `[listen]` and `[tls]`

@@ -126,10 +126,10 @@ The approving device must show who is asking (`deviceName`) and how long that de
 The relay forwards a phone's TLS connection to the desktop without terminating it. The phone keeps pinning the desktop gateway's certificate, so the relay cannot read or alter the traffic.
 
 ```
-POST /v1/relay/label   200 {label, host, port: 443}
+POST /v1/relay/label   200 {label, host, port}
 ```
 
-The label is a random 128-bit value (26 characters, `a-z2-7`), stable per device. `host` is `<label>.<relay domain>`. The phone connects to `host:443` and verifies the desktop's pinned certificate fingerprint, not the name. DNS for `*.<relay domain>` points at the server.
+The label is a random 128-bit value (26 characters, `a-z2-7`), stable per device. `host` is `<label>.<relay domain>` and `port` is the server's `domains.port` (443 by default). The phone connects to `host:port` and verifies the desktop's pinned certificate fingerprint, not the name. DNS for `*.<relay domain>` points at the server.
 
 ### Desktop side
 
@@ -150,7 +150,7 @@ The Ostia desktop writes `PROXY TCP4|TCP6 <peer ip> 127.0.0.1 <port> <port>\r\n`
 
 ## Publish
 
-A share is one file (the Ostia portable artifact, at most `publish.max_file_bytes`) at `https://<id>.<share domain>/`. Every share has its own origin.
+A share is one file (the Ostia portable artifact, at most `publish.max_file_bytes`) at `https://<id>.<share domain>/` (plus `:<domains.port>` when that is not the scheme's default port). Every share has its own origin.
 
 ### Modes
 

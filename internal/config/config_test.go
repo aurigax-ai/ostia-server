@@ -142,3 +142,31 @@ func TestShareDomainMayBeAPublicSuffix(t *testing.T) {
 		t.Fatalf("a share domain that is itself a public suffix isolates every share: %v", err)
 	}
 }
+
+func TestPortDefaultsFollowTheScheme(t *testing.T) {
+	cfg, err := Load(write(t, minimal))
+	if err != nil || cfg.Domains.Port != 443 {
+		t.Fatalf("https without a port: %d %v", cfg.Domains.Port, err)
+	}
+	cfg, err = Load(write(t, strings.Replace(minimal, "[domains]\n", "[domains]\nscheme = \"http\"\n", 1)))
+	if err != nil || cfg.Domains.Port != 80 {
+		t.Fatalf("http without a port: %d %v", cfg.Domains.Port, err)
+	}
+	cfg, err = Load(write(t, strings.Replace(minimal, "[domains]\n", "[domains]\nport = 8443\n", 1)))
+	if err != nil || cfg.Domains.Port != 8443 {
+		t.Fatalf("explicit port: %d %v", cfg.Domains.Port, err)
+	}
+}
+
+func TestPortAndHostValidation(t *testing.T) {
+	for name, c := range map[string]struct{ body, want string }{
+		"too big":   {strings.Replace(minimal, "[domains]\n", "[domains]\nport = 65536\n", 1), "domains.port"},
+		"negative":  {strings.Replace(minimal, "[domains]\n", "[domains]\nport = -1\n", 1), "domains.port"},
+		"api is IP": {strings.Replace(minimal, "api.example.com", "192.0.2.1", 1), "not an IP address"},
+		"api IPv6":  {strings.Replace(minimal, "api.example.com", "::1", 1), "not an IP address"},
+	} {
+		if _, err := Load(write(t, c.body)); err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+}

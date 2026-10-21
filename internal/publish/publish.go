@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -38,16 +40,24 @@ type Service struct {
 	APIDomain   string
 	ShareDomain string
 	Scheme      string
+	Port        int
 	Now         func() time.Time
 	Guard       *httpx.Guard
 }
 
+func (s *Service) authority(host string) string {
+	if (s.Scheme == "https" && s.Port == 443) || (s.Scheme == "http" && s.Port == 80) {
+		return host
+	}
+	return net.JoinHostPort(host, strconv.Itoa(s.Port))
+}
+
 func (s *Service) shareURL(id string) string {
-	return s.Scheme + "://" + id + "." + s.ShareDomain + "/"
+	return s.Scheme + "://" + s.authority(id+"."+s.ShareDomain) + "/"
 }
 
 func (s *Service) uploadURL(id string) string {
-	return s.Scheme + "://" + s.APIDomain + "/v1/shares/" + id + "/blob"
+	return s.Scheme + "://" + s.authority(s.APIDomain) + "/v1/shares/" + id + "/blob"
 }
 
 func (s *Service) MountAPI(mux *httpx.Mux) {
