@@ -6,17 +6,19 @@ import (
 	"io/fs"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/aurigax-ai/ostia-server/internal/httpx"
+	"github.com/aurigax-ai/ostia-server/internal/ids"
 	"github.com/aurigax-ai/ostia-server/internal/limit"
 	"github.com/aurigax-ai/ostia-server/internal/store"
 	shareshell "github.com/aurigax-ai/ostia-server/web/share-shell"
 )
 
 const (
-	shellContentSecurityPolicy = "default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src data: blob:; font-src data:; media-src data: blob:; connect-src 'self'; frame-src 'none'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'"
-	dataContentSecurityPolicy  = "default-src 'none'; sandbox"
+	shellPolicyTemplate       = "default-src 'none'; script-src {origin}/s/ 'unsafe-inline'; style-src {origin}/s/ 'unsafe-inline'; img-src data: blob:; font-src data:; media-src data: blob:; connect-src {origin}/s/; frame-src 'none'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'"
+	dataContentSecurityPolicy = "default-src 'none'; sandbox"
 )
 
 const permissionsPolicy = "fullscreen=(), camera=(), microphone=(), geolocation=(), payment=(), usb=(), serial=(), clipboard-read=(), clipboard-write=(), display-capture=(), screen-wake-lock=(), picture-in-picture=()"
@@ -27,17 +29,36 @@ var staticAssets = map[string]string{
 	"/shell.css": "text/css; charset=utf-8",
 }
 
+const (
+	SharePrefix = "/s/"
+	assetLabel  = "-"
+)
+
+func shareRoute(urlPath string) (label, rest string, ok bool) {
+	tail, ok := strings.CutPrefix(urlPath, SharePrefix)
+	if !ok {
+		return "", "", false
+	}
+	label, rest, _ = strings.Cut(tail, "/")
+	return label, "/" + rest, true
+}
+
+func (s *Service) shellContentSecurityPolicy() string {
+	return strings.ReplaceAll(shellPolicyTemplate, "{origin}", s.Scheme+"://"+s.authority(s.APIDomain))
+}
+
 func (s *Service) ShareHandler() http.Handler {
 	read := limit.Rule{Every: time.Second, Burst: 120}
 	reportRule := limit.Rule{Every: 12 * time.Minute, Burst: 5}
 	return s.Guard.PerIP("share.read", read, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		id, ok := hostLabel(r.Host, s.ShareDomain)
-		if !ok {
+		setCommonHeaders(w)
+		label, path, ok := shareRoute(r.URL.Path)
+		if !ok || (label != assetLabel && !ids.ValidID(label)) {
 			http.NotFound(w, r)
 			return
 		}
-		setCommonHeaders(w)
-		if r.URL.Path == "/report" && r.Method == http.MethodPost {
+		id := label
+		if path == "/report" && r.Method == http.MethodPost && label != assetLabel {
 			s.Guard.PerIP("share.report", reportRule, httpx.Handle(func(w http.ResponseWriter, r *http.Request) error {
 				var in struct {
 					Reason string `json:"reason"`
@@ -49,7 +70,7 @@ func (s *Service) ShareHandler() http.Handler {
 			})).ServeHTTP(w, r)
 			return
 		}
-		if r.URL.Path == "/view" && r.Method == http.MethodPost {
+		if path == "/view" && r.Method == http.MethodPost && label != assetLabel {
 			s.serveView(w, r, id)
 			return
 		}
@@ -58,13 +79,18 @@ func (s *Service) ShareHandler() http.Handler {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		if contentType, isAsset := staticAssets[r.URL.Path]; isAsset {
-			s.serveAsset(w, r, r.URL.Path[1:], contentType, dataContentSecurityPolicy)
+		if label == assetLabel {
+			contentType, isAsset := staticAssets[path]
+			if !isAsset {
+				http.NotFound(w, r)
+				return
+			}
+			s.serveAsset(w, r, path[1:], contentType, dataContentSecurityPolicy)
 			return
 		}
-		switch r.URL.Path {
-		case "/":
-			s.serveAsset(w, r, "index.html", "text/html; charset=utf-8", shellContentSecurityPolicy)
+		switch path {
+		case "/", "":
+			s.serveAsset(w, r, "index.html", "text/html; charset=utf-8", s.shellContentSecurityPolicy())
 		case "/meta":
 			s.serveMeta(w, r, id)
 		case "/blob":
@@ -189,6 +215,7 @@ func (s *Service) serveBlob(w http.ResponseWriter, r *http.Request, id string) {
 	}
 	defer f.Close()
 	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Disposition", "attachment")
 	w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
 	w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
 	if r.Method == http.MethodHead {

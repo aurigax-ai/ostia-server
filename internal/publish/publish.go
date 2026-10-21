@@ -7,7 +7,6 @@ import (
 	"net"
 	"net/http"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/aurigax-ai/ostia-server/internal/auth"
@@ -33,16 +32,15 @@ const (
 var reportReasons = map[string]bool{"illegal": true, "malware": true, "abuse": true, "other": true}
 
 type Service struct {
-	DB          *store.DB
-	Blobs       blob.Store
-	Auth        *auth.Service
-	Cfg         config.Publish
-	APIDomain   string
-	ShareDomain string
-	Scheme      string
-	Port        int
-	Now         func() time.Time
-	Guard       *httpx.Guard
+	DB        *store.DB
+	Blobs     blob.Store
+	Auth      *auth.Service
+	Cfg       config.Publish
+	APIDomain string
+	Scheme    string
+	Port      int
+	Now       func() time.Time
+	Guard     *httpx.Guard
 }
 
 func (s *Service) authority(host string) string {
@@ -53,7 +51,7 @@ func (s *Service) authority(host string) string {
 }
 
 func (s *Service) shareURL(id string) string {
-	return s.Scheme + "://" + s.authority(id+"."+s.ShareDomain) + "/"
+	return s.Scheme + "://" + s.authority(s.APIDomain) + SharePrefix + id
 }
 
 func (s *Service) uploadURL(id string) string {
@@ -325,16 +323,4 @@ func (s *Service) Run(ctx context.Context) {
 			s.Sweep(ctx)
 		}
 	}
-}
-
-func hostLabel(host, domain string) (string, bool) {
-	name := host
-	if i := strings.LastIndexByte(host, ':'); i >= 0 && !strings.HasSuffix(host, "]") {
-		name = host[:i]
-	}
-	label, ok := strings.CutSuffix(strings.ToLower(name), "."+domain)
-	if !ok || !ids.ValidID(label) {
-		return "", false
-	}
-	return label, true
 }

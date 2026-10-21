@@ -9,13 +9,13 @@ func TestURLsCarryThePublicPortOnlyWhenItIsNotTheDefault(t *testing.T) {
 		share  string
 		upload string
 	}{
-		{"https", 443, "https://abc.shares.test/", "https://api.test/v1/shares/abc/blob"},
-		{"https", 8443, "https://abc.shares.test:8443/", "https://api.test:8443/v1/shares/abc/blob"},
-		{"http", 80, "http://abc.shares.test/", "http://api.test/v1/shares/abc/blob"},
-		{"http", 8080, "http://abc.shares.test:8080/", "http://api.test:8080/v1/shares/abc/blob"},
+		{"https", 443, "https://api.test/s/abc", "https://api.test/v1/shares/abc/blob"},
+		{"https", 8443, "https://api.test:8443/s/abc", "https://api.test:8443/v1/shares/abc/blob"},
+		{"http", 80, "http://api.test/s/abc", "http://api.test/v1/shares/abc/blob"},
+		{"http", 8080, "http://api.test:8080/s/abc", "http://api.test:8080/v1/shares/abc/blob"},
 	}
 	for _, c := range cases {
-		s := &Service{APIDomain: "api.test", ShareDomain: "shares.test", Scheme: c.scheme, Port: c.port}
+		s := &Service{APIDomain: "api.test", Scheme: c.scheme, Port: c.port}
 		if got := s.shareURL("abc"); got != c.share {
 			t.Errorf("%s %d: share URL %s", c.scheme, c.port, got)
 		}

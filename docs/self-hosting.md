@@ -4,27 +4,22 @@ The server is one process with one config file. Nothing here deploys anything fo
 
 ## DNS
 
-Three names. The share domain can be on a different registrable domain (the strongest choice) or a dedicated zone of the API's own, such as `api.example.com` with `shares.example.com`; the server refuses to start only when the share domain is the API host or a parent of it. Shares are always sandboxed and the server sets only host-only cookies, so a share cannot read or set the API's cookies even from a sibling host ([why](design.md#the-share-domain-is-a-sandboxed-origin-not-a-cookie-jar)):
+Two names. Shares are paths of the API host (`https://api.example.com/s/<id>`), so they need no name of their own:
 
 | Record | Points at |
 |---|---|
-| `api.example.com` | the server |
+| `api.example.com` | the server (the API, the admin UI and the shares) |
 | `*.r.example.com` | the server (relay hosts; no certificate is needed for these) |
-| `*.example-share.net` | the server (one subdomain per share) |
+
+The relay keeps one hostname per desktop because its TLS is end to end and routed by SNI; see [why](design.md#the-relay-passes-tls-through). Shares run on the API's origin, which is why the shell is strict and every artifact is sandboxed ([why](design.md#shares-run-on-the-apis-origin-so-the-shell-is-strict-and-the-artifact-is-sandboxed)).
 
 Only port 443 has to be reachable.
 
 ## Certificates
 
-Relay traffic is never terminated, so the relay domain needs no certificate. The API host and the share domain do:
+Relay traffic is never terminated, so the relay domain needs no certificate. The API host needs one, and it covers the shares too:
 
-- API: a certificate for `api.example.com`.
-- Shares: a **wildcard** certificate for `*.example-share.net`. Wildcards need the DNS-01 challenge, which the ACME clients below support for most DNS providers:
-
-```sh
-lego --email you@example.com --dns cloudflare \
-  --domains example-share.net --domains '*.example-share.net' run
-```
+- API: a certificate for `api.example.com`. Any ACME client works; no wildcard and no DNS challenge are needed.
 
 List the resulting PEM files under `[[tls.certs]]` and send `SIGHUP` (or `systemctl reload ostia-server`) after each renewal. The server does not run ACME itself.
 
@@ -43,18 +38,17 @@ mode = "forward"
 forward_addr = "127.0.0.1:8443"
 ```
 
-The proxy listens on `127.0.0.1:8443`, terminates TLS for the API and share hosts, and proxies to `listen.http`. The server connects to the proxy with a PROXY protocol v2 header, so the proxy sees the real client address. Configure the proxy to read it and to put the address in `X-Forwarded-For`; for example nginx `listen 8443 ssl proxy_protocol; set_real_ip_from 127.0.0.1; real_ip_header proxy_protocol;` with `proxy_set_header X-Forwarded-For $remote_addr;`, or Caddy's `proxy_protocol` listener wrapper. List the proxy under `listen.trusted_proxies`: only its connections may set the header, and the rightmost address that is not a trusted proxy is taken as the client, so a forged header cannot move or share a rate-limit bucket. **Upgrading:** `forward_proxy_protocol` defaults to `true`. A forward-mode deployment whose proxy does not read PROXY protocol stops working until the proxy is configured to read it or `forward_proxy_protocol = false` is set. A proxy that cannot read PROXY protocol needs `forward_proxy_protocol = false`, and then every client appears to come from the proxy's address on the relay path only (the API still sees the header). Relay hosts never reach the proxy.
+The proxy listens on `127.0.0.1:8443`, terminates TLS for the API host, and proxies to `listen.http`. The server connects to the proxy with a PROXY protocol v2 header, so the proxy sees the real client address. Configure the proxy to read it and to put the address in `X-Forwarded-For`; for example nginx `listen 8443 ssl proxy_protocol; set_real_ip_from 127.0.0.1; real_ip_header proxy_protocol;` with `proxy_set_header X-Forwarded-For $remote_addr;`, or Caddy's `proxy_protocol` listener wrapper. List the proxy under `listen.trusted_proxies`: only its connections may set the header, and the rightmost address that is not a trusted proxy is taken as the client, so a forged header cannot move or share a rate-limit bucket. **Upgrading:** `forward_proxy_protocol` defaults to `true`. A forward-mode deployment whose proxy does not read PROXY protocol stops working until the proxy is configured to read it or `forward_proxy_protocol = false` is set. A proxy that cannot read PROXY protocol needs `forward_proxy_protocol = false`, and then every client appears to come from the proxy's address on the relay path only (the API still sees the header). Relay hosts never reach the proxy.
 
 Without the relay you can drop `listen.https` entirely and run only `listen.http` behind the proxy.
 
 ### Behind a proxy that passes the relay through
 
-When the proxy owns port 443 for every name (a cloud load balancer, Envoy Gateway, an ingress), the server needs no `listen.https` at all: the proxy terminates TLS for the API and share hosts and sends them to `listen.http`, and passes the relay hosts through, still encrypted, to `listen.relay`.
+When the proxy owns port 443 for every name (a cloud load balancer, Envoy Gateway, an ingress), the server needs no `listen.https` at all: the proxy terminates TLS for the API host and sends it to `listen.http`, and passes the relay hosts through, still encrypted, to `listen.relay`.
 
 ```toml
 [domains]
 api = "sync.ostia.example.com"
-share = "share.ostia.example.com"
 relay = "relay.ostia.example.com"
 
 [listen]
@@ -71,7 +65,7 @@ publish = true
 
 `trusted_proxies` is the address range of the proxy pods only (a placeholder: use the Envoy pods' real addresses), never a whole pod network. The proxy must send a PROXY protocol v1 or v2 header on the relay connection, because the server cannot see through the phone's TLS to learn who is calling and every per-address limit (connections, unconfirmed opens, pending hellos) keys on that address. The header is believed only from `trusted_proxies`, and a trusted address that sends none is dropped. Anything else that can open a connection to a trusted address can claim any client address, so `trusted_proxies` should list the proxy's addresses and a network policy (or firewall) must restrict who can reach `listen.relay` and `listen.http` to the proxy.
 
-DNS for this layout: `sync.ostia.example.com`, `*.share.ostia.example.com` and `*.relay.ostia.example.com` all point at the proxy. The proxy holds certificates for the first two (the share wildcard needs DNS-01); the relay hosts need none, because the phone checks the desktop's pinned certificate, not a name.
+DNS for this layout: `sync.ostia.example.com` and `*.relay.ostia.example.com` point at the proxy. The proxy holds a certificate for the first; the relay hosts need none, because the phone checks the desktop's pinned certificate, not a name.
 
 #### Example: Envoy Gateway
 
@@ -93,7 +87,6 @@ spec:
         mode: Terminate
         certificateRefs:
           - name: ostia-sync-tls
-          - name: ostia-share-tls
       allowedRoutes:
         namespaces:
           from: All
@@ -278,14 +271,14 @@ The command prints a one-time setup code and the address. The code works once, f
 
 If the admin account is lost or must change hands, run `ostia-server admin reset` in the pod. It removes every admin, every admin session and every pending code or sign-in, and is audited. The server is then back at first-time setup. Nothing else is touched: accounts, invites and synced data stay.
 
-The route is on the API host only, so it is reachable wherever the API is, and nowhere on the share or relay domains. Behind a proxy that terminates TLS, forward `/admin` like the rest of the API, keep HTTPS (the cookies are `Secure`) and list the proxy under `listen.trusted_proxies`. A proxy that is not listed makes every client share the proxy's address, so the per-address limits below apply to everyone together.
+The route is on the API host only, so it is reachable wherever the API is, and nowhere on the relay domain; a share route under `/s/` is never answered by it. Behind a proxy that terminates TLS, forward `/admin` like the rest of the API, keep HTTPS (the cookies are `Secure`) and list the proxy under `listen.trusted_proxies`. A proxy that is not listed makes every client share the proxy's address, so the per-address limits below apply to everyone together.
 
 What protects it:
 
 - GitHub uses the web redirect flow (never the device flow) with a one-time `state` and PKCE (S256). The state is random, stored hashed, single use and valid for 10 minutes, and it is bound to the browser that started the sign-in by a `__Host-ostia_admin_oauth` cookie (`HttpOnly; Secure; SameSite=Strict; Path=/`, ten minutes) that is compared in constant time. The PKCE verifier waits next to the hashed state in the database for those ten minutes; it is useless without the matching GitHub code. GitHub returns to `/admin/github/callback`, which holds no secret and only hands the browser on to `/admin/github/finish` as a navigation from this site; that is what lets the Strict cookie travel. A callback without the cookie, with another browser's state, with a used or expired state, or with an error from GitHub is refused and signs nobody in.
 - Setup needs both the code and a GitHub sign-in in the same flow. The code carries 100 bits, is stored hashed, is checked when the flow starts and spent in one database transaction together with storing the admin, and that transaction fails if an admin exists by then. Failed code attempts are limited per address (five, then one every 12 seconds) and overall (30, then one every 2 seconds); a valid code is never held back by the overall limit. The start and callback routes are limited per address. A refused attempt is logged without the code, the state, any GitHub code or token, and without an address.
 - The GitHub access token is used once to read the account id and login, then revoked at GitHub (`DELETE /applications/{client_id}/token`; a failure is logged and does not block the sign-in) and dropped. The client secret goes only to GitHub's token endpoint.
-- The session cookie is `__Host-ostia_admin`, so the browser accepts it only from this host over HTTPS with `Path=/` and no `Domain`, and refuses a cookie of that name set by any other host, including a sibling under the same registrable domain (a share host, for example). Every such cookie in a request is still checked and the one that matches a live session wins, so a planted cookie cannot sign the admin out.
+- The session cookie is `__Host-ostia_admin`, so the browser accepts it only from this host over HTTPS with `Path=/` and no `Domain`, and refuses a cookie of that name set by any other host, including a sibling under the same registrable domain. Every such cookie in a request is still checked and the one that matches a live session wins, so a planted cookie cannot sign the admin out.
 - A session is tied to its admin's row: it works only while that admin still exists, so `admin reset` ends every session at once, and sign-in and session creation happen in one transaction. Sessions also end at the next server start, and `ostia-server admin logout-all` ends them at any time (it is audited). Use it if a cookie may have leaked.
 - The session is a random token stored hashed, in a cookie that is `HttpOnly; Secure; SameSite=Strict; Path=/` (required by the `__Host-` prefix; the server reads it only on `/admin`). Every state-changing request also needs a CSRF token that belongs to the session, and must be same-origin: `Sec-Fetch-Site: same-origin`, or, from a browser that sends no fetch metadata, an `Origin` equal to the API's origin (`Origin: null` is refused). There is no CORS.
 - Pages carry a strict Content-Security-Policy (no inline script or style, no external origin); the assets are embedded in the binary.

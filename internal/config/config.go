@@ -40,7 +40,6 @@ type Config struct {
 
 type Domains struct {
 	API    string `toml:"api"`
-	Share  string `toml:"share"`
 	Relay  string `toml:"relay"`
 	Scheme string `toml:"scheme"`
 	Port   int    `toml:"port"`
@@ -269,7 +268,6 @@ func Load(path string) (Config, error) {
 
 func (c *Config) normalize() {
 	c.Domains.API = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(c.Domains.API)), ".")
-	c.Domains.Share = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(c.Domains.Share)), ".")
 	c.Domains.Relay = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(c.Domains.Relay)), ".")
 	if c.Domains.Port == 0 {
 		c.Domains.Port = defaultPort(c.Domains.Scheme)
@@ -325,7 +323,7 @@ func (c Config) Validate() error {
 	need(c.DataDir != "", "data_dir is required")
 	need(c.Domains.Scheme == "https" || c.Domains.Scheme == "http", "domains.scheme must be https or http")
 	need(c.Domains.Port >= 1 && c.Domains.Port <= 65535, "domains.port must be a port number")
-	for name, host := range map[string]string{"api": c.Domains.API, "share": c.Domains.Share, "relay": c.Domains.Relay} {
+	for name, host := range map[string]string{"api": c.Domains.API, "relay": c.Domains.Relay} {
 		need(host == "" || net.ParseIP(host) == nil, "domains."+name+" must be a host name, not an IP address")
 	}
 	need(c.Domains.API != "", "domains.api is required")
@@ -333,19 +331,12 @@ func (c Config) Validate() error {
 		need(c.Domains.Relay != "", "domains.relay is required when modules.relay is on")
 		need(c.Listen.HTTPS != "" || c.Listen.Relay != "", "listen.https or listen.relay is required when modules.relay is on")
 	}
-	if c.Modules.Publish {
-		need(c.Domains.Share != "", "domains.share is required when modules.publish is on")
-	}
 	need(c.Listen.HTTPS != "" || c.Listen.HTTP != "", "set listen.https or listen.http")
 	if c.Listen.Relay != "" {
 		need(c.Modules.Relay, "listen.relay needs modules.relay on")
 	}
-	if c.Domains.Share != "" {
-		need(c.Domains.Share != c.Domains.API, "domains.share must differ from domains.api")
-		need(!strings.HasSuffix(c.Domains.API, "."+c.Domains.Share), "domains.share must not be a parent of domains.api, use a dedicated zone such as share."+c.Domains.API)
-	}
 	if c.Domains.Relay != "" {
-		need(c.Domains.Relay != c.Domains.API && c.Domains.Relay != c.Domains.Share, "domains.relay must differ from the api and share domains")
+		need(c.Domains.Relay != c.Domains.API, "domains.relay must differ from domains.api")
 		need(!strings.HasSuffix(c.Domains.API, "."+c.Domains.Relay), "domains.api must not sit under domains.relay")
 	}
 	if _, err := httpx.ParseProxies(c.Listen.TrustedProxies, c.Listen.ClientIPHeader); err != nil {

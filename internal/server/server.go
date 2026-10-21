@@ -116,7 +116,7 @@ func New(cfg config.Config, opts Options) (*Server, error) {
 		s.Relay.Mount(mux)
 	}
 	if cfg.PublishEnabled() {
-		s.Publish = &publish.Service{DB: db, Blobs: blobs, Auth: s.Auth, Cfg: cfg.Publish, APIDomain: cfg.Domains.API, ShareDomain: cfg.Domains.Share, Scheme: cfg.Domains.Scheme, Port: cfg.Domains.Port, Now: now, Guard: s.Guard}
+		s.Publish = &publish.Service{DB: db, Blobs: blobs, Auth: s.Auth, Cfg: cfg.Publish, APIDomain: cfg.Domains.API, Scheme: cfg.Domains.Scheme, Port: cfg.Domains.Port, Now: now, Guard: s.Guard}
 		s.Publish.MountAPI(mux)
 		s.share = s.Publish.ShareHandler()
 	}
@@ -190,7 +190,6 @@ func (s *Server) info(w http.ResponseWriter, r *http.Request) error {
 		"auth":                  map[string]bool{"invite": true, "github": s.Auth.GitHub != nil},
 		"approverMinAgeSeconds": int64(s.Cfg.Auth.ApproverMinAge.Std() / time.Second),
 		"relayDomain":           s.Cfg.Domains.Relay,
-		"shareDomain":           s.Cfg.Domains.Share,
 		"limits": map[string]any{
 			"shareMaxBytes":  s.Cfg.Publish.MaxFileBytes,
 			"allowPublic":    s.Cfg.Publish.AllowPublic,
@@ -227,10 +226,10 @@ func (s *Server) Handler() http.Handler {
 		switch {
 		case host == s.Cfg.Domains.API && s.admin != nil && (r.URL.Path == "/admin" || strings.HasPrefix(r.URL.Path, "/admin/")):
 			s.admin.ServeHTTP(w, r)
+		case host == s.Cfg.Domains.API && s.share != nil && strings.HasPrefix(r.URL.Path, publish.SharePrefix):
+			s.share.ServeHTTP(w, r)
 		case host == s.Cfg.Domains.API:
 			s.api.ServeHTTP(w, r)
-		case s.share != nil && strings.HasSuffix(host, "."+s.Cfg.Domains.Share):
-			s.share.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}

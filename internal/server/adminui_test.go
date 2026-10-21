@@ -41,7 +41,7 @@ func newAdminEnv(t *testing.T, tune func(*config.Config), opts Options) *adminEn
 	e := &adminEnv{t: t, now: time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC), gh: testkit.NewFakeGitHub(t, 0)}
 	cfg := config.Default()
 	cfg.DataDir = t.TempDir()
-	cfg.Domains.API, cfg.Domains.Share, cfg.Domains.Relay = "api.test", "shares.test", "r.test"
+	cfg.Domains.API, cfg.Domains.Relay = "api.test", "r.test"
 	cfg.Listen.HTTPS, cfg.Listen.HTTP = "", "127.0.0.1:0"
 	cfg.Domains.Port = 443
 	cfg.Admin.Enabled = true
@@ -276,10 +276,10 @@ func TestAdminRoutesAreOffUnlessEnabled(t *testing.T) {
 	}
 }
 
-func TestAdminIsNeverServedOnTheShareDomain(t *testing.T) {
+func TestAdminIsNeverServedOnAnotherHostOrAShareRoute(t *testing.T) {
 	e := newAdminEnv(t, nil, Options{})
 	s := e.signIn()
-	for _, host := range []string{"abcdefghijklmnopqrstuvwxyz.shares.test", "shares.test", "r.test", "other.test"} {
+	for _, host := range []string{"abcdefghijklmnopqrstuvwxyz.share.test", "r.test", "other.test"} {
 		for _, path := range []string{"/admin/", "/admin/invites", "/admin/accounts", "/admin/github/callback?code=x&state=y"} {
 			res := e.send("GET", host, path, nil, s.cookie)
 			if res.Code == http.StatusOK || strings.Contains(res.Body.String(), "Ostia server") {
@@ -288,6 +288,18 @@ func TestAdminIsNeverServedOnTheShareDomain(t *testing.T) {
 		}
 		if res := e.send("POST", host, "/admin/github/start", url.Values{}, nil); res.Code == http.StatusOK {
 			t.Errorf("POST %s/admin/github/start answered %d", host, res.Code)
+		}
+	}
+}
+
+func TestAdminIsNotReachableThroughAShareRoute(t *testing.T) {
+	e := newAdminEnv(t, nil, Options{})
+	s := e.signIn()
+	id := strings.Repeat("a", 26)
+	for _, path := range []string{"/s/" + id + "/admin/", "/s/" + id + "/admin/invites", "/s/-/admin/", "/s/admin/", "/s//admin/"} {
+		res := e.send("GET", "api.test", path, nil, s.cookie)
+		if res.Code == http.StatusOK || strings.Contains(res.Body.String(), "Ostia server") {
+			t.Errorf("GET %s answered %d: a share route must never reach the admin UI", path, res.Code)
 		}
 	}
 }
@@ -748,7 +760,7 @@ func TestResponsesCarryStrictHeadersAndNoCORS(t *testing.T) {
 		if !strings.Contains(csp, "default-src 'none'") || !strings.Contains(csp, "script-src 'self'") || strings.Contains(csp, "unsafe-inline") || !strings.Contains(csp, "frame-ancestors 'none'") {
 			t.Errorf("%s CSP %q", path, csp)
 		}
-		if h.Get("Cache-Control") != "no-store" || h.Get("X-Content-Type-Options") != "nosniff" || h.Get("Referrer-Policy") != "no-referrer" {
+		if h.Get("Cache-Control") != "no-store" || h.Get("X-Content-Type-Options") != "nosniff" || h.Get("Referrer-Policy") != "no-referrer" || h.Get("Cross-Origin-Opener-Policy") != "same-origin" {
 			t.Errorf("%s headers %v", path, h)
 		}
 		for name := range h {

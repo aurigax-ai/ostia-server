@@ -16,7 +16,6 @@ import (
 
 type Config struct {
 	APIDomain      string
-	ShareDomain    string
 	RelayDomain    string
 	CertFile       string
 	KeyFile        string
@@ -105,7 +104,6 @@ log_level = "debug"
 
 [domains]
 api = %q
-share = %q
 relay = %q
 %s
 [listen]
@@ -115,7 +113,7 @@ relay = %q
 [modules]
 %s
 %s
-`, dataDir, c.APIDomain, c.ShareDomain, c.RelayDomain, portLine, listen, tlsConfig, modules, c.Extra)
+`, dataDir, c.APIDomain, c.RelayDomain, portLine, listen, tlsConfig, modules, c.Extra)
 }
 
 var (

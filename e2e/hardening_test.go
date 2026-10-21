@@ -117,7 +117,7 @@ func TestManifestPushWithSignatureStillHonoursIfMatch(t *testing.T) {
 func TestForgedLeftHandForwardedEntriesDoNotFreshenTheRateLimit(t *testing.T) {
 	pki := testkit.NewPKI(t, t.TempDir(), apiHost)
 	proc := testkit.StartProcess(t, serverBinary, testkit.Config{
-		APIDomain: apiHost, ShareDomain: shareHost, RelayDomain: relayHost, CertFile: pki.CertFile, KeyFile: pki.KeyFile,
+		APIDomain: apiHost, RelayDomain: relayHost, CertFile: pki.CertFile, KeyFile: pki.KeyFile,
 		HTTP: "127.0.0.1:0", ClientIPHeader: "X-Forwarded-For", TrustedProxies: []string{"127.0.0.0/8"},
 	})
 	anon := testkit.NewAPI(testkit.Net{HTTPSAddr: proc.HTTPAddr, APIHost: apiHost, Plain: true}, testkit.NewIdentity("anon"))

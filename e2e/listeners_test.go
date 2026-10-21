@@ -17,7 +17,7 @@ import (
 func TestPlainHTTPListenerServesAPIAndShareHostsForAReverseProxy(t *testing.T) {
 	pki := testkit.NewPKI(t, t.TempDir(), apiHost)
 	proc := testkit.StartProcess(t, serverBinary, testkit.Config{
-		APIDomain: apiHost, ShareDomain: shareHost, RelayDomain: relayHost, CertFile: pki.CertFile, KeyFile: pki.KeyFile,
+		APIDomain: apiHost, RelayDomain: relayHost, CertFile: pki.CertFile, KeyFile: pki.KeyFile,
 		HTTP: "127.0.0.1:0", ClientIPHeader: "X-Forwarded-For", TrustedProxies: []string{"127.0.0.1"},
 	})
 	plain := testkit.Net{HTTPSAddr: proc.HTTPAddr, APIHost: apiHost, Plain: true}
@@ -26,7 +26,7 @@ func TestPlainHTTPListenerServesAPIAndShareHostsForAReverseProxy(t *testing.T) {
 	owner.Onboard(t, code)
 
 	sh := owner.PublishHTML(t, testkit.ShareOptions{Mode: "link", HTML: artifactHTML})
-	if html, err := plain.OpenShare(t, shareHost, sh); err != nil || html != artifactHTML {
+	if html, err := plain.OpenShare(t, sh); err != nil || html != artifactHTML {
 		t.Fatalf("share over the plain listener: %q %v", html, err)
 	}
 
@@ -52,7 +52,7 @@ func TestPlainHTTPListenerServesAPIAndShareHostsForAReverseProxy(t *testing.T) {
 func TestForgedForwardedHeadersAreIgnoredWithoutTrustedProxies(t *testing.T) {
 	pki := testkit.NewPKI(t, t.TempDir(), apiHost)
 	proc := testkit.StartProcess(t, serverBinary, testkit.Config{
-		APIDomain: apiHost, ShareDomain: shareHost, RelayDomain: relayHost, CertFile: pki.CertFile, KeyFile: pki.KeyFile,
+		APIDomain: apiHost, RelayDomain: relayHost, CertFile: pki.CertFile, KeyFile: pki.KeyFile,
 		HTTP: "127.0.0.1:0", ClientIPHeader: "X-Forwarded-For",
 	})
 	anon := testkit.NewAPI(testkit.Net{HTTPSAddr: proc.HTTPAddr, APIHost: apiHost, Plain: true}, testkit.NewIdentity("anon"))
@@ -81,7 +81,7 @@ func cutLine(s string) (string, string, bool) {
 }
 
 func TestForwardModePassesNonRelayTrafficToAProxyAndStillRelays(t *testing.T) {
-	pki := testkit.NewPKI(t, t.TempDir(), apiHost, "*."+shareHost)
+	pki := testkit.NewPKI(t, t.TempDir(), apiHost)
 
 	var upstream string
 	proxy := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -95,7 +95,7 @@ func TestForwardModePassesNonRelayTrafficToAProxyAndStillRelays(t *testing.T) {
 	t.Cleanup(proxy.Close)
 
 	proc := testkit.StartProcess(t, serverBinary, testkit.Config{
-		APIDomain: apiHost, ShareDomain: shareHost, RelayDomain: relayHost, CertFile: pki.CertFile, KeyFile: pki.KeyFile,
+		APIDomain: apiHost, RelayDomain: relayHost, CertFile: pki.CertFile, KeyFile: pki.KeyFile,
 		HTTP: "127.0.0.1:0", ForwardAddr: proxy.Listener.Addr().String(), TrustedProxies: []string{"127.0.0.1"}, ClientIPHeader: "X-Forwarded-For",
 	})
 	upstream = proc.HTTPAddr
@@ -121,7 +121,7 @@ func TestForwardModePassesNonRelayTrafficToAProxyAndStillRelays(t *testing.T) {
 	})
 
 	sh := api.PublishHTML(t, testkit.ShareOptions{Mode: "link", HTML: artifactHTML})
-	if html, err := n.OpenShare(t, shareHost, sh); err != nil || html != artifactHTML {
+	if html, err := n.OpenShare(t, sh); err != nil || html != artifactHTML {
 		t.Fatalf("share through the proxy: %q %v", html, err)
 	}
 
@@ -141,9 +141,9 @@ func TestForwardModePassesNonRelayTrafficToAProxyAndStillRelays(t *testing.T) {
 }
 
 func TestRelayListenerServesOnlyRelayHostsAndReadsProxyHeadersFromTrustedProxies(t *testing.T) {
-	pki := testkit.NewPKI(t, t.TempDir(), apiHost, "*."+shareHost)
+	pki := testkit.NewPKI(t, t.TempDir(), apiHost)
 	proc := testkit.StartProcess(t, serverBinary, testkit.Config{
-		APIDomain: apiHost, ShareDomain: shareHost, RelayDomain: relayHost, CertFile: pki.CertFile, KeyFile: pki.KeyFile,
+		APIDomain: apiHost, RelayDomain: relayHost, CertFile: pki.CertFile, KeyFile: pki.KeyFile,
 		RelayListen: "127.0.0.1:0", TrustedProxies: []string{"127.0.0.1"}, ClientIPHeader: "X-Forwarded-For",
 		Extra: withGenerousRelayLimits("[relay]\nconnections_per_minute_per_ip = 3\n"),
 	})

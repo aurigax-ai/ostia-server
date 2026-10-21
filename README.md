@@ -5,7 +5,7 @@ A small, self-hostable server for [Ostia](https://github.com/aurigax-ai/ostia), 
 | Module | What it does | What the server can see |
 |---|---|---|
 | `relay` | Lets the Ostia phone app reach a desktop that has no Tailscale and is not on the same network. The desktop dials out; the phone's TLS connection is passed through untouched. | Connection times, byte counts, and the phone's IP while connected (memory only). Never the traffic. |
-| `publish` | Shares an artifact as a single encrypted file on its own subdomain. The key lives in the URL fragment and never reaches the server. | Size, time, view count. Never the content (unless the owner explicitly chose a public share). |
+| `publish` | Shares an artifact as a single encrypted file at a path of the API host. The key lives in the URL fragment and never reaches the server. | Size, time, view count. Never the content (unless the owner explicitly chose a public share). |
 | `sync` | Keeps settings in step across a person's devices. Everything is encrypted on the device before upload. | Number and size of files, and when they change. Never names or contents. |
 | `push` | Wakes the phone app with an empty ping through FCM or APNs. | A random handle and when it was pinged. |
 
