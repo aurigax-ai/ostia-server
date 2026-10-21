@@ -15,6 +15,7 @@ var (
 	ErrStaleManifest  = errors.New("stale-manifest")
 	ErrKeyUnknown     = errors.New("key-unknown")
 	ErrBadWrapCounter = errors.New("bad-wrap-counter")
+	ErrSignerTooYoung = errors.New("signer-too-young")
 	ErrTooManyRaces   = errors.New("sync lost the race too many times")
 )
 
@@ -28,7 +29,43 @@ type SyncDevice struct {
 	Highest int64
 	Version int64
 
-	Approved []ManifestDevice
+	Approved     []ManifestDevice
+	FirstSeen    map[string]int64
+	MinSignerAge time.Duration
+	Now          func() time.Time
+}
+
+func (d *SyncDevice) now() time.Time {
+	if d.Now != nil {
+		return d.Now()
+	}
+	return time.Now()
+}
+
+func firstSeenKey(dev ManifestDevice) string {
+	return fmt.Sprintf("%s|%s|%s|%d", dev.ID, dev.SignPub, dev.BoxPub, dev.CreatedAt)
+}
+
+func (d *SyncDevice) trackApproved(devices []ManifestDevice) {
+	if d.FirstSeen == nil {
+		d.FirstSeen = map[string]int64{}
+	}
+	for _, dev := range devices {
+		if _, ok := d.FirstSeen[firstSeenKey(dev)]; !ok {
+			d.FirstSeen[firstSeenKey(dev)] = d.now().UnixMilli()
+		}
+	}
+}
+
+func (d *SyncDevice) signerAge(t testing.TB, dev ManifestDevice) time.Duration {
+	t.Helper()
+	since := max(dev.CreatedAt, d.FirstSeen[firstSeenKey(dev)])
+	for _, listed := range d.Devices(t) {
+		if listed.ID == dev.ID {
+			since = max(since, listed.CreatedAt)
+		}
+	}
+	return d.now().Sub(time.UnixMilli(since))
 }
 
 type SyncResult struct {
@@ -52,34 +89,33 @@ func (d *SyncDevice) InitAccount(t testing.TB, passphrase, recoveryKey string) {
 		d.putWrap(t, "recovery", WrapWithSecret(d.Key, recoveryKey, d.Argon))
 	}
 	d.putWrap(t, "device:"+d.API.ID.DeviceID, d.deviceWrap(t, d.Key, 1, d.API.ID.DeviceID, d.API.ID.BoxPub()))
-	d.Approved = []ManifestDevice{manifestDeviceOf(d.API)}
+	d.Approved = []ManifestDevice{manifestDeviceOf(d.API, d.now())}
 }
 
-func manifestDeviceOf(api *API) ManifestDevice {
+func manifestDeviceOf(api *API, now time.Time) ManifestDevice {
 	return ManifestDevice{
 		ID:        api.ID.DeviceID,
 		Name:      api.ID.Name,
 		SignPub:   b64.EncodeToString(api.ID.SignPub()),
 		BoxPub:    b64.EncodeToString(api.ID.BoxPub()),
-		CreatedAt: time.Now().UnixMilli(),
+		CreatedAt: now.UnixMilli(),
 	}
 }
 
 func (d *SyncDevice) approvedWithSelf() []ManifestDevice {
 	if !slices.ContainsFunc(d.Approved, func(dev ManifestDevice) bool { return dev.ID == d.API.ID.DeviceID }) {
-		d.Approved = append(d.Approved, manifestDeviceOf(d.API))
+		d.Approved = append(d.Approved, manifestDeviceOf(d.API, d.now()))
 	}
 	return d.Approved
 }
 
-func (d *SyncDevice) pinnedSignPub(id string) []byte {
+func (d *SyncDevice) pinned(id string) (ManifestDevice, bool) {
 	for _, dev := range d.Approved {
 		if dev.ID == id {
-			pub, _ := b64.DecodeString(dev.SignPub)
-			return pub
+			return dev, true
 		}
 	}
-	return nil
+	return ManifestDevice{}, false
 }
 
 func (d *SyncDevice) Signer() WrapSigner {
@@ -178,6 +214,7 @@ func (d *SyncDevice) JoinFromDeviceWrap(t testing.TB, approverSignPub []byte) er
 	}
 	d.Key = opened.Key
 	d.Approved = []ManifestDevice{{ID: opened.SignerID, SignPub: b64.EncodeToString(approverSignPub)}}
+	d.trackApproved(d.Approved)
 	return nil
 }
 
@@ -191,9 +228,14 @@ func (d *SyncDevice) rekeyFromPinnedWrap(t testing.TB, sealed []byte) error {
 	if !ok {
 		return ErrWrongKey
 	}
-	opened, err := d.openDeviceWrap(t, d.pinnedSignPub(signerID))
+	signer, _ := d.pinned(signerID)
+	signPub, _ := b64.DecodeString(signer.SignPub)
+	opened, err := d.openDeviceWrap(t, signPub)
 	if err != nil {
 		return err
+	}
+	if age := d.signerAge(t, signer); age < d.MinSignerAge {
+		return fmt.Errorf("%w: %s", ErrSignerTooYoung, age)
 	}
 	if opened.Counter <= uint64(max(d.Highest, 0)) {
 		return ErrBadWrapCounter
@@ -210,7 +252,7 @@ func (d *SyncDevice) GrantDevice(t testing.TB, joiner *API) {
 	d.putWrap(t, "device:"+joiner.ID.DeviceID, d.deviceWrap(t, d.Key, uint64(max(d.Highest, 1)), joiner.ID.DeviceID, joiner.ID.BoxPub()))
 	d.approvedWithSelf()
 	if !slices.ContainsFunc(d.Approved, func(dev ManifestDevice) bool { return dev.ID == joiner.ID.DeviceID }) {
-		d.Approved = append(d.Approved, manifestDeviceOf(joiner))
+		d.Approved = append(d.Approved, manifestDeviceOf(joiner, d.now()))
 	}
 }
 
@@ -229,7 +271,7 @@ func (d *SyncDevice) pull(t testing.TB) (remoteState, error) {
 	manifest, err := OpenManifest(d.Key, sealed)
 	if err != nil {
 		if rekeyErr := d.rekeyFromPinnedWrap(t, sealed); rekeyErr != nil {
-			return remoteState{}, fmt.Errorf("%w: %v", ErrKeyUnknown, rekeyErr)
+			return remoteState{}, fmt.Errorf("%w: %w", ErrKeyUnknown, rekeyErr)
 		}
 		if manifest, err = OpenManifest(d.Key, sealed); err != nil {
 			return remoteState{}, fmt.Errorf("%w: %v", ErrKeyUnknown, err)
@@ -256,6 +298,7 @@ func (d *SyncDevice) pull(t testing.TB) (remoteState, error) {
 	}
 	d.Highest = max(d.Highest, manifest.Counter)
 	d.Approved = slices.Clone(manifest.Devices)
+	d.trackApproved(d.Approved)
 	return remoteState{manifest: manifest, files: files, version: version}, nil
 }
 
@@ -340,6 +383,8 @@ type RemoteDevice struct {
 	Name    string
 	SignPub []byte
 	BoxPub  []byte
+
+	CreatedAt int64
 }
 
 func (d *SyncDevice) Devices(t testing.TB) []RemoteDevice {
@@ -350,6 +395,8 @@ func (d *SyncDevice) Devices(t testing.TB) []RemoteDevice {
 			Name    string `json:"name"`
 			SignPub string `json:"signPub"`
 			BoxPub  string `json:"boxPub"`
+
+			CreatedAt int64 `json:"createdAt"`
 		} `json:"devices"`
 	}
 	d.API.Must(t, http.StatusOK, "GET", "/v1/devices", nil).JSON(t, &list)
@@ -357,7 +404,7 @@ func (d *SyncDevice) Devices(t testing.TB) []RemoteDevice {
 	for _, dev := range list.Devices {
 		sign, _ := DecodeB64(dev.SignPub)
 		box, _ := DecodeB64(dev.BoxPub)
-		out = append(out, RemoteDevice{ID: dev.ID, Name: dev.Name, SignPub: sign, BoxPub: box})
+		out = append(out, RemoteDevice{ID: dev.ID, Name: dev.Name, SignPub: sign, BoxPub: box, CreatedAt: dev.CreatedAt})
 	}
 	return out
 }

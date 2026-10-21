@@ -691,3 +691,29 @@ func TestInfoExposesTheApproverMinimumAge(t *testing.T) {
 		t.Fatalf("approverMinAgeSeconds: %v", got)
 	}
 }
+
+func TestRekeyRefusesASignerThatBackdatedItsOwnManifestEntry(t *testing.T) {
+	f := newSyncFixture(t, "")
+	b := f.addDevice(t, "second laptop")
+	c := f.addDevice(t, "third laptop")
+	clock := time.Now()
+	b.Now = func() time.Time { return clock }
+	b.MinSignerAge = 24 * time.Hour
+	f.a.Approved[0].CreatedAt = time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC).UnixMilli()
+	if _, err := f.a.Sync(t, settings("theme", "dark")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.Pull(t); err != nil {
+		t.Fatal(err)
+	}
+	f.a.RemoveDeviceAndRotate(t, b.API, c.API.ID.DeviceID, "correct horse", "")
+
+	clock = clock.Add(time.Hour)
+	if _, err := b.Pull(t); !errors.Is(err, testkit.ErrSignerTooYoung) {
+		t.Fatalf("a signer first seen an hour ago with a backdated entry must be refused: %v", err)
+	}
+	clock = clock.Add(24 * time.Hour)
+	if _, err := b.Pull(t); err != nil || !bytes.Equal(b.Key, f.a.Key) {
+		t.Fatalf("a signer first seen more than a day ago is accepted: %v", err)
+	}
+}
