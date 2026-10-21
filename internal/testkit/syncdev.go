@@ -265,8 +265,9 @@ func (d *SyncDevice) Devices(t testing.TB) []RemoteDevice {
 	return out
 }
 
-func (d *SyncDevice) RemoveDeviceAndRotate(t testing.TB, removeID, passphrase, recoveryKey string) {
+func (d *SyncDevice) RemoveDeviceAndRotate(t testing.TB, approver *API, removeID, passphrase, recoveryKey string) {
 	t.Helper()
+	d.API.ElevateByApproval(t, approver)
 	d.API.Must(t, http.StatusNoContent, "DELETE", "/v1/devices/"+removeID, nil)
 	remote, err := d.pull(t)
 	if err != nil {
@@ -304,8 +305,9 @@ func (d *SyncDevice) RemoveDeviceAndRotate(t testing.TB, removeID, passphrase, r
 	d.Key, d.Highest = newKey, next.Counter
 }
 
-func (d *SyncDevice) CollectGarbage(t testing.TB) int {
+func (d *SyncDevice) CollectGarbage(t testing.TB, approver *API) int {
 	t.Helper()
+	d.API.ElevateByApproval(t, approver)
 	remote, err := d.pull(t)
 	if err != nil {
 		t.Fatal(err)

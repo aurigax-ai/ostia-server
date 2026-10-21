@@ -268,6 +268,13 @@ func (s *Service) putWrap(w http.ResponseWriter, r *http.Request, p auth.Princip
 	if err := s.validSlot(r.Context(), p.AccountID, slot); err != nil {
 		return err
 	}
+	if slot == slotPassphrase || slot == slotRecovery {
+		if _, err := s.DB.Wrap(r.Context(), p.AccountID, slot); err == nil {
+			if err := s.Auth.NeedElevation(p); err != nil {
+				return err
+			}
+		}
+	}
 	var in struct {
 		Blob httpx.B64 `json:"blob"`
 	}
@@ -285,6 +292,9 @@ func (s *Service) putWrap(w http.ResponseWriter, r *http.Request, p auth.Princip
 }
 
 func (s *Service) deleteWrap(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
+	if err := s.Auth.NeedElevation(p); err != nil {
+		return err
+	}
 	if err := s.DB.DeleteWrap(r.Context(), p.AccountID, r.PathValue("slot")); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			return httpx.ErrNotFound
@@ -296,6 +306,9 @@ func (s *Service) deleteWrap(w http.ResponseWriter, r *http.Request, p auth.Prin
 }
 
 func (s *Service) rotate(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
+	if err := s.Auth.NeedElevation(p); err != nil {
+		return err
+	}
 	var in struct {
 		IfMatch     int64                `json:"ifMatch"`
 		Manifest    httpx.B64            `json:"manifest"`
@@ -330,6 +343,9 @@ func (s *Service) rotate(w http.ResponseWriter, r *http.Request, p auth.Principa
 }
 
 func (s *Service) gc(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
+	if err := s.Auth.NeedElevation(p); err != nil {
+		return err
+	}
 	var in struct {
 		Keep []string `json:"keep"`
 	}

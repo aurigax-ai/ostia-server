@@ -21,9 +21,25 @@ type relayFixture struct {
 	desktop *testkit.RelayDesktop
 }
 
+var generousRelayLimits = []string{"connections_per_minute = 1000\n", "connections_per_minute_per_ip = 1000\n"}
+
+func withGenerousRelayLimits(extra string) string {
+	missing := ""
+	for _, line := range generousRelayLimits {
+		key, _, _ := strings.Cut(line, " ")
+		if !strings.Contains(extra, key+" ") {
+			missing += line
+		}
+	}
+	if strings.Contains(extra, "[relay]\n") {
+		return strings.Replace(extra, "[relay]\n", "[relay]\n"+missing, 1)
+	}
+	return extra + "[relay]\n" + missing
+}
+
 func newRelayFixture(t *testing.T, extra string) *relayFixture {
 	t.Helper()
-	e := newEnv(t, extra)
+	e := newEnv(t, withGenerousRelayLimits(extra))
 	api := e.user(t, "desktop")
 	cert := testkit.NewGatewayCert(t)
 	gateway := testkit.StartGateway(t, cert)
@@ -61,6 +77,9 @@ func TestPhoneReachesDesktopThroughRelayWithPinnedTLS(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer conn.Close()
+	if err := testkit.Hello(conn, f.gateway.Token); err != nil {
+		t.Fatal(err)
+	}
 	reply, err := testkit.Converse(conn, secret)
 	if err != nil {
 		t.Fatal(err)
@@ -146,29 +165,83 @@ func TestKnownLabelWithoutListenerIsResetImmediately(t *testing.T) {
 	})
 }
 
-func TestRelayLimitsConcurrentStreamsPerLabel(t *testing.T) {
+func TestRelayLimitsConfirmedStreamsPerLabel(t *testing.T) {
 	f := newRelayFixture(t, "[relay]\nmax_streams_per_label = 2\nconnections_per_minute = 100\nconnections_per_minute_per_ip = 100\n")
 	var held []net.Conn
 	for range 2 {
-		conn, err := testkit.DialPhone(t.Context(), f.env.net, f.desktop.Host, f.cert.Fingerprint)
+		conn, err := testkit.DialAuthed(t.Context(), f.env.net, f.desktop.Host, f.cert.Fingerprint, f.gateway.Token)
 		if err != nil {
 			t.Fatal(err)
 		}
 		held = append(held, conn)
 		defer conn.Close()
 	}
-	if _, err := testkit.DialPhone(t.Context(), f.env.net, f.desktop.Host, f.cert.Fingerprint); err == nil {
-		t.Fatal("a third concurrent stream was relayed")
+	if _, err := testkit.DialAuthed(t.Context(), f.env.net, f.desktop.Host, f.cert.Fingerprint, f.gateway.Token); err == nil {
+		t.Fatal("a third confirmed stream was relayed")
 	}
 	_ = held[0].Close()
 	waitUntil(t, "a slot frees up after a stream closes", func() bool {
-		conn, err := testkit.DialPhone(t.Context(), f.env.net, f.desktop.Host, f.cert.Fingerprint)
+		conn, err := testkit.DialAuthed(t.Context(), f.env.net, f.desktop.Host, f.cert.Fingerprint, f.gateway.Token)
 		if err != nil {
 			return false
 		}
 		defer conn.Close()
 		return true
 	})
+}
+
+func TestUnconfirmedStreamsAreClosedAndStayOutOfTheConfirmedSlots(t *testing.T) {
+	f := newRelayFixture(t, "[relay]\nmax_streams_per_label = 2\nmax_unconfirmed_per_label = 2\nunconfirmed_timeout = \"700ms\"\nconnections_per_minute = 100\nconnections_per_minute_per_ip = 100\n")
+	var squatters []net.Conn
+	for range 2 {
+		conn, err := testkit.DialPhone(t.Context(), f.env.net, f.desktop.Host, f.cert.Fingerprint)
+		if err != nil {
+			t.Fatal(err)
+		}
+		squatters = append(squatters, conn)
+		defer conn.Close()
+	}
+	if _, err := testkit.DialPhone(t.Context(), f.env.net, f.desktop.Host, f.cert.Fingerprint); err == nil {
+		t.Fatal("unconfirmed streams are not capped")
+	}
+	start := time.Now()
+	for _, conn := range squatters {
+		_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		if _, err := conn.Read(make([]byte, 1)); err == nil || time.Since(start) > 3*time.Second {
+			t.Fatalf("a stream whose hello the desktop never confirmed must be closed after the timeout: %v after %v", err, time.Since(start))
+		}
+	}
+	waitUntil(t, "the unconfirmed slots free up", func() bool {
+		conn, err := testkit.DialAuthed(t.Context(), f.env.net, f.desktop.Host, f.cert.Fingerprint, f.gateway.Token)
+		if err != nil {
+			return false
+		}
+		defer conn.Close()
+		return true
+	})
+}
+
+func TestConfirmedStreamsLeaveTheUnconfirmedPool(t *testing.T) {
+	f := newRelayFixture(t, "[relay]\nmax_streams_per_label = 4\nmax_unconfirmed_per_label = 1\nconnections_per_minute = 100\nconnections_per_minute_per_ip = 100\n")
+	for range 4 {
+		conn, err := testkit.DialAuthed(t.Context(), f.env.net, f.desktop.Host, f.cert.Fingerprint, f.gateway.Token)
+		if err != nil {
+			t.Fatalf("confirmed streams must not count against the unconfirmed cap: %v", err)
+		}
+		defer conn.Close()
+	}
+}
+
+func TestWrongTokenNeverConfirmsAStream(t *testing.T) {
+	f := newRelayFixture(t, "[relay]\nunconfirmed_timeout = \"600ms\"\n")
+	conn, err := testkit.DialPhone(t.Context(), f.env.net, f.desktop.Host, f.cert.Fingerprint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if err := testkit.Hello(conn, "not-the-token"); !errors.Is(err, testkit.ErrGatewayDenied) {
+		t.Fatalf("%v", err)
+	}
 }
 
 func TestRelayLimitsNewConnectionsPerSourceAddress(t *testing.T) {
@@ -204,7 +277,7 @@ func TestRelayLimitsNewConnectionsPerLabel(t *testing.T) {
 
 func TestRelayClosesIdleStreams(t *testing.T) {
 	f := newRelayFixture(t, "[relay]\nidle_timeout = \"400ms\"\n")
-	conn, err := testkit.DialPhone(t.Context(), f.env.net, f.desktop.Host, f.cert.Fingerprint)
+	conn, err := testkit.DialAuthed(t.Context(), f.env.net, f.desktop.Host, f.cert.Fingerprint, f.gateway.Token)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -226,7 +299,7 @@ func TestRelayStopsAtTheMonthlyByteQuota(t *testing.T) {
 	f := newRelayFixture(t, "[relay]\nmonthly_bytes_per_account = 6000\nconnections_per_minute = 100\nconnections_per_minute_per_ip = 100\nidle_timeout = \"400ms\"\n")
 	var lastErr error
 	for range 12 {
-		conn, err := testkit.DialPhone(t.Context(), f.env.net, f.desktop.Host, f.cert.Fingerprint)
+		conn, err := testkit.DialAuthed(t.Context(), f.env.net, f.desktop.Host, f.cert.Fingerprint, f.gateway.Token)
 		if err != nil {
 			lastErr = err
 			break
@@ -242,11 +315,12 @@ func TestRelayStopsAtTheMonthlyByteQuota(t *testing.T) {
 func TestRevokedDeviceLosesItsRelayImmediately(t *testing.T) {
 	f := newRelayFixture(t, "[relay]\nhello_timeout = \"700ms\"\n")
 	other := f.env.device(t, f.api, "second desktop")
-	conn, err := testkit.DialPhone(t.Context(), f.env.net, f.desktop.Host, f.cert.Fingerprint)
+	conn, err := testkit.DialAuthed(t.Context(), f.env.net, f.desktop.Host, f.cert.Fingerprint, f.gateway.Token)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer conn.Close()
+	other.ElevateByApproval(t, f.api)
 	other.Must(t, http.StatusNoContent, "DELETE", "/v1/devices/"+f.api.ID.DeviceID, nil)
 	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	start := time.Now()
@@ -271,7 +345,7 @@ func TestNewListenerReplacesTheOld(t *testing.T) {
 	}
 	second.Listen(t)
 	waitUntil(t, "the relay works through the new listener", func() bool {
-		conn, err := testkit.DialPhone(t.Context(), f.env.net, f.desktop.Host, f.cert.Fingerprint)
+		conn, err := testkit.DialAuthed(t.Context(), f.env.net, f.desktop.Host, f.cert.Fingerprint, f.gateway.Token)
 		if err != nil {
 			return false
 		}
@@ -315,4 +389,43 @@ func TestRelayCanBeSwitchedOffInConfig(t *testing.T) {
 	if info["modules"].(map[string]any)["relay"] != false {
 		t.Fatalf("info: %v", info)
 	}
+}
+
+func TestListenerEndsWhenItsSessionExpires(t *testing.T) {
+	f := newRelayFixture(t, "[auth]\nsession_ttl = \"2s\"\n[relay]\nping_interval = \"200ms\"\nhello_timeout = \"700ms\"\nconnections_per_minute = 1000\nconnections_per_minute_per_ip = 1000\n")
+	started := time.Now()
+	conn, err := testkit.DialAuthed(t.Context(), f.env.net, f.desktop.Host, f.cert.Fingerprint, f.gateway.Token)
+	if err != nil {
+		t.Fatalf("the listener must work while its session is valid: %v", err)
+	}
+	_ = conn.Close()
+	t.Cleanup(func() {
+		if time.Since(started) < time.Second {
+			t.Error("the listener stopped before its session expired")
+		}
+	})
+	waitUntil(t, "the listener stops with the session", func() bool {
+		conn, err := testkit.DialPhone(t.Context(), f.env.net, f.desktop.Host, f.cert.Fingerprint)
+		if err == nil {
+			_ = conn.Close()
+		}
+		return err != nil
+	})
+}
+
+func TestListenerEndsWhenTheDeviceLogsOut(t *testing.T) {
+	f := newRelayFixture(t, "[relay]\nping_interval = \"200ms\"\nhello_timeout = \"700ms\"\nconnections_per_minute = 1000\nconnections_per_minute_per_ip = 1000\n")
+	conn, err := testkit.DialAuthed(t.Context(), f.env.net, f.desktop.Host, f.cert.Fingerprint, f.gateway.Token)
+	if err != nil {
+		t.Fatalf("the listener must work before logout: %v", err)
+	}
+	_ = conn.Close()
+	f.api.Must(t, http.StatusNoContent, "DELETE", "/v1/auth/session", nil)
+	waitUntil(t, "the listener stops after logout", func() bool {
+		conn, err := testkit.DialPhone(t.Context(), f.env.net, f.desktop.Host, f.cert.Fingerprint)
+		if err == nil {
+			_ = conn.Close()
+		}
+		return err != nil
+	})
 }

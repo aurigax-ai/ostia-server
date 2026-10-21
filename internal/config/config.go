@@ -8,6 +8,9 @@ import (
 	"time"
 
 	"github.com/pelletier/go-toml/v2"
+	"golang.org/x/net/publicsuffix"
+
+	"github.com/aurigax-ai/ostia-server/internal/httpx"
 )
 
 const (
@@ -37,15 +40,17 @@ type Domains struct {
 }
 
 type Listen struct {
-	HTTPS          string `toml:"https"`
-	HTTP           string `toml:"http"`
-	ClientIPHeader string `toml:"client_ip_header"`
+	HTTPS          string   `toml:"https"`
+	HTTP           string   `toml:"http"`
+	ClientIPHeader string   `toml:"client_ip_header"`
+	TrustedProxies []string `toml:"trusted_proxies"`
 }
 
 type TLS struct {
-	Mode        string     `toml:"mode"`
-	ForwardAddr string     `toml:"forward_addr"`
-	Certs       []CertPair `toml:"certs"`
+	Mode                 string     `toml:"mode"`
+	ForwardAddr          string     `toml:"forward_addr"`
+	ForwardProxyProtocol bool       `toml:"forward_proxy_protocol"`
+	Certs                []CertPair `toml:"certs"`
 }
 
 type CertPair struct {
@@ -68,10 +73,14 @@ type Auth struct {
 	MaxDevices      int      `toml:"max_devices_per_account"`
 	InviteTTL       Duration `toml:"invite_ttl"`
 	DeviceInviteTTL Duration `toml:"device_invite_ttl"`
+	ElevationTTL    Duration `toml:"elevation_ttl"`
+	ApprovalTTL     Duration `toml:"approval_ttl"`
 }
 
 type Relay struct {
 	MaxStreamsPerLabel        int      `toml:"max_streams_per_label"`
+	MaxUnconfirmedPerLabel    int      `toml:"max_unconfirmed_per_label"`
+	UnconfirmedTimeout        Duration `toml:"unconfirmed_timeout"`
 	ConnectionsPerMinute      int      `toml:"connections_per_minute"`
 	ConnectionsPerMinutePerIP int      `toml:"connections_per_minute_per_ip"`
 	MonthlyBytesPerAccount    int64    `toml:"monthly_bytes_per_account"`
@@ -80,6 +89,7 @@ type Relay struct {
 	AcceptTimeout             Duration `toml:"accept_timeout"`
 	HelloTimeout              Duration `toml:"hello_timeout"`
 	MaxPendingHellos          int      `toml:"max_pending_hellos"`
+	MaxPendingHellosPerIP     int      `toml:"max_pending_hellos_per_ip"`
 }
 
 type Publish struct {
@@ -103,10 +113,12 @@ type Sync struct {
 }
 
 type Push struct {
-	Upstream   string `toml:"upstream"`
-	MaxHandles int    `toml:"max_handles"`
-	FCM        FCM    `toml:"fcm"`
-	APNs       APNs   `toml:"apns"`
+	Upstream             string   `toml:"upstream"`
+	MaxHandles           int      `toml:"max_handles"`
+	MaxHandlesPerAccount int      `toml:"max_handles_per_account"`
+	TicketTTL            Duration `toml:"ticket_ttl"`
+	FCM                  FCM      `toml:"fcm"`
+	APNs                 APNs     `toml:"apns"`
 }
 
 type FCM struct {
@@ -147,8 +159,8 @@ func Default() Config {
 		DataDir:  "./data",
 		LogLevel: "info",
 		Domains:  Domains{Scheme: "https"},
-		Listen:   Listen{HTTPS: ":443"},
-		TLS:      TLS{Mode: TLSFiles},
+		Listen:   Listen{HTTPS: ":443", ClientIPHeader: "X-Forwarded-For"},
+		TLS:      TLS{Mode: TLSFiles, ForwardProxyProtocol: true},
 		Modules:  Modules{Relay: true, Publish: true, Sync: true},
 		Auth: Auth{
 			GitHubBaseURL:   "https://github.com",
@@ -157,9 +169,13 @@ func Default() Config {
 			MaxDevices:      10,
 			InviteTTL:       Duration(7 * 24 * time.Hour),
 			DeviceInviteTTL: Duration(10 * time.Minute),
+			ElevationTTL:    Duration(5 * time.Minute),
+			ApprovalTTL:     Duration(5 * time.Minute),
 		},
 		Relay: Relay{
 			MaxStreamsPerLabel:        8,
+			MaxUnconfirmedPerLabel:    4,
+			UnconfirmedTimeout:        Duration(15 * time.Second),
 			ConnectionsPerMinute:      30,
 			ConnectionsPerMinutePerIP: 10,
 			MonthlyBytesPerAccount:    5 * GiB,
@@ -168,6 +184,7 @@ func Default() Config {
 			AcceptTimeout:             Duration(10 * time.Second),
 			HelloTimeout:              Duration(5 * time.Second),
 			MaxPendingHellos:          1024,
+			MaxPendingHellosPerIP:     16,
 		},
 		Publish: Publish{
 			MaxFileBytes:        16 * MiB,
@@ -186,7 +203,7 @@ func Default() Config {
 			ManifestHistory:  10,
 			GCGrace:          Duration(time.Hour),
 		},
-		Push: Push{MaxHandles: 100000},
+		Push: Push{MaxHandles: 100000, MaxHandlesPerAccount: 20, TicketTTL: Duration(10 * time.Minute)},
 	}
 }
 
@@ -237,12 +254,19 @@ func (c Config) Validate() error {
 	need(c.Listen.HTTPS != "" || c.Listen.HTTP != "", "set listen.https or listen.http")
 	if c.Domains.Share != "" {
 		need(c.Domains.Share != c.Domains.API, "domains.share must differ from domains.api")
-		need(!strings.HasSuffix(c.Domains.Share, "."+c.Domains.API) && !strings.HasSuffix(c.Domains.API, "."+c.Domains.Share),
-			"domains.share must be a separate registrable domain, not a parent or child of domains.api")
+		if site(c.Domains.Share) == site(c.Domains.API) {
+			errs = append(errs, fmt.Errorf("domains.share must be on a different registrable domain than domains.api, both are under %s", site(c.Domains.API)))
+		}
 	}
 	if c.Domains.Relay != "" {
 		need(c.Domains.Relay != c.Domains.API && c.Domains.Relay != c.Domains.Share, "domains.relay must differ from the api and share domains")
 		need(!strings.HasSuffix(c.Domains.API, "."+c.Domains.Relay), "domains.api must not sit under domains.relay")
+	}
+	if _, err := httpx.ParseProxies(c.Listen.TrustedProxies, c.Listen.ClientIPHeader); err != nil {
+		errs = append(errs, err)
+	}
+	if len(c.Listen.TrustedProxies) > 0 {
+		need(c.Listen.ClientIPHeader != "", "listen.client_ip_header is required when listen.trusted_proxies is set")
 	}
 	if c.Listen.HTTPS != "" {
 		switch c.TLS.Mode {
@@ -260,6 +284,14 @@ func (c Config) Validate() error {
 	need(c.Auth.SessionTTL.Std() > 0, "auth.session_ttl must be positive")
 	need(c.Publish.MaxExpiry >= c.Publish.DefaultExpiry, "publish.max_expiry must not be below publish.default_expiry")
 	return errors.Join(errs...)
+}
+
+func site(host string) string {
+	registrable, err := publicsuffix.EffectiveTLDPlusOne(host)
+	if err != nil {
+		return host
+	}
+	return registrable
 }
 
 func (c Config) RelayEnabled() bool   { return c.Modules.Relay }

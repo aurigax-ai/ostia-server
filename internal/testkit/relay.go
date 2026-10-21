@@ -22,10 +22,12 @@ import (
 )
 
 type FakeGateway struct {
-	Addr  string
-	Peers chan string
-	ln    net.Listener
-	cert  tls.Certificate
+	Addr    string
+	Token   string
+	Peers   chan string
+	Confirm func(peer string)
+	ln      net.Listener
+	cert    tls.Certificate
 }
 
 func StartGateway(t testing.TB, cert Gateway) *FakeGateway {
@@ -34,7 +36,7 @@ func StartGateway(t testing.TB, cert Gateway) *FakeGateway {
 	if err != nil {
 		t.Fatal(err)
 	}
-	g := &FakeGateway{Addr: ln.Addr().String(), Peers: make(chan string, 64), ln: ln, cert: cert.Cert}
+	g := &FakeGateway{Addr: ln.Addr().String(), Token: EncodeB64(RandomBytes(16)), Peers: make(chan string, 64), ln: ln, cert: cert.Cert}
 	t.Cleanup(func() { _ = ln.Close() })
 	go func() {
 		for {
@@ -74,6 +76,16 @@ func (g *FakeGateway) serve(raw net.Conn) {
 	conn := tls.Server(bufferedConn{Conn: raw, reader: reader}, &tls.Config{Certificates: []tls.Certificate{g.cert}, MinVersion: tls.VersionTLS12})
 	defer conn.Close()
 	lines := bufio.NewScanner(conn)
+	if !lines.Scan() || lines.Text() != "hello "+g.Token {
+		_, _ = fmt.Fprintln(conn, "denied")
+		return
+	}
+	if g.Confirm != nil {
+		g.Confirm(peer)
+	}
+	if _, err := fmt.Fprintln(conn, "welcome"); err != nil {
+		return
+	}
 	for lines.Scan() {
 		if _, err := fmt.Fprintf(conn, "gateway saw %s from %s\n", lines.Text(), peer); err != nil {
 			return
@@ -87,10 +99,12 @@ type RelayDesktop struct {
 	Label   string
 	Host    string
 
-	cancel context.CancelFunc
-	wg     sync.WaitGroup
-	mu     sync.Mutex
-	Pings  int
+	cancel  context.CancelFunc
+	wg      sync.WaitGroup
+	mu      sync.Mutex
+	Pings   int
+	control *websocket.Conn
+	streams map[string]string
 }
 
 func (d *RelayDesktop) Prepare(t testing.TB) {
@@ -117,6 +131,11 @@ func (d *RelayDesktop) Listen(t testing.TB) {
 		cancel()
 		t.Fatalf("relay listen: %v", err)
 	}
+	d.mu.Lock()
+	d.control = control
+	d.streams = map[string]string{}
+	d.mu.Unlock()
+	d.Gateway.Confirm = d.confirmPeer
 	d.wg.Go(func() {
 		defer control.CloseNow()
 		for {
@@ -140,11 +159,27 @@ func (d *RelayDesktop) Listen(t testing.TB) {
 				d.mu.Unlock()
 				_ = control.Write(ctx, websocket.MessageText, []byte(`{"t":"pong"}`))
 			case "incoming":
+				d.mu.Lock()
+				d.streams[msg.Peer] = msg.Stream
+				d.mu.Unlock()
 				d.wg.Go(func() { d.accept(ctx, msg.Stream, msg.Peer, msg.Family) })
 			}
 		}
 	})
 	t.Cleanup(d.Stop)
+}
+
+func (d *RelayDesktop) confirmPeer(peer string) {
+	d.mu.Lock()
+	stream, control := d.streams[peer], d.control
+	d.mu.Unlock()
+	if stream == "" || control == nil {
+		return
+	}
+	raw, _ := json.Marshal(map[string]string{"t": "confirm", "stream": stream})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_ = control.Write(ctx, websocket.MessageText, raw)
 }
 
 func (d *RelayDesktop) accept(ctx context.Context, stream, peer string, family int) {
@@ -225,4 +260,29 @@ func Converse(conn net.Conn, line string) (string, error) {
 	}
 	reply, err := bufio.NewReader(conn).ReadString('\n')
 	return strings.TrimSpace(reply), err
+}
+
+var ErrGatewayDenied = errors.New("gateway denied the hello")
+
+func Hello(conn net.Conn, token string) error {
+	reply, err := Converse(conn, "hello "+token)
+	if err != nil {
+		return err
+	}
+	if reply != "welcome" {
+		return ErrGatewayDenied
+	}
+	return nil
+}
+
+func DialAuthed(ctx context.Context, n Net, host, pin, token string) (*tls.Conn, error) {
+	conn, err := DialPhone(ctx, n, host, pin)
+	if err != nil {
+		return nil, err
+	}
+	if err := Hello(conn, token); err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
+	return conn, nil
 }

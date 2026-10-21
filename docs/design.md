@@ -28,11 +28,31 @@ The plan for the sync protocol derived a blob id from the path alone. That lets 
 
 Key rotation is one transaction (`POST /v1/sync/rotate`): the new manifest and every changed wrap land together, so no device ever sees a manifest it has no wrap for.
 
-## Push handles are not tied to accounts
+## Push registration is a desktop-issued ticket
 
-A phone has no account, so its handle cannot belong to one. The handle is the credential: over 150 random bits, known only to the phone and the desktop it was given to. The desktop deletes the handle when it revokes the phone; deleting an account does not reach handles because nothing links them. A ping has no content, so a leaked handle can cause at most one wake-up per 30 seconds.
+A phone has no account, so it cannot prove anything itself. The desktop does: a signed-in desktop mints a single-use ticket and gives it to its own phone, which registers with it. The handle is therefore bound to the desktop's account, a stranger cannot fill the table, an account can only hold a few, and only that account's session can ping or delete the handle. A ping has no content, at most one wake-up per 30 seconds per handle.
 
 Each operator uses their own FCM and APNs credentials. Platform tokens are bound to the app build, so a server can only push to phones running a build registered under its credentials. There is no shared push gateway.
+
+## Elevated sessions for destructive actions
+
+The bearer token lives in the desktop's main process for an hour. If it leaks, an attacker must not be able to delete devices, wraps, blobs or the account. Those actions need another signed-in device to approve (the person clicks on that device) or a fresh GitHub sign-in by the same GitHub user. Elevation lasts five minutes and is attached to the session that asked. The cost is that an account with a single non-GitHub device cannot do these things itself; the operator can still delete the account from the command line.
+
+## Client addresses behind a proxy
+
+Rate limits key on the client address. Behind a proxy that address is only known from a header, and a header anyone can send is worthless. The server reads the header only from connections whose peer is listed in `listen.trusted_proxies`, and takes the rightmost address that is not itself a trusted proxy: a client can add entries to the left but cannot control the one the trusted proxy appended. In `forward` mode the server tells the proxy the client address with PROXY protocol v2, since it cannot add a header to a TLS stream it does not terminate.
+
+## Relay streams start unconfirmed
+
+A label is an identifier, not a secret: it is in the pairing QR and in every address list. Without a check, anyone who learned it could hold the label's connection slots and burn the owner's byte quota with idle or garbage streams. A stream is therefore unconfirmed until the desktop says its gateway accepted the phone (valid device token or live pairing code). Unconfirmed streams are short lived, capped separately, and unbilled. The accept side of the relay never learns what the traffic is; the gateway tells the desktop client, which tells the relay only the stream id.
+
+## Pre-handshake connections are pooled per address
+
+The router holds a connection until its ClientHello arrives, which is a slow-connection attack surface. The pool is capped, each source address may hold only a few places, and when the pool is three quarters full the router stops holding connections that are not TLS.
+
+## The share domain is a different site
+
+Browsers decide same-site by registrable domain from the public suffix list. A share domain under the API's registrable domain would let a malicious share set cookies for, or be treated as part of, the API's site. The server refuses to start in that case.
 
 ## Rate limits and authentication on every route
 

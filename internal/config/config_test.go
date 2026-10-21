@@ -82,7 +82,9 @@ func TestValidationErrors(t *testing.T) {
 	}{
 		"missing api":        {strings.Replace(minimal, `api = "api.example.com"`, "", 1), "domains.api"},
 		"share equals api":   {strings.Replace(minimal, "example-share.net", "api.example.com", 1), "domains.share must differ"},
-		"share under api":    {strings.Replace(minimal, "example-share.net", "share.api.example.com", 1), "separate registrable domain"},
+		"share under api":    {strings.Replace(minimal, "example-share.net", "share.api.example.com", 1), "different registrable domain"},
+		"share beside api":   {strings.Replace(minimal, "example-share.net", "shares.example.com", 1), "different registrable domain"},
+		"share on co.uk":     {strings.Replace(strings.Replace(minimal, "example-share.net", "a.co.uk", 1), "api.example.com", "api.b.co.uk", 1), ""},
 		"api under relay":    {strings.Replace(minimal, "api.example.com", "api.r.example.com", 1), "must not sit under"},
 		"no certs":           {strings.Replace(minimal, "[[tls.certs]]\ncert = \"/etc/c.pem\"\nkey = \"/etc/k.pem\"\n", "", 1), "tls.certs"},
 		"bad tls mode":       {strings.Replace(minimal, "[tls]\n", "[tls]\nmode = \"acme\"\n", 1), "tls.mode"},
@@ -93,6 +95,12 @@ func TestValidationErrors(t *testing.T) {
 	}
 	for name, c := range cases {
 		_, err := Load(write(t, c.body))
+		if c.want == "" {
+			if err != nil {
+				t.Errorf("%s: %v", name, err)
+			}
+			continue
+		}
 		if err == nil || !strings.Contains(err.Error(), c.want) {
 			t.Errorf("%s: want error containing %q, got %v", name, c.want, err)
 		}
@@ -120,5 +128,17 @@ relay = false
 `
 	if _, err := Load(write(t, body)); err != nil {
 		t.Fatalf("%v", err)
+	}
+}
+
+func TestShareDomainMayBeAPublicSuffix(t *testing.T) {
+	body := strings.Replace(minimal, "example-share.net", "usercontent.example.org", 1)
+	body = strings.Replace(body, "api.example.com", "api.example.net", 1)
+	if _, err := Load(write(t, body)); err != nil {
+		t.Fatalf("%v", err)
+	}
+	body = strings.Replace(minimal, "example-share.net", "github.io", 1)
+	if _, err := Load(write(t, body)); err != nil {
+		t.Fatalf("a share domain that is itself a public suffix isolates every share: %v", err)
 	}
 }

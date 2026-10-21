@@ -45,6 +45,7 @@ type Hub struct {
 	listeners map[string]*listener
 	pending   map[string]*pendingStream
 	streams   map[*stream]struct{}
+	byID      map[string]*stream
 	closed    bool
 }
 
@@ -56,14 +57,16 @@ type controlMessage struct {
 }
 
 type listener struct {
-	label     string
-	deviceID  string
-	accountID string
-	ws        *websocket.Conn
-	streams   atomic.Int32
-	lastSeen  atomic.Int64
-	done      chan struct{}
-	closeOnce sync.Once
+	label       string
+	deviceID    string
+	accountID   string
+	ws          *websocket.Conn
+	unconfirmed atomic.Int32
+	confirmed   atomic.Int32
+	tokenHash   []byte
+	lastSeen    atomic.Int64
+	done        chan struct{}
+	closeOnce   sync.Once
 }
 
 func (l *listener) close(code websocket.StatusCode, reason string) {
@@ -92,9 +95,13 @@ type pendingStream struct {
 }
 
 type stream struct {
-	deviceID string
-	phone    net.Conn
-	desktop  net.Conn
+	id               string
+	deviceID         string
+	listener         *listener
+	phone            net.Conn
+	desktop          net.Conn
+	confirmed        atomic.Bool
+	unconfirmedBytes atomic.Int64
 }
 
 func (s *stream) close() {
@@ -112,6 +119,7 @@ func New(db *store.DB, authSvc *auth.Service, cfg config.Relay, domain string, n
 		listeners: map[string]*listener{},
 		pending:   map[string]*pendingStream{},
 		streams:   map[*stream]struct{}{},
+		byID:      map[string]*stream{},
 	}
 	return h
 }
@@ -142,6 +150,10 @@ func (h *Hub) label(w http.ResponseWriter, r *http.Request, p auth.Principal) er
 }
 
 func (h *Hub) hold(conn net.Conn, deadline time.Time) {
+	if len(h.holds) > cap(h.holds)*3/4 {
+		_ = conn.Close()
+		return
+	}
 	select {
 	case h.holds <- struct{}{}:
 		time.Sleep(time.Until(deadline))
@@ -185,9 +197,9 @@ func (h *Hub) HandlePhone(conn net.Conn, label string, hello []byte, deadline ti
 		return
 	}
 	l := h.listenerFor(label)
-	if l == nil || int(l.streams.Add(1)) > h.Cfg.MaxStreamsPerLabel {
+	if l == nil || int(l.unconfirmed.Add(1)) > h.Cfg.MaxUnconfirmedPerLabel {
 		if l != nil {
-			l.streams.Add(-1)
+			l.unconfirmed.Add(-1)
 		}
 		_ = conn.Close()
 		return
@@ -198,7 +210,7 @@ func (h *Hub) HandlePhone(conn net.Conn, label string, hello []byte, deadline ti
 	if h.closed {
 		h.mu.Unlock()
 		p.timer.Stop()
-		l.streams.Add(-1)
+		l.unconfirmed.Add(-1)
 		_ = conn.Close()
 		return
 	}
@@ -229,7 +241,7 @@ func (h *Hub) takePending(id string) *pendingStream {
 func (h *Hub) dropPending(id string) {
 	if p := h.takePending(id); p != nil {
 		_ = p.conn.Close()
-		p.listener.streams.Add(-1)
+		p.listener.unconfirmed.Add(-1)
 	}
 }
 
@@ -243,7 +255,7 @@ func (h *Hub) serveListen(w http.ResponseWriter, r *http.Request, p auth.Princip
 		return nil
 	}
 	ws.SetReadLimit(controlReadLimit)
-	l := &listener{label: label, deviceID: p.DeviceID, accountID: p.AccountID, ws: ws, done: make(chan struct{})}
+	l := &listener{label: label, deviceID: p.DeviceID, accountID: p.AccountID, tokenHash: p.TokenHash, ws: ws, done: make(chan struct{})}
 	l.lastSeen.Store(h.Now().UnixNano())
 	if !h.register(l) {
 		l.close(websocket.StatusGoingAway, "server shutting down")
@@ -268,9 +280,29 @@ func (h *Hub) serveListen(w http.ResponseWriter, r *http.Request, p auth.Princip
 			return nil
 		}
 		var msg controlMessage
-		if json.Unmarshal(data, &msg) == nil && msg.Type == "pong" {
-			l.lastSeen.Store(h.Now().UnixNano())
+		if json.Unmarshal(data, &msg) != nil {
+			continue
 		}
+		switch msg.Type {
+		case "pong":
+			l.lastSeen.Store(h.Now().UnixNano())
+		case "confirm":
+			h.confirm(l, msg.Stream)
+		}
+	}
+}
+
+func (h *Hub) confirm(l *listener, streamID string) {
+	h.mu.Lock()
+	s := h.byID[streamID]
+	h.mu.Unlock()
+	if s == nil || s.listener != l || !s.confirmed.CompareAndSwap(false, true) {
+		return
+	}
+	l.unconfirmed.Add(-1)
+	if int(l.confirmed.Add(1)) > h.Cfg.MaxStreamsPerLabel {
+		l.confirmed.Add(-1)
+		s.close()
 	}
 }
 
@@ -288,6 +320,10 @@ func (h *Hub) keepAlive(ctx context.Context, l *listener) {
 			}
 			if _, err := h.DB.LabelOwner(ctx, l.label); errors.Is(err, store.ErrNotFound) {
 				l.close(websocket.StatusPolicyViolation, "device removed")
+				return
+			}
+			if _, err := h.DB.SessionDevice(ctx, l.tokenHash); err != nil {
+				l.close(websocket.StatusPolicyViolation, "session ended")
 				return
 			}
 			if err := l.send(controlMessage{Type: "ping"}); err != nil {
@@ -346,7 +382,7 @@ func (h *Hub) serveAccept(w http.ResponseWriter, r *http.Request, p auth.Princip
 	ws, err := websocket.Accept(w, r, nil)
 	if err != nil {
 		_ = pending.conn.Close()
-		pending.listener.streams.Add(-1)
+		pending.listener.unconfirmed.Add(-1)
 		return nil
 	}
 	ws.SetReadLimit(-1)

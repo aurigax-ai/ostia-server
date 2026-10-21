@@ -196,3 +196,31 @@ func (a *API) Onboard(t testing.TB, code string) {
 	a.Register(t, code)
 	a.SignIn(t)
 }
+
+func (a *API) ElevateByApproval(t testing.TB, approver *API) {
+	t.Helper()
+	approvalID := a.Must(t, http.StatusCreated, "POST", "/v1/auth/elevation/approval", nil).Map(t)["approvalId"].(string)
+	var list struct {
+		Approvals []struct {
+			ID string `json:"id"`
+		} `json:"approvals"`
+	}
+	approver.Must(t, http.StatusOK, "GET", "/v1/auth/approvals", nil).JSON(t, &list)
+	found := false
+	for _, pending := range list.Approvals {
+		found = found || pending.ID == approvalID
+	}
+	if !found {
+		t.Fatalf("the approver does not see approval %s: %+v", approvalID, list.Approvals)
+	}
+	approver.Must(t, http.StatusNoContent, "POST", "/v1/auth/approvals/"+approvalID+"/approve", nil)
+	status := a.Must(t, http.StatusOK, "GET", "/v1/auth/approvals/"+approvalID, nil).Map(t)
+	if status["status"] != "approved" {
+		t.Fatalf("approval status: %v", status)
+	}
+}
+
+func (a *API) Elevated(t testing.TB) bool {
+	t.Helper()
+	return a.Must(t, http.StatusOK, "GET", "/v1/auth/elevation", nil).Map(t)["elevatedUntil"].(float64) > 0
+}

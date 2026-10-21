@@ -151,6 +151,18 @@ func (e *env) call(t *testing.T, method, path, token string, body any) (int, map
 	return res.StatusCode, out
 }
 
+func (e *env) elevate(t *testing.T, requesterToken, approverToken string) {
+	t.Helper()
+	status, out := e.post(t, "/v1/auth/elevation/approval", requesterToken, nil)
+	if status != 201 {
+		t.Fatalf("request approval %d %v", status, out)
+	}
+	id := out["approvalId"].(string)
+	if status, _ := e.call(t, "POST", "/v1/auth/approvals/"+id+"/approve", approverToken, nil); status != 204 {
+		t.Fatalf("approve %d", status)
+	}
+}
+
 func (e *env) invite(t *testing.T, accountID string) string {
 	t.Helper()
 	code, _, err := e.svc.CreateInvite(t.Context(), accountID, time.Hour)
@@ -324,6 +336,10 @@ func TestDeviceInviteJoinsTheSameAccountAndRevokeKicksIt(t *testing.T) {
 
 	var revoked []string
 	e.svc.Hooks.DeviceRevoked = func(id string) { revoked = append(revoked, id) }
+	if status, out := e.call(t, "DELETE", "/v1/devices/"+phone.id, token, nil); status != 403 || out["error"] != "elevation-required" {
+		t.Fatalf("revoking another device needs a second device's approval: %d %v", status, out)
+	}
+	e.elevate(t, token, phoneToken)
 	if status, _ := e.call(t, "DELETE", "/v1/devices/"+phone.id, token, nil); status != 204 {
 		t.Fatalf("revoke %d", status)
 	}
@@ -349,7 +365,7 @@ func TestDeviceCannotRevokeAnotherAccountsDevice(t *testing.T) {
 	e.signIn(t, a, e.invite(t, ""))
 	e.signIn(t, b, e.invite(t, ""))
 	tokenA := e.session(t, a)
-	if status, _ := e.call(t, "DELETE", "/v1/devices/"+b.id, tokenA, nil); status != 404 {
+	if status, _ := e.call(t, "DELETE", "/v1/devices/"+b.id, tokenA, nil); status != 403 {
 		t.Fatalf("cross-account revoke: %d", status)
 	}
 	if status, _ := e.call(t, "GET", "/v1/devices", e.session(t, b), nil); status != 200 {
@@ -362,12 +378,20 @@ func TestDeleteAccountRemovesEverythingAndNotifies(t *testing.T) {
 	d := newDevice("desktop")
 	e.signIn(t, d, e.invite(t, ""))
 	token := e.session(t, d)
+	second := newDevice("phone")
+	_, out := e.post(t, "/v1/devices/invite", token, nil)
+	e.signIn(t, second, out["code"].(string))
+	secondToken := e.session(t, second)
 	var gone []string
 	e.svc.Hooks.AccountDeleted = func(ids []string) { gone = ids }
+	if status, out := e.call(t, "DELETE", "/v1/account", token, nil); status != 403 || out["error"] != "elevation-required" {
+		t.Fatalf("deleting an account needs approval: %d %v", status, out)
+	}
+	e.elevate(t, token, secondToken)
 	if status, _ := e.call(t, "DELETE", "/v1/account", token, nil); status != 204 {
 		t.Fatalf("delete %d", status)
 	}
-	if len(gone) != 1 || gone[0] != d.id {
+	if len(gone) != 2 {
 		t.Fatalf("hook: %v", gone)
 	}
 	if status, _ := e.call(t, "GET", "/v1/devices", token, nil); status != 401 {
@@ -490,5 +514,199 @@ func TestGitHubRoutesAbsentWhenNotConfigured(t *testing.T) {
 	mux.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/auth/github/device", nil))
 	if rec.Code != 404 && rec.Code != 405 {
 		t.Fatalf("github route mounted without a client id: %d", rec.Code)
+	}
+}
+
+func TestChallengesAreOnlyKeptForRegisteredDevicesAndCappedPerDevice(t *testing.T) {
+	e := newEnv(t)
+	d := newDevice("desktop")
+	e.signIn(t, d, e.invite(t, ""))
+	for i := range 3 * maxChallengesPerDevice {
+		*e.clock = e.clock.Add(time.Second)
+		status, out := e.post(t, "/v1/auth/challenge", "", map[string]string{"deviceId": "ghost-" + string(rune('a'+i%26)) + strings.Repeat("x", i)})
+		if status != 200 || out["nonce"] == "" {
+			t.Fatalf("unknown devices still get an indistinguishable answer: %d", status)
+		}
+	}
+	e.svc.mu.Lock()
+	stored := len(e.svc.challenges)
+	e.svc.mu.Unlock()
+	if stored != 0 {
+		t.Fatalf("challenges for unknown devices were kept: %d", stored)
+	}
+	var first string
+	for i := range 2 * maxChallengesPerDevice {
+		*e.clock = e.clock.Add(time.Second)
+		status, out := e.post(t, "/v1/auth/challenge", "", map[string]string{"deviceId": d.id})
+		if status != 200 {
+			t.Fatalf("challenge %d: %d", i, status)
+		}
+		if i == 0 {
+			first = out["nonce"].(string)
+		}
+	}
+	e.svc.mu.Lock()
+	stored = len(e.svc.challenges)
+	e.svc.mu.Unlock()
+	if stored != maxChallengesPerDevice {
+		t.Fatalf("a device may hold %d open challenges, found %d", maxChallengesPerDevice, stored)
+	}
+	sig := httpx.EncodeB64(ed25519.Sign(d.sign, ChallengeMessage(d.id, first)))
+	if status, _ := e.post(t, "/v1/auth/verify", "", map[string]string{"deviceId": d.id, "nonce": first, "sig": sig}); status != 401 {
+		t.Fatalf("the oldest challenge should have been dropped: %d", status)
+	}
+}
+
+func TestExpiredChallengesAreSwept(t *testing.T) {
+	e := newEnv(t)
+	d := newDevice("desktop")
+	e.signIn(t, d, e.invite(t, ""))
+	e.post(t, "/v1/auth/challenge", "", map[string]string{"deviceId": d.id})
+	*e.clock = e.clock.Add(2 * time.Minute)
+	e.svc.SweepChallenges()
+	e.svc.mu.Lock()
+	defer e.svc.mu.Unlock()
+	if len(e.svc.challenges) != 0 || len(e.svc.challengesOf) != 0 {
+		t.Fatal("expired challenges survived the sweep")
+	}
+}
+
+func TestOneAddressCannotHoldManyGitHubFlows(t *testing.T) {
+	e := newEnv(t)
+	for i := range maxFlowsPerIP {
+		if status, out := e.post(t, "/v1/auth/github/device", "", nil); status != 200 {
+			t.Fatalf("flow %d: %d %v", i, status, out)
+		}
+	}
+	if status, _ := e.post(t, "/v1/auth/github/device", "", nil); status != 429 {
+		t.Fatalf("an address kept opening flows: %d", status)
+	}
+}
+
+func TestElevationRules(t *testing.T) {
+	e := newEnv(t)
+	a, b := newDevice("laptop"), newDevice("phone")
+	e.signIn(t, a, e.invite(t, ""))
+	tokenA := e.session(t, a)
+	if status, out := e.post(t, "/v1/auth/elevation/approval", tokenA, nil); status != 409 || out["error"] != "no-second-device" {
+		t.Fatalf("a single-device account cannot be approved by anyone: %d %v", status, out)
+	}
+	_, out := e.post(t, "/v1/devices/invite", tokenA, nil)
+	e.signIn(t, b, out["code"].(string))
+	tokenB := e.session(t, b)
+
+	_, out = e.post(t, "/v1/auth/elevation/approval", tokenA, nil)
+	id := out["approvalId"].(string)
+	if status, _ := e.call(t, "POST", "/v1/auth/approvals/"+id+"/approve", tokenA, nil); status != 403 {
+		t.Fatalf("self approval: %d", status)
+	}
+	if _, list := e.call(t, "GET", "/v1/auth/approvals", tokenA, nil); len(list["approvals"].([]any)) != 0 {
+		t.Fatalf("the requester sees its own request: %v", list)
+	}
+	_, list := e.call(t, "GET", "/v1/auth/approvals", tokenB, nil)
+	if len(list["approvals"].([]any)) != 1 || list["approvals"].([]any)[0].(map[string]any)["deviceName"] != "laptop" {
+		t.Fatalf("the other device must see who asks: %v", list)
+	}
+	if _, st := e.call(t, "GET", "/v1/auth/approvals/"+id, tokenA, nil); st["status"] != "pending" {
+		t.Fatalf("status: %v", st)
+	}
+	if status, _ := e.call(t, "GET", "/v1/auth/approvals/"+id, tokenB, nil); status != 404 {
+		t.Fatalf("another session read the request status: %d", status)
+	}
+	if status, _ := e.call(t, "POST", "/v1/auth/approvals/"+id+"/approve", tokenB, nil); status != 204 {
+		t.Fatalf("approve: %d", status)
+	}
+	if _, el := e.call(t, "GET", "/v1/auth/elevation", tokenA, nil); el["elevatedUntil"].(float64) == 0 {
+		t.Fatalf("elevation: %v", el)
+	}
+	if _, el := e.call(t, "GET", "/v1/auth/elevation", tokenB, nil); el["elevatedUntil"].(float64) != 0 {
+		t.Fatalf("the approver was elevated too: %v", el)
+	}
+	newToken := e.session(t, a)
+	if _, el := e.call(t, "GET", "/v1/auth/elevation", newToken, nil); el["elevatedUntil"].(float64) != 0 {
+		t.Fatalf("a fresh session of the same device must start unelevated: %v", el)
+	}
+}
+
+func TestElevationExpires(t *testing.T) {
+	e := newEnv(t)
+	a, b := newDevice("laptop"), newDevice("phone")
+	e.signIn(t, a, e.invite(t, ""))
+	tokenA := e.session(t, a)
+	_, out := e.post(t, "/v1/devices/invite", tokenA, nil)
+	e.signIn(t, b, out["code"].(string))
+	tokenB := e.session(t, b)
+	e.elevate(t, tokenA, tokenB)
+	*e.clock = e.clock.Add(6 * time.Minute)
+	if status, out := e.call(t, "DELETE", "/v1/devices/"+b.id, tokenA, nil); status != 403 || out["error"] != "elevation-required" {
+		t.Fatalf("elevation outlived its lifetime: %d %v", status, out)
+	}
+}
+
+func TestExpiredApprovalsCannotBeApproved(t *testing.T) {
+	e := newEnv(t)
+	a, b := newDevice("laptop"), newDevice("phone")
+	e.signIn(t, a, e.invite(t, ""))
+	tokenA := e.session(t, a)
+	_, out := e.post(t, "/v1/devices/invite", tokenA, nil)
+	e.signIn(t, b, out["code"].(string))
+	tokenB := e.session(t, b)
+	_, out = e.post(t, "/v1/auth/elevation/approval", tokenA, nil)
+	*e.clock = e.clock.Add(6 * time.Minute)
+	if status, _ := e.call(t, "POST", "/v1/auth/approvals/"+out["approvalId"].(string)+"/approve", tokenB, nil); status != 404 {
+		t.Fatalf("approving a stale request: %d", status)
+	}
+}
+
+func TestGitHubElevationRequiresTheSameGitHubUser(t *testing.T) {
+	e := newEnv(t)
+	e.gh.pending.Store(0)
+	signIn := func(name string) (string, string) {
+		_, out := e.post(t, "/v1/auth/github/device", "", nil)
+		flowID := out["flowId"].(string)
+		*e.clock = e.clock.Add(6 * time.Second)
+		d := newDevice(name)
+		body := d.registration()
+		body["flowId"] = flowID
+		status, out := e.post(t, "/v1/auth/github/poll", "", body)
+		if status != 201 {
+			t.Fatalf("sign-in %d %v", status, out)
+		}
+		d.id = out["deviceId"].(string)
+		return e.session(t, d), out["accountId"].(string)
+	}
+	token, _ := signIn("laptop")
+	startElevation := func() string {
+		status, out := e.post(t, "/v1/auth/elevation/github", token, nil)
+		if status != 200 {
+			t.Fatalf("start %d %v", status, out)
+		}
+		*e.clock = e.clock.Add(6 * time.Second)
+		return out["flowId"].(string)
+	}
+	e.gh.userID.Store(999)
+	flow := startElevation()
+	if status, out := e.post(t, "/v1/auth/elevation/github/poll", token, map[string]string{"flowId": flow}); status != 403 || out["error"] != "wrong-account" {
+		t.Fatalf("a different GitHub user elevated the session: %d %v", status, out)
+	}
+	e.gh.userID.Store(4242)
+	flow = startElevation()
+	if status, out := e.post(t, "/v1/auth/elevation/github/poll", token, map[string]string{"flowId": flow}); status != 200 || out["elevatedUntil"].(float64) == 0 {
+		t.Fatalf("elevation with the right user: %d %v", status, out)
+	}
+	other, _ := signIn("phone")
+	flow = startElevation()
+	if status, _ := e.post(t, "/v1/auth/elevation/github/poll", other, map[string]string{"flowId": flow}); status != 404 {
+		t.Fatalf("another session used the flow: %d", status)
+	}
+}
+
+func TestInviteAccountsCannotElevateWithGitHub(t *testing.T) {
+	e := newEnv(t)
+	d := newDevice("laptop")
+	e.signIn(t, d, e.invite(t, ""))
+	token := e.session(t, d)
+	if status, out := e.post(t, "/v1/auth/elevation/github", token, nil); status != 409 || out["error"] != "not-a-github-account" {
+		t.Fatalf("%d %v", status, out)
 	}
 }

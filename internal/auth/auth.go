@@ -24,14 +24,16 @@ const (
 	RegisterContext  = "ostia-server/register/v1"
 	ChallengeContext = "ostia-server/auth/v1"
 
-	keySize           = 32
-	maxNameLength     = 64
-	challengeTTL      = time.Minute
-	maxChallenges     = 20000
-	maxFlows          = 2000
-	smallBody         = 4 << 10
-	providerGitHub    = "github"
-	providerIDPurpose = "provider-id"
+	keySize                = 32
+	maxNameLength          = 64
+	challengeTTL           = time.Minute
+	maxChallenges          = 100000
+	maxChallengesPerDevice = 5
+	maxFlowsPerIP          = 5
+	maxFlows               = 2000
+	smallBody              = 4 << 10
+	providerGitHub         = "github"
+	providerIDPurpose      = "provider-id"
 )
 
 type Hooks struct {
@@ -40,9 +42,10 @@ type Hooks struct {
 }
 
 type Principal struct {
-	DeviceID  string
-	AccountID string
-	TokenHash []byte
+	DeviceID      string
+	AccountID     string
+	TokenHash     []byte
+	ElevatedUntil int64
 }
 
 type Service struct {
@@ -55,10 +58,11 @@ type Service struct {
 	Guard  *httpx.Guard
 	Hooks  Hooks
 
-	mu          sync.Mutex
-	challenges  map[string]challenge
-	flows       map[string]*flow
-	deviceLimit *limit.Limiter
+	mu           sync.Mutex
+	challenges   map[string]challenge
+	challengesOf map[string][]string
+	flows        map[string]*flow
+	deviceLimit  *limit.Limiter
 }
 
 type challenge struct {
@@ -71,6 +75,7 @@ func (s *Service) init() {
 	defer s.mu.Unlock()
 	if s.challenges == nil {
 		s.challenges = map[string]challenge{}
+		s.challengesOf = map[string][]string{}
 		s.flows = map[string]*flow{}
 		s.deviceLimit = limit.New(limit.Rule{Every: 50 * time.Millisecond, Burst: 100}, s.Now)
 	}
@@ -92,6 +97,7 @@ func (s *Service) Mount(mux *httpx.Mux) {
 	mux.Handle("POST /v1/devices/invite", s.Authed(s.deviceInvite))
 	mux.Handle("DELETE /v1/devices/{id}", s.Authed(s.revokeDevice))
 	mux.Handle("DELETE /v1/account", s.Authed(s.deleteAccount))
+	s.mountElevation(mux)
 }
 
 func (s *Service) Authed(fn func(w http.ResponseWriter, r *http.Request, p Principal) error) http.Handler {
@@ -114,14 +120,15 @@ func (s *Service) Authenticate(r *http.Request) (Principal, error) {
 		return Principal{}, httpx.ErrUnauthorized
 	}
 	hash := ids.Hash(token)
-	dev, err := s.DB.SessionDevice(r.Context(), hash)
+	sess, err := s.DB.LookupSession(r.Context(), hash)
 	if err != nil {
 		return Principal{}, httpx.ErrUnauthorized
 	}
+	dev := sess.Device
 	if s.Now().UnixMilli()-dev.LastSeen > time.Minute.Milliseconds() {
 		_ = s.DB.TouchDevice(r.Context(), dev.ID)
 	}
-	return Principal{DeviceID: dev.ID, AccountID: dev.AccountID, TokenHash: hash}, nil
+	return Principal{DeviceID: dev.ID, AccountID: dev.AccountID, TokenHash: hash, ElevatedUntil: sess.ElevatedUntil}, nil
 }
 
 type registration struct {
@@ -204,22 +211,32 @@ func normalizeCode(code string) string {
 	}, code)
 }
 
-func (s *Service) newChallenge(deviceID string) (string, error) {
+func (s *Service) newChallenge(deviceID string, registered bool) (string, error) {
+	nonce := ids.Token()
+	if !registered {
+		return nonce, nil
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := s.Now()
 	if len(s.challenges) >= maxChallenges {
-		for nonce, c := range s.challenges {
-			if now.After(c.expires) {
-				delete(s.challenges, nonce)
-			}
-		}
-		if len(s.challenges) >= maxChallenges {
-			return "", httpx.Err(http.StatusServiceUnavailable, "busy")
+		return "", httpx.Err(http.StatusServiceUnavailable, "busy")
+	}
+	live := s.challengesOf[deviceID][:0]
+	for _, older := range s.challengesOf[deviceID] {
+		c, ok := s.challenges[older]
+		if ok && now.Before(c.expires) {
+			live = append(live, older)
+		} else {
+			delete(s.challenges, older)
 		}
 	}
-	nonce := ids.Token()
+	for len(live) >= maxChallengesPerDevice {
+		delete(s.challenges, live[0])
+		live = live[1:]
+	}
 	s.challenges[nonce] = challenge{deviceID: deviceID, expires: now.Add(challengeTTL)}
+	s.challengesOf[deviceID] = append(live, nonce)
 	return nonce, nil
 }
 
@@ -231,6 +248,35 @@ func (s *Service) takeChallenge(nonce, deviceID string) bool {
 	return ok && c.deviceID == deviceID && !s.Now().After(c.expires)
 }
 
+func (s *Service) SweepChallenges() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := s.Now()
+	for nonce, c := range s.challenges {
+		if now.After(c.expires) {
+			delete(s.challenges, nonce)
+		}
+	}
+	for deviceID, nonces := range s.challengesOf {
+		live := nonces[:0]
+		for _, nonce := range nonces {
+			if _, ok := s.challenges[nonce]; ok {
+				live = append(live, nonce)
+			}
+		}
+		if len(live) == 0 {
+			delete(s.challengesOf, deviceID)
+		} else {
+			s.challengesOf[deviceID] = live
+		}
+	}
+	for id, f := range s.flows {
+		if now.After(f.expires) {
+			delete(s.flows, id)
+		}
+	}
+}
+
 func (s *Service) challenge(w http.ResponseWriter, r *http.Request) error {
 	var in struct {
 		DeviceID string `json:"deviceId"`
@@ -238,7 +284,9 @@ func (s *Service) challenge(w http.ResponseWriter, r *http.Request) error {
 	if err := httpx.ReadJSON(w, r, &in, smallBody); err != nil {
 		return err
 	}
-	nonce, err := s.newChallenge(in.DeviceID)
+	dev, err := s.DB.Device(r.Context(), in.DeviceID)
+	registered := err == nil && dev.RevokedAt == 0
+	nonce, err := s.newChallenge(in.DeviceID, registered)
 	if err != nil {
 		return err
 	}
@@ -318,6 +366,11 @@ func (s *Service) deviceInvite(w http.ResponseWriter, r *http.Request, p Princip
 
 func (s *Service) revokeDevice(w http.ResponseWriter, r *http.Request, p Principal) error {
 	id := r.PathValue("id")
+	if id != p.DeviceID {
+		if err := s.NeedElevation(p); err != nil {
+			return err
+		}
+	}
 	if _, err := s.DB.RevokeDevice(r.Context(), p.AccountID, id); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			return httpx.ErrNotFound
@@ -332,6 +385,9 @@ func (s *Service) revokeDevice(w http.ResponseWriter, r *http.Request, p Princip
 }
 
 func (s *Service) deleteAccount(w http.ResponseWriter, r *http.Request, p Principal) error {
+	if err := s.NeedElevation(p); err != nil {
+		return err
+	}
 	return s.DeleteAccount(r.Context(), p.AccountID, w)
 }
 

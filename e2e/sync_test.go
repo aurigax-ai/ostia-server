@@ -231,7 +231,7 @@ func TestRemovingADeviceRotatesTheKeyForTheRest(t *testing.T) {
 	}
 	oldKey := bytes.Clone(f.a.Key)
 
-	f.a.RemoveDeviceAndRotate(t, b.API.ID.DeviceID, "correct horse", "")
+	f.a.RemoveDeviceAndRotate(t, c.API, b.API.ID.DeviceID, "correct horse", "")
 	if bytes.Equal(oldKey, f.a.Key) {
 		t.Fatal("the profile key was not rotated")
 	}
@@ -274,9 +274,11 @@ func TestRemovingADeviceRotatesTheKeyForTheRest(t *testing.T) {
 
 func TestRotationIsAtomicAndChecksTheVersion(t *testing.T) {
 	f := newSyncFixture(t, "")
+	b := f.addDevice(t, "second laptop")
 	if _, err := f.a.Sync(t, settings("theme", "dark")); err != nil {
 		t.Fatal(err)
 	}
+	f.a.API.ElevateByApproval(t, b.API)
 	before := f.a.API.Must(t, http.StatusOK, "GET", "/v1/sync/wraps/passphrase", nil).Map(t)["blob"]
 	res := f.a.API.Do(t, "POST", "/v1/sync/rotate", map[string]any{
 		"ifMatch":  99,
@@ -339,6 +341,7 @@ func TestBlobsAreWriteOnceAndQuotaLimited(t *testing.T) {
 
 func TestGarbageCollectionKeepsOnlyReferencedBlobs(t *testing.T) {
 	f := newSyncFixture(t, "[sync]\ngc_grace = \"0s\"\n")
+	second := f.addDevice(t, "second laptop")
 	for _, theme := range []string{"dark", "light", "solarized"} {
 		if _, err := f.a.Sync(t, settings("theme", theme)); err != nil {
 			t.Fatal(err)
@@ -348,7 +351,7 @@ func TestGarbageCollectionKeepsOnlyReferencedBlobs(t *testing.T) {
 	if usage["blobs"].(float64) != 3 {
 		t.Fatalf("usage before gc: %v", usage)
 	}
-	if deleted := f.a.CollectGarbage(t); deleted != 2 {
+	if deleted := f.a.CollectGarbage(t, second.API); deleted != 2 {
 		t.Fatalf("deleted %d, want 2", deleted)
 	}
 	if got, err := f.a.Pull(t); err != nil || !testkit.Equal(got, settings("theme", "solarized")) {
@@ -422,4 +425,34 @@ func TestSyncModuleCanBeSwitchedOff(t *testing.T) {
 	if res := owner.Do(t, "GET", "/v1/sync/manifest", nil); res.Status != http.StatusNotFound && res.Status != http.StatusMethodNotAllowed {
 		t.Fatalf("sync route exists with the module off: %s", res)
 	}
+}
+
+func TestDestructiveSyncActionsNeedAnotherDevicesApproval(t *testing.T) {
+	f := newSyncFixture(t, "")
+	api := f.a.API
+	if _, err := f.a.Sync(t, settings("theme", "dark")); err != nil {
+		t.Fatal(err)
+	}
+	refused := func(what, method, path string, body any) {
+		t.Helper()
+		res := api.Do(t, method, path, body)
+		if res.Status != http.StatusForbidden || res.Map(t)["error"] != "elevation-required" {
+			t.Errorf("%s was not refused: %s", what, res)
+		}
+	}
+	wrap := map[string]string{"blob": "AAAA"}
+	refused("deleting a wrap", "DELETE", "/v1/sync/wraps/recovery", nil)
+	refused("replacing the passphrase wrap", "PUT", "/v1/sync/wraps/passphrase", wrap)
+	refused("replacing the recovery wrap", "PUT", "/v1/sync/wraps/recovery", wrap)
+	refused("garbage collection", "POST", "/v1/sync/gc", map[string]any{"keep": []string{}})
+	refused("rotation", "POST", "/v1/sync/rotate", map[string]any{"ifMatch": 1, "manifest": "AAAA"})
+	api.Must(t, http.StatusNoContent, "PUT", "/v1/sync/wraps/device:"+api.ID.DeviceID, wrap)
+
+	other := f.addDevice(t, "second laptop")
+	if res := other.API.Do(t, "DELETE", "/v1/sync/wraps/recovery", nil); res.Status != http.StatusForbidden {
+		t.Fatalf("the approver is not elevated by approving: %s", res)
+	}
+	api.ElevateByApproval(t, other.API)
+	api.Must(t, http.StatusNoContent, "DELETE", "/v1/sync/wraps/recovery", nil)
+	api.Must(t, http.StatusNoContent, "PUT", "/v1/sync/wraps/passphrase", wrap)
 }

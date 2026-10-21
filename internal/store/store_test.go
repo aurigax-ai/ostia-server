@@ -2,6 +2,7 @@ package store
 
 import (
 	"errors"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -355,20 +356,127 @@ func TestDeleteAccountCascades(t *testing.T) {
 	}
 }
 
-func TestPushHandleLimit(t *testing.T) {
-	d, _ := open(t)
-	h := PushHandle{Handle: "h1", Platform: "fcm", TokenSealed: []byte("t")}
-	if err := d.AddPushHandle(t.Context(), h, 1); err != nil {
+func TestPushTicketsAreSingleUseExpiringAndBoundToAnAccount(t *testing.T) {
+	d, c := open(t)
+	a, _ := register(t, d, "github", "h")
+	ticket := ids.Hash("ticket-1")
+	if _, err := d.CreatePushTicket(t.Context(), ticket, a.ID, time.Minute); err != nil {
 		t.Fatal(err)
 	}
-	h.Handle = "h2"
-	if err := d.AddPushHandle(t.Context(), h, 1); !errors.Is(err, ErrLimit) {
-		t.Fatalf("limit: %v", err)
+	h := PushHandle{Handle: "handle-1", Platform: "fcm", TokenSealed: []byte("t")}
+	got, err := d.RegisterPushHandle(t.Context(), ticket, h, 5, 100)
+	if err != nil || got.AccountID != a.ID {
+		t.Fatalf("register: %+v %v", got, err)
 	}
-	if err := d.DeletePushHandle(t.Context(), "h1"); err != nil {
+	if _, err := d.RegisterPushHandle(t.Context(), ticket, PushHandle{Handle: "handle-2", Platform: "fcm", TokenSealed: []byte("t")}, 5, 100); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("a ticket worked twice: %v", err)
+	}
+	late := ids.Hash("ticket-2")
+	_, _ = d.CreatePushTicket(t.Context(), late, a.ID, time.Minute)
+	c.t = c.t.Add(2 * time.Minute)
+	if _, err := d.RegisterPushHandle(t.Context(), late, PushHandle{Handle: "handle-3", Platform: "fcm", TokenSealed: []byte("t")}, 5, 100); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("an expired ticket worked: %v", err)
+	}
+	if _, err := d.RegisterPushHandle(t.Context(), ids.Hash("never issued"), PushHandle{Handle: "handle-4", Platform: "fcm", TokenSealed: []byte("t")}, 5, 100); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("an unknown ticket worked: %v", err)
+	}
+}
+
+func TestPushHandleLimitsAndCascade(t *testing.T) {
+	d, _ := open(t)
+	a, _ := register(t, d, "github", "h")
+	b, _ := register(t, d, "github", "other")
+	reg := func(account Account, name string, perAccount, total int) error {
+		ticket := ids.Hash("t-" + name)
+		if _, err := d.CreatePushTicket(t.Context(), ticket, account.ID, time.Minute); err != nil {
+			t.Fatal(err)
+		}
+		_, err := d.RegisterPushHandle(t.Context(), ticket, PushHandle{Handle: name, Platform: "fcm", TokenSealed: []byte("t")}, perAccount, total)
+		return err
+	}
+	if err := reg(a, "h1", 1, 3); err != nil {
+		t.Fatal(err)
+	}
+	if err := reg(a, "h2", 1, 3); !errors.Is(err, ErrLimit) {
+		t.Fatalf("per-account cap: %v", err)
+	}
+	if err := reg(b, "h3", 1, 2); err != nil {
+		t.Fatal(err)
+	}
+	if err := reg(b, "h4", 5, 2); !errors.Is(err, ErrLimit) {
+		t.Fatalf("total cap: %v", err)
+	}
+	if err := d.DeleteAccount(t.Context(), a.ID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := d.PushHandle(t.Context(), "h1"); !errors.Is(err, ErrNotFound) {
-		t.Fatal("handle not deleted")
+		t.Fatal("handles must go with their account")
+	}
+}
+
+func TestOutstandingPushTicketsAreCapped(t *testing.T) {
+	d, _ := open(t)
+	a, _ := register(t, d, "github", "h")
+	for i := range maxOutstandingTickets {
+		if _, err := d.CreatePushTicket(t.Context(), ids.Hash(fmt.Sprint("t", i)), a.ID, time.Minute); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := d.CreatePushTicket(t.Context(), ids.Hash("one more"), a.ID, time.Minute); !errors.Is(err, ErrLimit) {
+		t.Fatalf("%v", err)
+	}
+}
+
+func TestElevationLivesOnTheSessionAndApprovalNeedsAnotherDevice(t *testing.T) {
+	d, c := open(t)
+	a, first := register(t, d, "github", "h")
+	second, _ := d.AddDevice(t.Context(), a.ID, newDevice("phone"), 10)
+	token := ids.Hash("tok-1")
+	_, _ = d.CreateSession(t.Context(), token, first.ID, time.Hour)
+	sess, err := d.LookupSession(t.Context(), token)
+	if err != nil || sess.ElevatedUntil != 0 {
+		t.Fatalf("fresh session: %+v %v", sess, err)
+	}
+	approval, err := d.CreateApproval(t.Context(), a.ID, first.ID, token, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pending, _ := d.PendingApprovals(t.Context(), a.ID, first.ID); len(pending) != 0 {
+		t.Fatal("the requester must not see its own request as something to approve")
+	}
+	pending, _ := d.PendingApprovals(t.Context(), a.ID, second.ID)
+	if len(pending) != 1 || pending[0].RequesterName != "laptop" {
+		t.Fatalf("pending: %+v", pending)
+	}
+	until := c.t.Add(5 * time.Minute).UnixMilli()
+	if err := d.Approve(t.Context(), approval.ID, a.ID, first.ID, until); !errors.Is(err, ErrConflict) {
+		t.Fatalf("self approval: %v", err)
+	}
+	other, _ := register(t, d, "github", "stranger")
+	if err := d.Approve(t.Context(), approval.ID, other.ID, second.ID, until); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("approval across accounts: %v", err)
+	}
+	if err := d.Approve(t.Context(), approval.ID, a.ID, second.ID, until); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.Approve(t.Context(), approval.ID, a.ID, second.ID, until); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("approving twice: %v", err)
+	}
+	sess, _ = d.LookupSession(t.Context(), token)
+	if sess.ElevatedUntil != until {
+		t.Fatalf("elevation not applied: %d", sess.ElevatedUntil)
+	}
+	got, err := d.ApprovalOf(t.Context(), approval.ID, token)
+	if err != nil || got.ApprovedAt == 0 {
+		t.Fatalf("requester view: %+v %v", got, err)
+	}
+	if _, err := d.ApprovalOf(t.Context(), approval.ID, ids.Hash("other session")); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("another session read the approval: %v", err)
+	}
+
+	late, _ := d.CreateApproval(t.Context(), a.ID, first.ID, token, time.Minute)
+	c.t = c.t.Add(2 * time.Minute)
+	if err := d.Approve(t.Context(), late.ID, a.ID, second.ID, until); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expired approval: %v", err)
 	}
 }

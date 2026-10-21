@@ -24,6 +24,7 @@ type Config struct {
 	HTTP           string
 	ForwardAddr    string
 	ClientIPHeader string
+	TrustedProxies []string
 	Modules        string
 }
 
@@ -77,6 +78,13 @@ func (c Config) TOML(dataDir string) string {
 	}
 	if c.ClientIPHeader != "" {
 		listen += fmt.Sprintf("client_ip_header = %q\n", c.ClientIPHeader)
+	}
+	if len(c.TrustedProxies) > 0 {
+		quoted := make([]string, len(c.TrustedProxies))
+		for i, p := range c.TrustedProxies {
+			quoted[i] = fmt.Sprintf("%q", p)
+		}
+		listen += "trusted_proxies = [" + strings.Join(quoted, ", ") + "]\n"
 	}
 	tlsConfig := fmt.Sprintf("mode = \"files\"\n[[tls.certs]]\ncert = %q\nkey = %q\n", c.CertFile, c.KeyFile)
 	if c.ForwardAddr != "" {

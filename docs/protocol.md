@@ -70,16 +70,37 @@ DELETE /v1/auth/session                          204
 ostia-server/auth/v1\n<deviceId>\n<nonce>
 ```
 
-A nonce is single use and lives 60 seconds. `challenge` answers the same way for unknown devices. The token is valid for `auth.session_ttl` (default one hour). Keep the token and the private keys in the main process only.
+A nonce is single use and lives 60 seconds. A device holds at most five open nonces. `challenge` answers the same way for unknown devices, but keeps nothing for them. The token is valid for `auth.session_ttl` (default one hour). Keep the token and the private keys in the main process only.
+
+**Why a bearer token and not a signature on every request.** All traffic is TLS to a known host, so the transport already authenticates the server and hides the token. A per-request signature would add a signed body-hash format, a replay window and clock handling, and it does not fit the WebSocket upgrade or streaming uploads, while protecting against little: the signing key lives in the same process as the token. What matters instead is how little a stolen token can do. It lives one hour, the server stores only its hash, and the destructive actions below need an elevated session that a token alone cannot obtain.
 
 ### Devices and accounts
 
 ```
 GET    /v1/devices               {devices: [{id, name, signPub, boxPub, createdAt, lastSeen, current?}]}
 POST   /v1/devices/invite        201 {code, expiresAt}      one-time code for a new device of this account, valid 10 minutes by default
-DELETE /v1/devices/{id}          204   revokes sessions, the relay label and the device's key wrap; open relay streams close
-DELETE /v1/account               204   removes every row and blob and closes the relay listener
+DELETE /v1/devices/{id}          204   revokes sessions, the relay label and the device's key wrap; open relay streams close (another device: elevated session)
+DELETE /v1/account               204   removes every row and blob, push handles included, and closes the relay listener (elevated session)
 ```
+
+### Elevated sessions
+
+A stolen bearer token must not be able to destroy an account. These actions need a session that was elevated within the last `auth.elevation_ttl` (five minutes), otherwise they answer `403 elevation-required`: revoking another device, deleting the account, deleting a sync wrap, replacing the passphrase or recovery wrap, `POST /v1/sync/gc` and `POST /v1/sync/rotate`. A session is elevated one of two ways, per session and never for the approving device:
+
+```
+GET  /v1/auth/elevation                          {elevatedUntil}              0 when not elevated
+
+POST /v1/auth/elevation/approval                 201 {approvalId, expiresAt}  409 no-second-device with one device
+GET  /v1/auth/approvals                          {approvals: [{id, deviceId, deviceName, createdAt, expiresAt}]}   requests from the account's other devices
+POST /v1/auth/approvals/{id}/approve             204   403 for the requesting device itself
+GET  /v1/auth/approvals/{id}                     {status: "pending"|"approved", elevatedUntil?}   the requester polls
+DELETE /v1/auth/approvals/{id}                   204   cancel or deny
+
+POST /v1/auth/elevation/github                   like /v1/auth/github/device, for a GitHub account; 409 not-a-github-account
+POST /v1/auth/elevation/github/poll {flowId}     200 {elevatedUntil} | 202 pending | 403 wrong-account
+```
+
+The approving device must show the person who is asking (`deviceName`) and approve only on their click.
 
 ## Relay
 
@@ -94,16 +115,18 @@ The label is a random 128-bit value (26 characters, `a-z2-7`), stable per device
 ### Desktop side
 
 1. `GET /v1/relay/listen` (WebSocket, `Authorization` header). A newer connection for the same device replaces the older one.
-2. The server sends JSON text frames: `{"t": "ping"}` every `relay.ping_interval` and `{"t": "incoming", "stream": "<id>", "peer": "ip:port", "family": 4|6}` per phone connection. The desktop answers pings with `{"t": "pong"}`. A listener that stays silent for 2.5 intervals is dropped.
+2. The listener lives as long as the session that opened it: when the session expires, is ended with `DELETE /v1/auth/session`, or the device is revoked, the server closes it. Open a new session and connect again before the old one expires; a newer listener replaces the older at once. The server sends JSON text frames: `{"t": "ping"}` every `relay.ping_interval` and `{"t": "incoming", "stream": "<id>", "peer": "ip:port", "family": 4|6}` per phone connection. The desktop answers pings with `{"t": "pong"}`. A listener that stays silent for 2.5 intervals is dropped.
 3. For each `incoming` the desktop opens `GET /v1/relay/accept/<stream>` (WebSocket, same bearer) within `relay.accept_timeout` (10 seconds). A stream id works once and only for the device it was offered to.
 4. Binary frames on the accept socket carry the phone's TCP stream in both directions. The first bytes the desktop receives are the phone's TLS ClientHello, then the rest of the stream.
 
 The Ostia desktop writes `PROXY TCP4|TCP6 <peer ip> 127.0.0.1 <port> <port>\r\n` followed by those bytes into its loopback gateway listener, so pairing limits and the audit log see the phone's address.
 
+**Confirming a stream.** Anyone who knows a label can open a connection to it, so a stream starts unconfirmed. The desktop confirms it with `{"t": "confirm", "stream": "<id>"}` on the control socket once the gateway has accepted the phone: a hello that carried a valid device token, or a pairing request that carried a live pairing code. An unconfirmed stream is closed after `relay.unconfirmed_timeout` (15 seconds) or after 256 KiB, counts against `relay.max_unconfirmed_per_label` instead of the confirmed limit, and is not billed to the account's byte quota. A confirmed stream counts against `relay.max_streams_per_label` and the quota.
+
 ### Phone side and limits
 
 - The server reads only the SNI of the ClientHello. A known label with no desktop listening is reset at once. An unknown label, a non-TLS first message, or a stalled handshake is held for `relay.hello_timeout` (5 seconds) and closed without a reply, so scanning learns nothing.
-- Per label: `relay.max_streams_per_label` concurrent streams and `relay.connections_per_minute` new connections. Per source address: `relay.connections_per_minute_per_ip`. Per account: `relay.monthly_bytes_per_account`, counted in memory and flushed every 10 seconds. A stream with no bytes for `relay.idle_timeout` is closed.
+- Per label: `relay.max_streams_per_label` confirmed streams, `relay.max_unconfirmed_per_label` unconfirmed ones, and `relay.connections_per_minute` new connections. Per source address: `relay.connections_per_minute_per_ip`. Per account: `relay.monthly_bytes_per_account`, counted in memory and flushed every 10 seconds. A stream with no bytes for `relay.idle_timeout` is closed.
 - There is no presence endpoint: nothing tells a third party whether a desktop is online.
 
 ## Publish
@@ -173,9 +196,10 @@ Only the relay uses WebSocket. Control frames are JSON text; relayed bytes are b
 | `/v1/relay/listen` | server to desktop | `{"t": "ping"}` |
 | `/v1/relay/listen` | server to desktop | `{"t": "incoming", "stream": string, "peer": "ip:port", "family": 4 or 6}` |
 | `/v1/relay/listen` | desktop to server | `{"t": "pong"}` |
+| `/v1/relay/listen` | desktop to server | `{"t": "confirm", "stream": string}` |
 | `/v1/relay/accept/{stream}` | both | binary frames: the phone's TCP stream |
 
-Close codes: 1008 when a newer listener replaced this one, the device was removed, or the pongs stopped; 1001 when the server shuts down.
+Close codes: 1008 when a newer listener replaced this one, the device was removed, the session ended, or the pongs stopped; 1001 when the server shuts down.
 
 ## Sync
 
@@ -251,18 +275,20 @@ GET  /v1/sync/usage                   {blobs, bytes, quotaBytes}
 
 ## Push
 
-Push is content free. The phone registers its platform token and receives an opaque handle; the desktop pings the handle.
+Push is content free and bound to an account. A signed-in desktop gets a single-use ticket and hands it to its phone over the gateway socket; the phone registers its platform token with the ticket and gets an opaque handle; only the desktop's session can ping it.
 
 ```
-POST /v1/push/register  {platform: "fcm" | "apns", token}   201 {handle}
-POST /v1/push/{handle}  (empty body)                        204
-DELETE /v1/push/{handle}                                    204
+POST /v1/push/tickets   (session)                          201 {ticket, expiresAt}   valid push.ticket_ttl, at most 10 open
+POST /v1/push/register  {platform: "fcm" | "apns", token, ticket}   201 {handle}     no session; 403 invalid-ticket
+POST /v1/push/{handle}  (session, empty body)              204
+DELETE /v1/push/{handle} (session)                         204
 ```
 
+- The handle belongs to the ticket's account (`push.max_handles_per_account`); another account's session gets `410` for it. Deleting the account deletes its handles.
 - A ping has no body (`400` otherwise). At most one per 30 seconds and 60 per hour per handle (`429`, `Retry-After`).
 - Android receives a high-priority data-only message `{"v": "1"}`. iOS receives an alert with the fixed localisation key `DESKTOP_NEEDS_YOU` and `mutable-content: 1`. The app wakes, connects to its desktop and builds its own alert.
-- `410 gone`: the handle is unknown, deleted, or its token was rejected by the platform (the handle is then deleted).
-- The server holds platform tokens, sealed with a key derived from `server.key`, and talks to FCM and APNs with the operator's own credentials. The handle is the credential; it is not tied to an account.
+- `410 gone`: the handle is unknown, deleted, someone else's, or its token was rejected by the platform (the handle is then deleted).
+- The server holds platform tokens, sealed with a key derived from `server.key`, and talks to FCM and APNs with the operator's own credentials.
 
 ## Error codes
 
@@ -270,9 +296,9 @@ DELETE /v1/push/{handle}                                    204
 |---|---|
 | 400 | `bad-request`, `bad-proof`, `bad-slot`, `size-mismatch` |
 | 401 | `unauthorized` |
-| 403 | `forbidden`, `invalid-invite`, `denied`, `public-disabled`, `publish-disabled` |
+| 403 | `forbidden`, `invalid-invite`, `denied`, `wrong-account`, `invalid-ticket`, `elevation-required`, `public-disabled`, `publish-disabled` |
 | 404 | `not-found`, `no-manifest`, `unknown-flow`, `unknown-device` |
-| 409 | `conflict`, `blob-exists`, `already-uploaded`, `device-limit` |
+| 409 | `conflict`, `blob-exists`, `already-uploaded`, `device-limit`, `no-second-device`, `not-a-github-account` |
 | 410 | `gone`, `expired` |
 | 412 | `version-mismatch` |
 | 413 | `too-large` |

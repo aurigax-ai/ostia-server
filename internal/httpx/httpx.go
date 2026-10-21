@@ -3,10 +3,12 @@ package httpx
 import (
 	"encoding/json/v2"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"strconv"
 	"strings"
 	"sync"
@@ -101,20 +103,65 @@ func ReadJSON(w http.ResponseWriter, r *http.Request, v any, max int64) error {
 	return nil
 }
 
-func ClientIP(r *http.Request, header string) string {
-	if header != "" {
-		if v := r.Header.Get(header); v != "" {
-			first, _, _ := strings.Cut(v, ",")
-			if ip := net.ParseIP(strings.TrimSpace(first)); ip != nil {
-				return ip.String()
+type Proxies struct {
+	prefixes []netip.Prefix
+	header   string
+}
+
+func ParseProxies(entries []string, header string) (*Proxies, error) {
+	p := &Proxies{header: header}
+	for _, entry := range entries {
+		prefix, err := netip.ParsePrefix(entry)
+		if err != nil {
+			addr, addrErr := netip.ParseAddr(entry)
+			if addrErr != nil {
+				return nil, fmt.Errorf("trusted proxy %q is neither an address nor a CIDR range", entry)
 			}
+			prefix = netip.PrefixFrom(addr, addr.BitLen())
+		}
+		p.prefixes = append(p.prefixes, prefix.Masked())
+	}
+	return p, nil
+}
+
+func (p *Proxies) trusted(addr netip.Addr) bool {
+	addr = addr.Unmap()
+	for _, prefix := range p.prefixes {
+		if prefix.Contains(addr) {
+			return true
 		}
 	}
+	return false
+}
+
+func (p *Proxies) ClientIP(r *http.Request) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
-		return r.RemoteAddr
+		host = r.RemoteAddr
 	}
-	return host
+	remote, err := netip.ParseAddr(host)
+	if err != nil {
+		return host
+	}
+	if p == nil || len(p.prefixes) == 0 || p.header == "" || !p.trusted(remote) {
+		return remote.Unmap().String()
+	}
+	var hops []string
+	for _, value := range r.Header.Values(p.header) {
+		for hop := range strings.SplitSeq(value, ",") {
+			hops = append(hops, strings.TrimSpace(hop))
+		}
+	}
+	for i := len(hops) - 1; i >= 0; i-- {
+		addr, err := netip.ParseAddr(hops[i])
+		if err != nil {
+			return remote.Unmap().String()
+		}
+		if !p.trusted(addr) {
+			return addr.Unmap().String()
+		}
+	}
+	return remote.Unmap().String()
 }
 
 type Guard struct {

@@ -28,6 +28,11 @@ func (d *DB) Account(ctx context.Context, id string) (Account, error) {
 	return scanAccount(d.sql.QueryRowContext(ctx, `SELECT `+accountColumns+` FROM accounts WHERE id = ?`, id))
 }
 
+func (d *DB) ProviderIdentity(ctx context.Context, id string) (provider, idHash string, err error) {
+	err = d.sql.QueryRowContext(ctx, `SELECT provider, provider_id_hash FROM accounts WHERE id = ?`, id).Scan(&provider, &idHash)
+	return provider, idHash, notFound(err)
+}
+
 func (d *DB) Accounts(ctx context.Context) ([]Account, error) {
 	rows, err := d.sql.QueryContext(ctx, `SELECT `+accountColumns+` FROM accounts ORDER BY created_at`)
 	if err != nil {

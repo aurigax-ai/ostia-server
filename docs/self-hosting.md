@@ -4,7 +4,7 @@ The server is one process with one config file. Nothing here deploys anything fo
 
 ## DNS
 
-Three names, two registrable domains (the share domain must not be a parent or child of the API domain):
+Three names. The share domain must be on a different registrable domain than the API domain (the server checks with the public suffix list and refuses to start otherwise), so a page on a share can never act as part of the API's site:
 
 | Record | Points at |
 |---|---|
@@ -35,13 +35,15 @@ If Caddy, nginx or a load balancer already holds the certificates, keep the rela
 ```toml
 [listen]
 https = ":443"
+http = "127.0.0.1:8080"
+trusted_proxies = ["127.0.0.1"]
 
 [tls]
 mode = "forward"
 forward_addr = "127.0.0.1:8443"
 ```
 
-The proxy listens on `127.0.0.1:8443`, terminates TLS for the API and share hosts, and proxies to `listen.http` (for example `127.0.0.1:8080`). Set `listen.client_ip_header` to the header the proxy fills so that rate limits see the real address. Relay hosts never reach the proxy.
+The proxy listens on `127.0.0.1:8443`, terminates TLS for the API and share hosts, and proxies to `listen.http`. The server connects to the proxy with a PROXY protocol v2 header, so the proxy sees the real client address. Configure the proxy to read it and to put the address in `X-Forwarded-For`; for example nginx `listen 8443 ssl proxy_protocol; set_real_ip_from 127.0.0.1; real_ip_header proxy_protocol;` with `proxy_set_header X-Forwarded-For $remote_addr;`, or Caddy's `proxy_protocol` listener wrapper. List the proxy under `listen.trusted_proxies`: only its connections may set the header, and the rightmost address that is not a trusted proxy is taken as the client, so a forged header cannot move or share a rate-limit bucket. A proxy that cannot read PROXY protocol needs `forward_proxy_protocol = false`, and then every client appears to come from the proxy's address on the relay path only (the API still sees the header). Relay hosts never reach the proxy.
 
 Without the relay you can drop `listen.https` entirely and run only `listen.http` behind the proxy.
 
@@ -77,7 +79,7 @@ Point `data_dir` at `/var/lib/ostia-server` (the unit's `StateDirectory`).
 
 ## Push
 
-Push is off by default. Turn it on with `modules.push = true` and give the server the credentials of the app build whose phones will register: a Firebase service account (`push.fcm.service_account_file`) for Android and an Apple token key (`push.apns.*`) for iOS. A self-hosted server therefore pushes to a phone app you built and signed with your own Firebase project and Apple team; the publisher's hosted instance uses the publisher's credentials. The server sees a handle, a timestamp and a platform, nothing else.
+Push is off by default. Turn it on with `modules.push = true` and give the server the credentials of the app build whose phones will register. A phone registers only with a ticket that a signed-in desktop of the same account requested, and the desktop's session is needed to ping: a Firebase service account (`push.fcm.service_account_file`) for Android and an Apple token key (`push.apns.*`) for iOS. A self-hosted server therefore pushes to a phone app you built and signed with your own Firebase project and Apple team; the publisher's hosted instance uses the publisher's credentials. The server sees a handle, a timestamp and a platform, nothing else.
 
 ## Backups
 
@@ -104,3 +106,7 @@ No access logs, no addresses or user agents stored, view counts only. Addresses 
 ## Upgrading
 
 Replace the binary and restart. The database migrates itself and refuses to open a schema newer than the binary understands.
+
+## Accounts with one device
+
+Revoking another device, deleting the account, deleting or replacing sync key wraps, garbage collection and key rotation need an elevated session: another device of the account approves, or the owner signs in with GitHub again. An account with a single device that did not sign in with GitHub cannot elevate. The operator can still run `admin delete-account`; the other actions wait until a second device is added.
