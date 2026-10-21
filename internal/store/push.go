@@ -45,8 +45,15 @@ func (d *DB) RegisterPushHandle(ctx context.Context, ticketHash []byte, h PushHa
 		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FILTER (WHERE account_id = ?), COUNT(*) FROM push_handles`, h.AccountID).Scan(&mine, &total); err != nil {
 			return err
 		}
-		if (maxPerAccount > 0 && mine >= maxPerAccount) || (maxTotal > 0 && total >= maxTotal) {
+		if maxTotal > 0 && total >= maxTotal {
 			return ErrLimit
+		}
+		for maxPerAccount > 0 && mine >= maxPerAccount {
+			if _, err := tx.ExecContext(ctx, `
+				DELETE FROM push_handles WHERE handle = (SELECT handle FROM push_handles WHERE account_id = ? ORDER BY created_at, rowid LIMIT 1)`, h.AccountID); err != nil {
+				return err
+			}
+			mine--
 		}
 		_, err = tx.ExecContext(ctx, `INSERT INTO push_handles (handle, account_id, platform, token_sealed, created_at) VALUES (?, ?, ?, ?, ?)`,
 			h.Handle, h.AccountID, h.Platform, h.TokenSealed, d.ms())

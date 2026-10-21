@@ -24,6 +24,7 @@ import (
 const (
 	RegisterContext  = "ostia-server/register/v1"
 	ChallengeContext = "ostia-server/auth/v1"
+	SeenContext      = "ostia-server/seen/v1"
 
 	keySize                = 32
 	maxNameLength          = 64
@@ -406,10 +407,27 @@ func (s *Service) deviceInvite(w http.ResponseWriter, r *http.Request, p Princip
 	return nil
 }
 
+func SeenMessage(viewerID, targetID string) []byte {
+	return []byte(SeenContext + "\n" + viewerID + "\n" + targetID)
+}
+
 func (s *Service) markSeen(w http.ResponseWriter, r *http.Request, p Principal) error {
+	var in struct {
+		Sig httpx.B64 `json:"sig"`
+	}
+	if err := httpx.ReadJSON(w, r, &in, smallBody); err != nil {
+		return err
+	}
 	target, err := s.DB.Device(r.Context(), r.PathValue("id"))
 	if err != nil || target.AccountID != p.AccountID {
 		return httpx.ErrNotFound
+	}
+	viewer, err := s.DB.Device(r.Context(), p.DeviceID)
+	if err != nil {
+		return err
+	}
+	if !ed25519.Verify(ed25519.PublicKey(viewer.SignPub), SeenMessage(viewer.ID, target.ID), in.Sig) {
+		return httpx.Errf(http.StatusForbidden, "bad-signature", "acknowledging a device needs a signature from this device's key, which a session token alone does not give")
 	}
 	if err := s.DB.MarkSeen(r.Context(), p.DeviceID, target.ID); err != nil {
 		return err
@@ -419,26 +437,23 @@ func (s *Service) markSeen(w http.ResponseWriter, r *http.Request, p Principal) 
 }
 
 func (s *Service) needsElevationToRevoke(r *http.Request, p Principal, id string) (bool, error) {
-	min := s.Cfg.ApproverMinAge.Std()
-	if min <= 0 {
-		return id != p.DeviceID, nil
-	}
 	self, err := s.DB.Device(r.Context(), p.DeviceID)
 	if err != nil {
 		return false, err
 	}
-	established := s.Now().Sub(time.UnixMilli(self.CreatedAt)) >= min
 	if id == p.DeviceID {
-		if !established {
-			return false, nil
-		}
-		others, err := s.DB.EstablishedDevices(r.Context(), p.AccountID, p.DeviceID, min)
-		return others == 0, err
+		older, err := s.DB.OlderActiveDevices(r.Context(), self)
+		return older == 0, err
+	}
+	min := s.Cfg.ApproverMinAge.Std()
+	if min <= 0 {
+		return true, nil
 	}
 	target, err := s.DB.Device(r.Context(), id)
 	if err != nil || target.AccountID != p.AccountID {
 		return true, nil
 	}
+	established := s.Now().Sub(time.UnixMilli(self.CreatedAt)) >= min
 	probation := s.Now().Sub(time.UnixMilli(target.CreatedAt)) < min
 	return !(established && probation), nil
 }

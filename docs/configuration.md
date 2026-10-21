@@ -50,7 +50,7 @@
 | `device_invite_ttl` | `10m` | Lifetime of a code a signed-in device mints for a new device. |
 | `elevation_ttl` | `5m` | How long a session stays elevated after another device approved it or a fresh GitHub sign-in succeeded. |
 | `approval_ttl` | `5m` | How long a request for another device's approval stays open. |
-| `approver_min_age` | `24h` | How long a device must have belonged to the account before its approvals count. `0` turns the wait off (tests only); otherwise it must be at least `session_ttl`. |
+| `approver_min_age` | `24h` | How long a device must have belonged to the account before its approvals count. `0` turns the wait off and removes the protection that stops a stolen session from approving itself with a device it just added; use it for tests only. Otherwise it must be at least `session_ttl`. |
 
 ## `[relay]`
 

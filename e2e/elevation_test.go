@@ -261,11 +261,38 @@ func TestDesktopListenerIsToldWhenAnotherDeviceJoins(t *testing.T) {
 	if flagged != joiner.ID.DeviceID {
 		t.Fatalf("the existing device must see the new one flagged: %+v", list.Devices)
 	}
-	f.api.Must(t, http.StatusNoContent, "POST", "/v1/devices/"+flagged+"/seen", nil)
+	forger := testkit.NewAPI(f.env.net, testkit.NewIdentity("holder of a stolen token"))
+	forger.ID = &testkit.Identity{Name: "forger", Sign: testkit.NewIdentity("x").Sign, DeviceID: f.api.ID.DeviceID, AccountID: f.api.ID.AccountID}
+	forger.Token = f.api.Token
+	forger.MarkSeenExpecting(t, flagged, http.StatusForbidden)
+	f.api.MarkSeen(t, flagged)
 	f.api.Must(t, http.StatusOK, "GET", "/v1/devices", nil).JSON(t, &list)
 	for _, d := range list.Devices {
 		if d.New {
 			t.Fatal("still flagged after acknowledging")
 		}
 	}
+}
+
+func TestAFreshSingleDeviceCannotBeRevokedByItsOwnToken(t *testing.T) {
+	e := newEnv(t, "[auth]\napprover_min_age = \"24h\"\n")
+	owner := e.user(t, "laptop")
+	requireElevation(t, owner, "revoking the only device", "DELETE", "/v1/devices/"+owner.ID.DeviceID, nil)
+	owner.Must(t, http.StatusNoContent, "DELETE", "/v1/auth/session", nil)
+}
+
+func TestDeviceAddedIsReplayedToEveryNewListenerUntilAcknowledged(t *testing.T) {
+	f := newRelayFixture(t, "")
+	code := f.api.Must(t, http.StatusCreated, "POST", "/v1/devices/invite", nil).Map(t)["code"].(string)
+	testkit.NewAPI(f.env.net, testkit.NewIdentity("quiet phone")).Onboard(t, code)
+	waitUntil(t, "the live message arrives", func() bool { return len(f.desktop.AddedDevices()) == 1 })
+	f.desktop.Stop()
+
+	again := &testkit.RelayDesktop{API: f.api, Gateway: f.gateway}
+	again.Prepare(t)
+	again.Listen(t)
+	waitUntil(t, "a reconnecting desktop is told about the unacknowledged device", func() bool {
+		added := again.AddedDevices()
+		return len(added) == 1 && added[0] == "quiet phone"
+	})
 }

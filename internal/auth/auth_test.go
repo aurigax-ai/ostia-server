@@ -880,22 +880,40 @@ func TestRevokingRulesDuringProbation(t *testing.T) {
 	}
 }
 
-func TestAnEstablishedDeviceMayRevokeItselfWhenAnotherEstablishedOneRemains(t *testing.T) {
-	e := newEnv(t)
-	e.svc.Cfg.ApproverMinAge = config.Duration(24 * time.Hour)
-	a := newDevice("laptop")
-	e.signIn(t, a, e.invite(t, ""))
-	tokenA := e.session(t, a)
-	_, out := e.post(t, "/v1/devices/invite", tokenA, nil)
-	b := newDevice("phone")
-	e.signIn(t, b, out["code"].(string))
-	*e.clock = e.clock.Add(25 * time.Hour)
-	tokenA, tokenB := e.session(t, a), e.session(t, b)
-	if status, _ := e.call(t, "DELETE", "/v1/devices/"+a.id, tokenA, nil); status != 204 {
-		t.Fatalf("self revoke with another established device: %d", status)
+func TestADeviceMayRevokeItselfOnlyWhileAnOlderDeviceRemains(t *testing.T) {
+	for _, minAge := range []time.Duration{0, 24 * time.Hour} {
+		e := newEnv(t)
+		e.svc.Cfg.ApproverMinAge = config.Duration(minAge)
+		older, younger := newDevice("laptop"), newDevice("phone")
+		e.signIn(t, older, e.invite(t, ""))
+		tokenOlder := e.session(t, older)
+		_, out := e.post(t, "/v1/devices/invite", tokenOlder, nil)
+		*e.clock = e.clock.Add(time.Second)
+		e.signIn(t, younger, out["code"].(string))
+		*e.clock = e.clock.Add(25 * time.Hour)
+		tokenOlder, tokenYounger := e.session(t, older), e.session(t, younger)
+		if status, out := e.call(t, "DELETE", "/v1/devices/"+older.id, tokenOlder, nil); status != 403 || out["error"] != "elevation-required" {
+			t.Fatalf("min age %v: the oldest device has nobody older to fall back on: %d %v", minAge, status, out)
+		}
+		if status, _ := e.call(t, "DELETE", "/v1/devices/"+younger.id, tokenYounger, nil); status != 204 {
+			t.Fatalf("min age %v: a device with an older one remaining may leave: %d", minAge, status)
+		}
 	}
-	if status, out := e.call(t, "DELETE", "/v1/devices/"+b.id, tokenB, nil); status != 403 {
-		t.Fatalf("the last established device needs elevation to revoke itself: %d %v", status, out)
+}
+
+func TestAFreshSingleDeviceCannotBeRevokedByItsToken(t *testing.T) {
+	for _, minAge := range []time.Duration{0, 24 * time.Hour} {
+		e := newEnv(t)
+		e.svc.Cfg.ApproverMinAge = config.Duration(minAge)
+		d := newDevice("laptop")
+		e.signIn(t, d, e.invite(t, ""))
+		token := e.session(t, d)
+		if status, out := e.call(t, "DELETE", "/v1/devices/"+d.id, token, nil); status != 403 || out["error"] != "elevation-required" {
+			t.Fatalf("min age %v: a stolen token removed the account's only device: %d %v", minAge, status, out)
+		}
+		if status, _ := e.call(t, "DELETE", "/v1/auth/session", token, nil); status != 204 {
+			t.Fatalf("logout stays free: %d", status)
+		}
 	}
 }
 
@@ -922,7 +940,16 @@ func TestNewDevicesAreAnnouncedAndFlaggedUntilSeen(t *testing.T) {
 	if flagged != "phone" {
 		t.Fatalf("the other device must be flagged as new: %v", list)
 	}
-	if status, _ := e.call(t, "POST", "/v1/devices/"+b.id+"/seen", tokenA, nil); status != 204 {
+	sign := func(key ed25519.PrivateKey, viewer, target string) map[string]string {
+		return map[string]string{"sig": httpx.EncodeB64(ed25519.Sign(key, SeenMessage(viewer, target)))}
+	}
+	if status, out := e.call(t, "POST", "/v1/devices/"+b.id+"/seen", tokenA, nil); status == 204 {
+		t.Fatalf("a session token alone acknowledged a device: %v", out)
+	}
+	if status, out := e.call(t, "POST", "/v1/devices/"+b.id+"/seen", tokenA, sign(b.sign, a.id, b.id)); status != 403 || out["error"] != "bad-signature" {
+		t.Fatalf("a signature from another key acknowledged a device: %d %v", status, out)
+	}
+	if status, _ := e.call(t, "POST", "/v1/devices/"+b.id+"/seen", tokenA, sign(a.sign, a.id, b.id)); status != 204 {
 		t.Fatalf("mark seen: %d", status)
 	}
 	_, list = e.call(t, "GET", "/v1/devices", tokenA, nil)
@@ -931,7 +958,7 @@ func TestNewDevicesAreAnnouncedAndFlaggedUntilSeen(t *testing.T) {
 			t.Fatalf("still flagged: %v", list)
 		}
 	}
-	if status, _ := e.call(t, "POST", "/v1/devices/"+strings.Repeat("a", 26)+"/seen", tokenA, nil); status != 404 {
+	if status, _ := e.call(t, "POST", "/v1/devices/"+strings.Repeat("a", 26)+"/seen", tokenA, sign(a.sign, a.id, strings.Repeat("a", 26))); status != 404 {
 		t.Fatalf("unknown device: %d", status)
 	}
 }

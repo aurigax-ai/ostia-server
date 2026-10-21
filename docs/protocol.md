@@ -79,14 +79,14 @@ A nonce is single use and lives 60 seconds. A device holds at most five open non
 ```
 GET    /v1/devices               {devices: [{id, name, signPub, boxPub, createdAt, lastSeen, current?, new?}]}   `new`: added after the calling device and not yet acknowledged
 POST   /v1/devices/invite        201 {code, expiresAt}      one-time code for a new device of this account, valid 10 minutes by default; an elevated session once the account has two or more devices
-POST   /v1/devices/{id}/seen     204   the person has seen this device on the calling device; clears its `new` flag
+POST   /v1/devices/{id}/seen     {sig} → 204   the person has seen this device on the calling device; clears its `new` flag. `sig` is the calling device's Ed25519 signature over `ostia-server/seen/v1\n<calling device id>\n<target device id>`: a stolen session token does not hold that key and cannot silence the warning
 DELETE /v1/devices/{id}          204   revokes sessions, the relay label and the device's key wrap; open relay streams close
 DELETE /v1/account               204   removes every row and blob, push handles included, and closes the relay listener (elevated session)
 ```
 
 ### Revoking devices
 
-Revoking another device or the account normally needs an elevated session. Exceptions, so an owner can always remove an intruder: a device that has belonged to the account for `auth.approver_min_age` may revoke a device that is still younger than that (probation) without elevation, and a device may revoke itself unless it is the last established device. `DELETE /v1/auth/session` (sign out) is always free. A client should show every device with `new: true` to the person and keep asking until they acknowledge it; a connected relay listener also receives `{"t": "device-added", "deviceId", "name", "createdAt"}` when a device joins an account that already had one.
+Revoking another device or the account normally needs an elevated session. Exceptions, so an owner can always remove an intruder: a device that has belonged to the account for `auth.approver_min_age` may revoke a device that is still younger than that (probation) without elevation, and a device may revoke itself without elevation only while an older active device remains (a token alone cannot remove an account's oldest device, even when the account is new). `DELETE /v1/auth/session` (sign out) is always free. A client should show every device with `new: true` to the person and keep asking until they acknowledge it; a relay listener receives `{"t": "device-added", "deviceId", "name", "createdAt"}` when a device joins an account that already had one, and again for every unacknowledged device each time it connects (so a listener that was replaced or offline still learns of it).
 
 ### Elevated sessions
 
@@ -290,7 +290,7 @@ POST /v1/push/{handle}  (session, empty body)              204
 DELETE /v1/push/{handle} (session)                         204
 ```
 
-- The handle belongs to the ticket's account (`push.max_handles_per_account`); another account's session gets `410` for it. Deleting the account deletes its handles.
+- The handle belongs to the ticket's account. At `push.max_handles_per_account` a new registration replaces the account's oldest handle, so handles abandoned by phones that switched desktops or were reinstalled end by themselves; another account's session gets `410` for a handle that is not its own. Deleting the account deletes its handles.
 - A ping has no body (`400` otherwise). At most one per 30 seconds and 60 per hour per handle (`429`, `Retry-After`).
 - Android receives a high-priority data-only message `{"v": "1"}`. iOS receives an alert with the fixed localisation key `DESKTOP_NEEDS_YOU` and `mutable-content: 1`. The app wakes, connects to its desktop and builds its own alert.
 - `410 gone`: the handle is unknown, deleted, someone else's, or its token was rejected by the platform (the handle is then deleted).

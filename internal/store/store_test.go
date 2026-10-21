@@ -397,8 +397,14 @@ func TestPushHandleLimitsAndCascade(t *testing.T) {
 	if err := reg(a, "h1", 1, 3); err != nil {
 		t.Fatal(err)
 	}
-	if err := reg(a, "h2", 1, 3); !errors.Is(err, ErrLimit) {
-		t.Fatalf("per-account cap: %v", err)
+	if err := reg(a, "h2", 1, 3); err != nil {
+		t.Fatalf("at the per-account cap the oldest handle is replaced: %v", err)
+	}
+	if _, err := d.PushHandle(t.Context(), "h1"); !errors.Is(err, ErrNotFound) {
+		t.Fatal("the oldest handle should have been evicted")
+	}
+	if _, err := d.PushHandle(t.Context(), "h2"); err != nil {
+		t.Fatalf("the new handle should exist: %v", err)
 	}
 	if err := reg(b, "h3", 1, 2); err != nil {
 		t.Fatal(err)
@@ -563,10 +569,10 @@ func TestUnseenDevicesAndEstablishedCounts(t *testing.T) {
 	if got, _ := d.UnseenDevices(t.Context(), first); len(got) != 0 {
 		t.Fatalf("seen devices stay flagged: %v", got)
 	}
-	if n, _ := d.EstablishedDevices(t.Context(), a.ID, second.ID, 30*time.Minute); n != 1 {
-		t.Fatalf("established %d", n)
+	if n, _ := d.OlderActiveDevices(t.Context(), second); n != 1 {
+		t.Fatalf("older devices %d", n)
 	}
-	if n, _ := d.EstablishedDevices(t.Context(), a.ID, first.ID, 30*time.Minute); n != 0 {
-		t.Fatalf("a device younger than the age counts as established: %d", n)
+	if n, _ := d.OlderActiveDevices(t.Context(), first); n != 0 {
+		t.Fatalf("the oldest device has nothing older: %d", n)
 	}
 }

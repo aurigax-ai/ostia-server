@@ -774,7 +774,7 @@
     },
     "/v1/devices/{id}/seen": {
       "post": {
-        "summary": "Acknowledge a device the person has seen on this device",
+        "summary": "Acknowledge a device the person has seen on this device (signed with the device key)",
         "security": [
           {
             "bearer": []
@@ -783,6 +783,16 @@
         "responses": {
           "204": {
             "description": "Recorded"
+          },
+          "403": {
+            "description": "bad-signature",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           },
           "404": {
             "description": "not-found",
@@ -818,6 +828,25 @@
                 "schema": {
                   "$ref": "#/components/schemas/Error"
                 }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "sig": {
+                    "type": "string",
+                    "description": "unpadded base64url"
+                  }
+                },
+                "required": [
+                  "sig"
+                ]
               }
             }
           }

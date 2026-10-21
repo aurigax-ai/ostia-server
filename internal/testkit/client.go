@@ -224,3 +224,15 @@ func (a *API) Elevated(t testing.TB) bool {
 	t.Helper()
 	return a.Must(t, http.StatusOK, "GET", "/v1/auth/elevation", nil).Map(t)["elevatedUntil"].(float64) > 0
 }
+
+func (a *API) MarkSeen(t testing.TB, deviceID string) {
+	t.Helper()
+	sig := ed25519.Sign(a.ID.Sign, []byte("ostia-server/seen/v1\n"+a.ID.DeviceID+"\n"+deviceID))
+	a.Must(t, http.StatusNoContent, "POST", "/v1/devices/"+deviceID+"/seen", map[string]string{"sig": b64.EncodeToString(sig)})
+}
+
+func (a *API) MarkSeenExpecting(t testing.TB, deviceID string, want int) {
+	t.Helper()
+	sig := ed25519.Sign(a.ID.Sign, []byte("ostia-server/seen/v1\n"+a.ID.DeviceID+"\n"+deviceID))
+	a.Must(t, want, "POST", "/v1/devices/"+deviceID+"/seen", map[string]string{"sig": b64.EncodeToString(sig)})
+}

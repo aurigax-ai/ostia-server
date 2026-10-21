@@ -21,7 +21,7 @@ type relayFixture struct {
 	desktop *testkit.RelayDesktop
 }
 
-var generousRelayLimits = []string{"connections_per_minute = 1000\n", "connections_per_minute_per_ip = 1000\n"}
+var generousRelayLimits = []string{"connections_per_minute = 1000\n", "connections_per_minute_per_ip = 1000\n", "unconfirmed_opens_per_minute = 100000\n", "unconfirmed_opens_per_minute_per_address = 100000\n"}
 
 func withGenerousRelayLimits(extra string) string {
 	missing := ""
@@ -343,7 +343,7 @@ func TestRelayLimitsConfirmedConnectionsPerLabel(t *testing.T) {
 	f := newRelayFixture(t, "[relay]\nconnections_per_minute = 5\nconnections_per_minute_per_ip = 100\n")
 	succeeded := 0
 	for range 12 {
-		if conn, err := testkit.DialAuthed(t.Context(), f.env.net, f.desktop.Host, f.cert.Fingerprint, f.gateway.Token); err == nil {
+		if conn, ok := stillRelayed(t, f); ok {
 			succeeded++
 			_ = conn.Close()
 		}

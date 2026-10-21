@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"time"
 
 	"github.com/aurigax-ai/ostia-server/internal/ids"
 )
@@ -157,9 +156,11 @@ func (d *DB) MarkSeen(ctx context.Context, viewerDeviceID, deviceID string) erro
 	return err
 }
 
-func (d *DB) EstablishedDevices(ctx context.Context, accountID, exceptDeviceID string, olderThan time.Duration) (int, error) {
+func (d *DB) OlderActiveDevices(ctx context.Context, device Device) (int, error) {
 	var n int
-	err := d.sql.QueryRowContext(ctx, `SELECT COUNT(*) FROM devices WHERE account_id = ? AND revoked_at = 0 AND id != ? AND created_at <= ?`,
-		accountID, exceptDeviceID, d.now().Add(-olderThan).UnixMilli()).Scan(&n)
+	err := d.sql.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM devices
+		WHERE account_id = ? AND revoked_at = 0 AND id != ? AND (created_at < ? OR (created_at = ? AND id < ?))`,
+		device.AccountID, device.ID, device.CreatedAt, device.CreatedAt, device.ID).Scan(&n)
 	return n, err
 }

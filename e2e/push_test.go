@@ -241,11 +241,11 @@ func TestRegistrationValidatesInputAndCapsHandlesPerAccount(t *testing.T) {
 			t.Errorf("%s: %s", name, res)
 		}
 	}
-	registerPhone(t, f.env, f.desktop, "fcm", "one")
+	oldest := registerPhone(t, f.env, f.desktop, "fcm", "one")
 	registerPhone(t, f.env, f.desktop, "fcm", "two")
-	res := phone.Do(t, "POST", "/v1/push/register", map[string]string{"platform": "fcm", "token": "three", "ticket": ticketFor(t, f.desktop)})
-	if res.Status != http.StatusServiceUnavailable {
-		t.Fatalf("handle cap per account: %s", res)
+	registerPhone(t, f.env, f.desktop, "fcm", "three")
+	if res := f.desktop.Do(t, "POST", "/v1/push/"+oldest, nil); res.Status != http.StatusGone {
+		t.Fatalf("at the per-account cap the oldest handle is replaced, so abandoned handles end by themselves: %s", res)
 	}
 	other := f.env.user(t, "someone else")
 	registerPhone(t, f.env, other, "fcm", "theirs")
