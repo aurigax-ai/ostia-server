@@ -45,7 +45,7 @@ func OpenAdmin(cfg config.Config) (*Admin, error) {
 func (a *Admin) Close() error { return a.DB.Close() }
 
 func (a *Admin) Invite(ctx context.Context, ttl time.Duration) (code string, expiresAt int64, err error) {
-	return a.Auth.CreateInvite(ctx, "", ttl)
+	return a.Auth.CreateInvite(ctx, "", ttl, false)
 }
 
 func (a *Admin) Accounts(ctx context.Context) ([]store.Account, error) { return a.DB.Accounts(ctx) }

@@ -198,3 +198,74 @@ func TestApprovalCardsCarryTheRequestersAge(t *testing.T) {
 		t.Fatalf("%+v", list.Approvals)
 	}
 }
+
+func TestTwoInvitesCannotBeMintedWithoutApprovalAndStaleOnesDie(t *testing.T) {
+	e := newEnv(t, "[auth]\napprover_min_age = \"24h\"\n")
+	owner := e.user(t, "laptop")
+	first := owner.Must(t, http.StatusCreated, "POST", "/v1/devices/invite", nil).Map(t)["code"].(string)
+	requireElevation(t, owner, "a second live invite", "POST", "/v1/devices/invite", nil)
+
+	one := testkit.NewAPI(e.net, testkit.NewIdentity("first extra"))
+	one.Onboard(t, first)
+	requireElevation(t, owner, "a third device", "POST", "/v1/devices/invite", nil)
+}
+
+func TestOwnerCanRemoveAnIntruderDuringItsProbation(t *testing.T) {
+	e := newEnv(t, "[auth]\nsession_ttl = \"1s\"\napprover_min_age = \"2s\"\n")
+	owner := e.user(t, "laptop")
+	time.Sleep(2300 * time.Millisecond)
+	owner.SignIn(t)
+	code := owner.Must(t, http.StatusCreated, "POST", "/v1/devices/invite", nil).Map(t)["code"].(string)
+	intruder := testkit.NewAPI(e.net, testkit.NewIdentity("intruder"))
+	intruder.Onboard(t, code)
+
+	requireElevation(t, intruder, "the intruder revoking the owner's device", "DELETE", "/v1/devices/"+owner.ID.DeviceID, nil)
+	owner.Must(t, http.StatusNoContent, "DELETE", "/v1/devices/"+intruder.ID.DeviceID, nil)
+	if res := intruder.Do(t, "GET", "/v1/devices", nil); res.Status != http.StatusUnauthorized {
+		t.Fatalf("the intruder kept its session: %s", res)
+	}
+}
+
+func TestStolenTokenCannotRevokeTheOwnersLastEstablishedDevice(t *testing.T) {
+	e := newEnv(t, "[auth]\nsession_ttl = \"1s\"\napprover_min_age = \"2s\"\n")
+	owner := e.user(t, "laptop")
+	time.Sleep(2300 * time.Millisecond)
+	owner.SignIn(t)
+	requireElevation(t, owner, "revoking the only established device", "DELETE", "/v1/devices/"+owner.ID.DeviceID, nil)
+	owner.Must(t, http.StatusNoContent, "DELETE", "/v1/auth/session", nil)
+}
+
+func TestDesktopListenerIsToldWhenAnotherDeviceJoins(t *testing.T) {
+	f := newRelayFixture(t, "")
+	code := f.api.Must(t, http.StatusCreated, "POST", "/v1/devices/invite", nil).Map(t)["code"].(string)
+	joiner := testkit.NewAPI(f.env.net, testkit.NewIdentity("new phone"))
+	joiner.Onboard(t, code)
+	waitUntil(t, "the desktop is told about the new device", func() bool {
+		added := f.desktop.AddedDevices()
+		return len(added) == 1 && added[0] == "new phone"
+	})
+	var list struct {
+		Devices []struct {
+			Name string `json:"name"`
+			New  bool   `json:"new"`
+			ID   string `json:"id"`
+		} `json:"devices"`
+	}
+	f.api.Must(t, http.StatusOK, "GET", "/v1/devices", nil).JSON(t, &list)
+	flagged := ""
+	for _, d := range list.Devices {
+		if d.New {
+			flagged = d.ID
+		}
+	}
+	if flagged != joiner.ID.DeviceID {
+		t.Fatalf("the existing device must see the new one flagged: %+v", list.Devices)
+	}
+	f.api.Must(t, http.StatusNoContent, "POST", "/v1/devices/"+flagged+"/seen", nil)
+	f.api.Must(t, http.StatusOK, "GET", "/v1/devices", nil).JSON(t, &list)
+	for _, d := range list.Devices {
+		if d.New {
+			t.Fatal("still flagged after acknowledging")
+		}
+	}
+}

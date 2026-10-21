@@ -77,15 +77,20 @@ A nonce is single use and lives 60 seconds. A device holds at most five open non
 ### Devices and accounts
 
 ```
-GET    /v1/devices               {devices: [{id, name, signPub, boxPub, createdAt, lastSeen, current?}]}
+GET    /v1/devices               {devices: [{id, name, signPub, boxPub, createdAt, lastSeen, current?, new?}]}   `new`: added after the calling device and not yet acknowledged
 POST   /v1/devices/invite        201 {code, expiresAt}      one-time code for a new device of this account, valid 10 minutes by default; an elevated session once the account has two or more devices
-DELETE /v1/devices/{id}          204   revokes sessions, the relay label and the device's key wrap; open relay streams close (another device: elevated session)
+POST   /v1/devices/{id}/seen     204   the person has seen this device on the calling device; clears its `new` flag
+DELETE /v1/devices/{id}          204   revokes sessions, the relay label and the device's key wrap; open relay streams close
 DELETE /v1/account               204   removes every row and blob, push handles included, and closes the relay listener (elevated session)
 ```
 
+### Revoking devices
+
+Revoking another device or the account normally needs an elevated session. Exceptions, so an owner can always remove an intruder: a device that has belonged to the account for `auth.approver_min_age` may revoke a device that is still younger than that (probation) without elevation, and a device may revoke itself unless it is the last established device. `DELETE /v1/auth/session` (sign out) is always free. A client should show every device with `new: true` to the person and keep asking until they acknowledge it; a connected relay listener also receives `{"t": "device-added", "deviceId", "name", "createdAt"}` when a device joins an account that already had one.
+
 ### Elevated sessions
 
-A stolen bearer token must not be able to destroy an account. These actions need a session that was elevated within the last `auth.elevation_ttl` (five minutes), otherwise they answer `403 elevation-required`: revoking another device, deleting the account, deleting a sync wrap, replacing the passphrase or recovery wrap, `POST /v1/sync/gc` and `POST /v1/sync/rotate`. A session is elevated one of two ways, per session and never for the approving device. Adding a device must not be a way around this, so `POST /v1/devices/invite` also needs an elevated session once the account has two or more devices, and a device may approve only after it has been part of the account for `auth.approver_min_age` (24 hours, longer than a session lives): a stolen token that adds a device of its own cannot use that device to approve itself (`403 device-too-new`).
+A stolen bearer token must not be able to destroy an account. These actions need a session that was elevated within the last `auth.elevation_ttl` (five minutes), otherwise they answer `403 elevation-required`: revoking another device, deleting the account, deleting a sync wrap, replacing the passphrase or recovery wrap, `POST /v1/sync/gc` and `POST /v1/sync/rotate`. A session is elevated one of two ways, per session and never for the approving device. Adding a device must not be a way around this, so `POST /v1/devices/invite` also needs an elevated session once the account has two or more devices **counting invites that are still open** (one stolen token cannot mint several invites while the count is one), and an invite minted without elevation stops working if the account has grown to two devices before it is redeemed, and a device may approve only after it has been part of the account for `auth.approver_min_age` (24 hours, longer than a session lives): a stolen token that adds a device of its own cannot use that device to approve itself (`403 device-too-new`).
 
 ```
 GET  /v1/auth/elevation                          {elevatedUntil}              0 when not elevated
@@ -121,12 +126,12 @@ The label is a random 128-bit value (26 characters, `a-z2-7`), stable per device
 
 The Ostia desktop writes `PROXY TCP4|TCP6 <peer ip> 127.0.0.1 <port> <port>\r\n` followed by those bytes into its loopback gateway listener, so pairing limits and the audit log see the phone's address.
 
-**Confirming a stream.** Anyone who knows a label can open a connection to it, so a stream starts unconfirmed. The desktop confirms it with `{"t": "confirm", "stream": "<id>"}` on the control socket once the gateway has accepted the phone: a hello that carried a valid device token, or a pairing request that carried a live pairing code. An unconfirmed stream is closed after `relay.unconfirmed_timeout` (15 seconds) or after 256 KiB, counts against `relay.max_unconfirmed_per_label` instead of the confirmed limit, and is not billed to the account's byte quota. A confirmed stream counts against `relay.max_streams_per_label` and the quota.
+**Confirming a stream.** Anyone who knows a label can open a connection to it, so a stream starts unconfirmed. The desktop confirms it with `{"t": "confirm", "stream": "<id>"}` on the control socket once the gateway has accepted the phone: a hello that carried a valid device token, or a pairing request that carried a live pairing code. An unconfirmed stream is closed after `relay.unconfirmed_timeout` (15 seconds) or after 32 KiB (a TLS handshake and a hello fit comfortably), counts against `relay.max_unconfirmed_per_label` instead of the confirmed limit, and is not billed to the account's byte quota. A confirmed stream counts against `relay.max_streams_per_label` and the quota.
 
 ### Phone side and limits
 
 - The server reads only the SNI of the ClientHello. A known label with no desktop listening is reset at once. An unknown label, a non-TLS first message, or a stalled handshake is held for `relay.hello_timeout` (5 seconds) and closed without a reply, so scanning learns nothing.
-- Per label: `relay.max_streams_per_label` confirmed streams and `relay.connections_per_minute` confirmations a minute; `relay.max_unconfirmed_per_label` unconfirmed streams, where a new connection evicts the oldest unconfirmed one when the pool is full (squatting on a label cannot lock out the real phone), and `relay.unconfirmed_opens_per_minute` new connections. Per source address: `relay.connections_per_minute_per_ip`. Per account: `relay.monthly_bytes_per_account`, counted in memory and flushed every 10 seconds. A stream with no bytes for `relay.idle_timeout` is closed.
+- Per label: `relay.max_streams_per_label` confirmed streams and `relay.connections_per_minute` confirmations a minute; `relay.max_unconfirmed_per_label` unconfirmed streams, where a new connection evicts the oldest unconfirmed one when the pool is full (squatting on a label cannot lock out the real phone), `relay.unconfirmed_opens_per_minute_per_address` and `relay.unconfirmed_opens_per_minute` new connections per source address and per label. Per source address: `relay.connections_per_minute_per_ip`. Per account: `relay.monthly_bytes_per_account`, counted in memory and flushed every 10 seconds. A stream with no bytes for `relay.idle_timeout` is closed.
 - There is no presence endpoint: nothing tells a third party whether a desktop is online.
 
 ## Publish
@@ -195,6 +200,7 @@ Only the relay uses WebSocket. Control frames are JSON text; relayed bytes are b
 |---|---|---|
 | `/v1/relay/listen` | server to desktop | `{"t": "ping"}` |
 | `/v1/relay/listen` | server to desktop | `{"t": "incoming", "stream": string, "peer": "ip:port", "family": 4 or 6}` |
+| `/v1/relay/listen` | server to desktop | `{"t": "device-added", "deviceId": string, "name": string, "createdAt": ms}` |
 | `/v1/relay/listen` | desktop to server | `{"t": "pong"}` |
 | `/v1/relay/listen` | desktop to server | `{"t": "confirm", "stream": string}` |
 | `/v1/relay/accept/{stream}` | both | binary frames: the phone's TCP stream |
@@ -255,7 +261,7 @@ GET  /v1/sync/blobs/{blobId}          raw bytes
 PUT  /v1/sync/blobs/{blobId}          raw bytes → 201 created | 200 identical | 409 | 413 | 507
 GET  /v1/sync/wraps                   {wraps: [{slot, updatedAt}]}
 GET  /v1/sync/wraps/{slot}            {slot, blob, updatedAt}
-PUT  /v1/sync/wraps/{slot}            {blob} → 204        slot: passphrase | recovery | device:<id of an active device>; replacing an existing wrap needs an elevated session, except a device replacing its own `device:<self>` slot
+PUT  /v1/sync/wraps/{slot}            {blob} → 204        slot: passphrase | recovery | device:<id of an active device>; an unelevated session may only fill an empty slot; replacing any existing wrap needs an elevated session. Wraps carry no sender signature yet, so a client must not adopt a new profile key from a wrap it did not ask for (tracked as a follow-up: signed wraps)
 DELETE /v1/sync/wraps/{slot}          204
 POST /v1/sync/rotate                  {ifMatch, manifest, wraps: {slot: blob}, deleteSlots: [slot]} → 200 {version} | 412
 POST /v1/sync/gc                      {keep: [blobId]} → {deleted}     removes blobs older than sync.gc_grace that are not listed

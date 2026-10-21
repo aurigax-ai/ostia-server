@@ -42,7 +42,13 @@ CREATE TABLE invites (
 	account_id TEXT REFERENCES accounts(id) ON DELETE CASCADE,
 	created_at INTEGER NOT NULL,
 	expires_at INTEGER NOT NULL,
-	used_at INTEGER NOT NULL DEFAULT 0
+	used_at INTEGER NOT NULL DEFAULT 0,
+	elevated INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE device_seen (
+	viewer_device_id TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+	device_id TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+	PRIMARY KEY (viewer_device_id, device_id)
 );
 CREATE TABLE key_wraps (
 	account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,

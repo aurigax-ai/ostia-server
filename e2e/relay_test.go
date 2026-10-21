@@ -244,6 +244,20 @@ func TestUnconfirmedStreamsAreClosedAfterTheTimeout(t *testing.T) {
 	}
 }
 
+func TestUnconfirmedOpensArePerAddressRateLimited(t *testing.T) {
+	f := newRelayFixture(t, "[relay]\nunconfirmed_opens_per_minute_per_address = 4\n")
+	succeeded := 0
+	for range 12 {
+		if conn, err := testkit.DialPhone(t.Context(), f.env.net, f.desktop.Host, f.cert.Fingerprint); err == nil {
+			succeeded++
+			_ = conn.Close()
+		}
+	}
+	if succeeded > 5 || succeeded == 0 {
+		t.Fatalf("one address can open unlimited streams: %d succeeded", succeeded)
+	}
+}
+
 func TestUnconfirmedOpensArePerLabelRateLimited(t *testing.T) {
 	f := newRelayFixture(t, "[relay]\nunconfirmed_opens_per_minute = 5\n")
 	succeeded := 0

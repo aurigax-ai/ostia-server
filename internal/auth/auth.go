@@ -39,6 +39,7 @@ const (
 
 type Hooks struct {
 	SessionEnded   func(tokenHash []byte)
+	DeviceAdded    func(accountID string, device store.Device)
 	DeviceRevoked  func(deviceID string)
 	AccountDeleted func(deviceIDs []string)
 }
@@ -97,6 +98,7 @@ func (s *Service) Mount(mux *httpx.Mux) {
 	mux.Handle("DELETE /v1/auth/session", s.Authed(s.logout))
 	mux.Handle("GET /v1/devices", s.Authed(s.listDevices))
 	mux.Handle("POST /v1/devices/invite", s.Authed(s.deviceInvite))
+	mux.Handle("POST /v1/devices/{id}/seen", s.Authed(s.markSeen))
 	mux.Handle("DELETE /v1/devices/{id}", s.Authed(s.revokeDevice))
 	mux.Handle("DELETE /v1/account", s.Authed(s.deleteAccount))
 	s.mountElevation(mux)
@@ -186,13 +188,23 @@ func (s *Service) registerInvite(w http.ResponseWriter, r *http.Request) error {
 	default:
 		return err
 	}
+	s.announceDevice(r, acct.ID, dev)
 	httpx.WriteJSON(w, http.StatusCreated, registered{AccountID: acct.ID, DeviceID: dev.ID, Provider: acct.Provider})
 	return nil
 }
 
-func (s *Service) CreateInvite(ctx context.Context, accountID string, ttl time.Duration) (code string, expiresAt int64, err error) {
+func (s *Service) announceDevice(r *http.Request, accountID string, dev store.Device) {
+	if s.Hooks.DeviceAdded == nil {
+		return
+	}
+	if count, err := s.DB.ActiveDeviceCount(r.Context(), accountID); err == nil && count >= 2 {
+		s.Hooks.DeviceAdded(accountID, dev)
+	}
+}
+
+func (s *Service) CreateInvite(ctx context.Context, accountID string, ttl time.Duration, elevated bool) (code string, expiresAt int64, err error) {
 	code = formatCode(ids.New()[:20])
-	expiresAt, err = s.DB.CreateInvite(ctx, ids.Hash(normalizeCode(code)), accountID, ttl)
+	expiresAt, err = s.DB.CreateInvite(ctx, ids.Hash(normalizeCode(code)), accountID, ttl, elevated)
 	return code, expiresAt, err
 }
 
@@ -346,6 +358,7 @@ type deviceView struct {
 	CreatedAt int64     `json:"createdAt"`
 	LastSeen  int64     `json:"lastSeen"`
 	Current   bool      `json:"current,omitzero"`
+	New       bool      `json:"new,omitzero"`
 }
 
 func (s *Service) listDevices(w http.ResponseWriter, r *http.Request, p Principal) error {
@@ -353,25 +366,39 @@ func (s *Service) listDevices(w http.ResponseWriter, r *http.Request, p Principa
 	if err != nil {
 		return err
 	}
+	viewer, err := s.DB.Device(r.Context(), p.DeviceID)
+	if err != nil {
+		return err
+	}
+	unseen, err := s.DB.UnseenDevices(r.Context(), viewer)
+	if err != nil {
+		return err
+	}
 	out := make([]deviceView, 0, len(devices))
 	for _, d := range devices {
-		out = append(out, deviceView{ID: d.ID, Name: d.Name, SignPub: d.SignPub, BoxPub: d.BoxPub, CreatedAt: d.CreatedAt, LastSeen: d.LastSeen, Current: d.ID == p.DeviceID})
+		out = append(out, deviceView{ID: d.ID, Name: d.Name, SignPub: d.SignPub, BoxPub: d.BoxPub, CreatedAt: d.CreatedAt, LastSeen: d.LastSeen, Current: d.ID == p.DeviceID, New: unseen[d.ID]})
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"devices": out})
 	return nil
 }
 
 func (s *Service) deviceInvite(w http.ResponseWriter, r *http.Request, p Principal) error {
-	count, err := s.DB.ActiveDeviceCount(r.Context(), p.AccountID)
+	active, err := s.DB.ActiveDeviceCount(r.Context(), p.AccountID)
 	if err != nil {
 		return err
 	}
-	if count >= 2 {
+	live, err := s.DB.LiveInvites(r.Context(), p.AccountID)
+	if err != nil {
+		return err
+	}
+	elevated := false
+	if active+live >= 2 {
 		if err := s.NeedElevation(p); err != nil {
 			return err
 		}
+		elevated = true
 	}
-	code, expires, err := s.CreateInvite(r.Context(), p.AccountID, s.Cfg.DeviceInviteTTL.Std())
+	code, expires, err := s.CreateInvite(r.Context(), p.AccountID, s.Cfg.DeviceInviteTTL.Std(), elevated)
 	if err != nil {
 		return err
 	}
@@ -379,9 +406,50 @@ func (s *Service) deviceInvite(w http.ResponseWriter, r *http.Request, p Princip
 	return nil
 }
 
+func (s *Service) markSeen(w http.ResponseWriter, r *http.Request, p Principal) error {
+	target, err := s.DB.Device(r.Context(), r.PathValue("id"))
+	if err != nil || target.AccountID != p.AccountID {
+		return httpx.ErrNotFound
+	}
+	if err := s.DB.MarkSeen(r.Context(), p.DeviceID, target.ID); err != nil {
+		return err
+	}
+	w.WriteHeader(http.StatusNoContent)
+	return nil
+}
+
+func (s *Service) needsElevationToRevoke(r *http.Request, p Principal, id string) (bool, error) {
+	min := s.Cfg.ApproverMinAge.Std()
+	if min <= 0 {
+		return id != p.DeviceID, nil
+	}
+	self, err := s.DB.Device(r.Context(), p.DeviceID)
+	if err != nil {
+		return false, err
+	}
+	established := s.Now().Sub(time.UnixMilli(self.CreatedAt)) >= min
+	if id == p.DeviceID {
+		if !established {
+			return false, nil
+		}
+		others, err := s.DB.EstablishedDevices(r.Context(), p.AccountID, p.DeviceID, min)
+		return others == 0, err
+	}
+	target, err := s.DB.Device(r.Context(), id)
+	if err != nil || target.AccountID != p.AccountID {
+		return true, nil
+	}
+	probation := s.Now().Sub(time.UnixMilli(target.CreatedAt)) < min
+	return !(established && probation), nil
+}
+
 func (s *Service) revokeDevice(w http.ResponseWriter, r *http.Request, p Principal) error {
 	id := r.PathValue("id")
-	if id != p.DeviceID {
+	needs, err := s.needsElevationToRevoke(r, p, id)
+	if err != nil {
+		return err
+	}
+	if needs {
 		if err := s.NeedElevation(p); err != nil {
 			return err
 		}

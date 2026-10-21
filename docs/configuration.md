@@ -60,7 +60,8 @@
 | `max_unconfirmed_per_label` | `4` | Connections the desktop has not confirmed yet (see the protocol). When full, the oldest is evicted. |
 | `unconfirmed_timeout` | `15s` | An unconfirmed connection is closed after this long. |
 | `connections_per_minute` | `30` | Confirmed streams per desktop and minute. |
-| `unconfirmed_opens_per_minute` | `120` | New connections per desktop and minute, confirmed or not. |
+| `unconfirmed_opens_per_minute` | `600` | New connections per desktop and minute, confirmed or not. |
+| `unconfirmed_opens_per_minute_per_address` | `30` | The same, per source address (IPv6 per /64) and desktop. |
 | `connections_per_minute_per_ip` | `10` | New connections per source address. |
 | `monthly_bytes_per_account` | `5368709120` | Relayed bytes per account and month; `0` is unlimited. |
 | `idle_timeout` | `10m` | A stream with no bytes is closed. |

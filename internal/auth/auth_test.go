@@ -167,7 +167,7 @@ func (e *env) elevate(t *testing.T, requesterToken, approverToken string) {
 
 func (e *env) invite(t *testing.T, accountID string) string {
 	t.Helper()
-	code, _, err := e.svc.CreateInvite(t.Context(), accountID, time.Hour)
+	code, _, err := e.svc.CreateInvite(t.Context(), accountID, time.Hour, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -718,11 +718,11 @@ func TestDeviceInvitesNeedElevationOnceTheAccountHasTwoDevices(t *testing.T) {
 	a := newDevice("laptop")
 	e.signIn(t, a, e.invite(t, ""))
 	tokenA := e.session(t, a)
-	if status, _ := e.post(t, "/v1/devices/invite", tokenA, nil); status != 201 {
+	b := newDevice("phone")
+	status, out := e.post(t, "/v1/devices/invite", tokenA, nil)
+	if status != 201 {
 		t.Fatalf("the first extra device needs no approval: %d", status)
 	}
-	b := newDevice("phone")
-	_, out := e.post(t, "/v1/devices/invite", tokenA, nil)
 	e.signIn(t, b, out["code"].(string))
 	tokenB := e.session(t, b)
 	if status, out := e.post(t, "/v1/devices/invite", tokenA, nil); status != 403 || out["error"] != "elevation-required" {
@@ -808,5 +808,130 @@ func TestLogoutNotifiesTheHookWithTheSessionToken(t *testing.T) {
 	e.call(t, "DELETE", "/v1/auth/session", token, nil)
 	if len(ended) != 1 || !ids.Equal(ended[0], ids.Hash(token)) {
 		t.Fatalf("hook: %v", ended)
+	}
+}
+
+func TestLiveInvitesCountTowardsTheTwoDeviceRule(t *testing.T) {
+	e := newEnv(t)
+	d := newDevice("laptop")
+	e.signIn(t, d, e.invite(t, ""))
+	token := e.session(t, d)
+	if status, _ := e.post(t, "/v1/devices/invite", token, nil); status != 201 {
+		t.Fatalf("first invite: %d", status)
+	}
+	if status, out := e.post(t, "/v1/devices/invite", token, nil); status != 403 || out["error"] != "elevation-required" {
+		t.Fatalf("a second live invite would let a stolen token add two devices at once: %d %v", status, out)
+	}
+}
+
+func TestInviteMintedAtOneDeviceDiesIfTheAccountGrowsFirst(t *testing.T) {
+	e := newEnv(t)
+	a := newDevice("laptop")
+	e.signIn(t, a, e.invite(t, ""))
+	token := e.session(t, a)
+	_, out := e.post(t, "/v1/devices/invite", token, nil)
+	stale := out["code"].(string)
+	for _, name := range []string{"phone", "tablet"} {
+		if _, err := e.svc.DB.AddDevice(t.Context(), a.accountID(e, t), store.NewDevice{Name: name, SignPub: make([]byte, 32), BoxPub: make([]byte, 32)}, 10); err != nil {
+			t.Fatal(err)
+		}
+	}
+	d := newDevice("late")
+	body := d.registration()
+	body["code"] = stale
+	if status, out := e.post(t, "/v1/auth/invite", "", body); status != 403 || out["error"] != "invalid-invite" {
+		t.Fatalf("%d %v", status, out)
+	}
+}
+
+func (d *device) accountID(e *env, t *testing.T) string {
+	t.Helper()
+	dev, err := e.svc.DB.Device(t.Context(), d.id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return dev.AccountID
+}
+
+func TestRevokingRulesDuringProbation(t *testing.T) {
+	e := newEnv(t)
+	e.svc.Cfg.ApproverMinAge = config.Duration(24 * time.Hour)
+	owner := newDevice("laptop")
+	e.signIn(t, owner, e.invite(t, ""))
+	*e.clock = e.clock.Add(25 * time.Hour)
+	ownerToken := e.session(t, owner)
+	_, out := e.post(t, "/v1/devices/invite", ownerToken, nil)
+	intruder := newDevice("intruder")
+	e.signIn(t, intruder, out["code"].(string))
+	intruderToken := e.session(t, intruder)
+
+	if status, out := e.call(t, "DELETE", "/v1/devices/"+owner.id, intruderToken, nil); status != 403 || out["error"] != "elevation-required" {
+		t.Fatalf("a young device must not revoke the established one: %d %v", status, out)
+	}
+	if status, out := e.call(t, "DELETE", "/v1/devices/"+owner.id, ownerToken, nil); status != 403 || out["error"] != "elevation-required" {
+		t.Fatalf("revoking the last established device, even as itself, needs elevation: %d %v", status, out)
+	}
+	if status, _ := e.call(t, "DELETE", "/v1/auth/session", e.session(t, owner), nil); status != 204 {
+		t.Fatalf("logging out stays free: %d", status)
+	}
+	ownerToken = e.session(t, owner)
+	if status, _ := e.call(t, "DELETE", "/v1/devices/"+intruder.id, ownerToken, nil); status != 204 {
+		t.Fatalf("an established device removes an intruder still on probation: %d", status)
+	}
+}
+
+func TestAnEstablishedDeviceMayRevokeItselfWhenAnotherEstablishedOneRemains(t *testing.T) {
+	e := newEnv(t)
+	e.svc.Cfg.ApproverMinAge = config.Duration(24 * time.Hour)
+	a := newDevice("laptop")
+	e.signIn(t, a, e.invite(t, ""))
+	tokenA := e.session(t, a)
+	_, out := e.post(t, "/v1/devices/invite", tokenA, nil)
+	b := newDevice("phone")
+	e.signIn(t, b, out["code"].(string))
+	*e.clock = e.clock.Add(25 * time.Hour)
+	tokenA, tokenB := e.session(t, a), e.session(t, b)
+	if status, _ := e.call(t, "DELETE", "/v1/devices/"+a.id, tokenA, nil); status != 204 {
+		t.Fatalf("self revoke with another established device: %d", status)
+	}
+	if status, out := e.call(t, "DELETE", "/v1/devices/"+b.id, tokenB, nil); status != 403 {
+		t.Fatalf("the last established device needs elevation to revoke itself: %d %v", status, out)
+	}
+}
+
+func TestNewDevicesAreAnnouncedAndFlaggedUntilSeen(t *testing.T) {
+	e := newEnv(t)
+	a, b := newDevice("laptop"), newDevice("phone")
+	e.signIn(t, a, e.invite(t, ""))
+	tokenA := e.session(t, a)
+	var announced []string
+	e.svc.Hooks.DeviceAdded = func(accountID string, dev store.Device) { announced = append(announced, dev.Name) }
+	_, out := e.post(t, "/v1/devices/invite", tokenA, nil)
+	e.signIn(t, b, out["code"].(string))
+	if len(announced) != 1 || announced[0] != "phone" {
+		t.Fatalf("hook: %v", announced)
+	}
+	_, list := e.call(t, "GET", "/v1/devices", tokenA, nil)
+	flagged := ""
+	for _, raw := range list["devices"].([]any) {
+		entry := raw.(map[string]any)
+		if entry["new"] == true {
+			flagged = entry["name"].(string)
+		}
+	}
+	if flagged != "phone" {
+		t.Fatalf("the other device must be flagged as new: %v", list)
+	}
+	if status, _ := e.call(t, "POST", "/v1/devices/"+b.id+"/seen", tokenA, nil); status != 204 {
+		t.Fatalf("mark seen: %d", status)
+	}
+	_, list = e.call(t, "GET", "/v1/devices", tokenA, nil)
+	for _, raw := range list["devices"].([]any) {
+		if raw.(map[string]any)["new"] == true {
+			t.Fatalf("still flagged: %v", list)
+		}
+	}
+	if status, _ := e.call(t, "POST", "/v1/devices/"+strings.Repeat("a", 26)+"/seen", tokenA, nil); status != 404 {
+		t.Fatalf("unknown device: %d", status)
 	}
 }

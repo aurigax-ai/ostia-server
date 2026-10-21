@@ -268,7 +268,7 @@ func (s *Service) putWrap(w http.ResponseWriter, r *http.Request, p auth.Princip
 	if err := s.validSlot(r.Context(), p.AccountID, slot); err != nil {
 		return err
 	}
-	if _, err := s.DB.Wrap(r.Context(), p.AccountID, slot); err == nil && slot != store.DeviceSlot(p.DeviceID) {
+	if _, err := s.DB.Wrap(r.Context(), p.AccountID, slot); err == nil {
 		if err := s.Auth.NeedElevation(p); err != nil {
 			return err
 		}

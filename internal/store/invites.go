@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-func (d *DB) CreateInvite(ctx context.Context, codeHash []byte, accountID string, ttl time.Duration) (expiresAt int64, err error) {
+func (d *DB) CreateInvite(ctx context.Context, codeHash []byte, accountID string, ttl time.Duration, elevated bool) (expiresAt int64, err error) {
 	if ttl > 0 {
 		expiresAt = d.now().Add(ttl).UnixMilli()
 	}
@@ -15,8 +15,12 @@ func (d *DB) CreateInvite(ctx context.Context, codeHash []byte, accountID string
 	if accountID != "" {
 		account = accountID
 	}
-	_, err = d.sql.ExecContext(ctx, `INSERT INTO invites (code_hash, account_id, created_at, expires_at) VALUES (?, ?, ?, ?)`,
-		codeHash, account, d.ms(), expiresAt)
+	flag := 0
+	if elevated {
+		flag = 1
+	}
+	_, err = d.sql.ExecContext(ctx, `INSERT INTO invites (code_hash, account_id, created_at, expires_at, elevated) VALUES (?, ?, ?, ?, ?)`,
+		codeHash, account, d.ms(), expiresAt, flag)
 	return expiresAt, err
 }
 
@@ -26,10 +30,20 @@ func (d *DB) RegisterWithInvite(ctx context.Context, codeHash []byte, nd NewDevi
 	err := d.tx(ctx, func(tx *sql.Tx) error {
 		now := d.ms()
 		var boundTo sql.NullString
-		err := tx.QueryRowContext(ctx, `SELECT account_id FROM invites WHERE code_hash = ? AND used_at = 0 AND (expires_at = 0 OR expires_at > ?)`,
-			codeHash, now).Scan(&boundTo)
+		var elevated int
+		err := tx.QueryRowContext(ctx, `SELECT account_id, elevated FROM invites WHERE code_hash = ? AND used_at = 0 AND (expires_at = 0 OR expires_at > ?)`,
+			codeHash, now).Scan(&boundTo, &elevated)
 		if err != nil {
 			return notFound(err)
+		}
+		if boundTo.Valid && elevated == 0 {
+			var active int
+			if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM devices WHERE account_id = ? AND revoked_at = 0`, boundTo.String).Scan(&active); err != nil {
+				return err
+			}
+			if active >= 2 {
+				return ErrNotFound
+			}
 		}
 		if _, err := tx.ExecContext(ctx, `UPDATE invites SET used_at = ? WHERE code_hash = ?`, now, codeHash); err != nil {
 			return err
@@ -57,4 +71,10 @@ func (d *DB) SweepInvites(ctx context.Context) error {
 	_, err := d.sql.ExecContext(ctx, `DELETE FROM invites WHERE (used_at > 0 AND used_at < ?) OR (expires_at > 0 AND expires_at < ?)`,
 		d.now().Add(-24*time.Hour).UnixMilli(), d.ms())
 	return err
+}
+
+func (d *DB) LiveInvites(ctx context.Context, accountID string) (int, error) {
+	var n int
+	err := d.sql.QueryRowContext(ctx, `SELECT COUNT(*) FROM invites WHERE account_id = ? AND used_at = 0 AND (expires_at = 0 OR expires_at > ?)`, accountID, d.ms()).Scan(&n)
+	return n, err
 }

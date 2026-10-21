@@ -79,19 +79,20 @@ type Auth struct {
 }
 
 type Relay struct {
-	MaxStreamsPerLabel        int      `toml:"max_streams_per_label"`
-	MaxUnconfirmedPerLabel    int      `toml:"max_unconfirmed_per_label"`
-	UnconfirmedOpensPerMinute int      `toml:"unconfirmed_opens_per_minute"`
-	UnconfirmedTimeout        Duration `toml:"unconfirmed_timeout"`
-	ConnectionsPerMinute      int      `toml:"connections_per_minute"`
-	ConnectionsPerMinutePerIP int      `toml:"connections_per_minute_per_ip"`
-	MonthlyBytesPerAccount    int64    `toml:"monthly_bytes_per_account"`
-	IdleTimeout               Duration `toml:"idle_timeout"`
-	PingInterval              Duration `toml:"ping_interval"`
-	AcceptTimeout             Duration `toml:"accept_timeout"`
-	HelloTimeout              Duration `toml:"hello_timeout"`
-	MaxPendingHellos          int      `toml:"max_pending_hellos"`
-	MaxPendingHellosPerIP     int      `toml:"max_pending_hellos_per_ip"`
+	MaxStreamsPerLabel                  int      `toml:"max_streams_per_label"`
+	MaxUnconfirmedPerLabel              int      `toml:"max_unconfirmed_per_label"`
+	UnconfirmedOpensPerMinute           int      `toml:"unconfirmed_opens_per_minute"`
+	UnconfirmedOpensPerMinutePerAddress int      `toml:"unconfirmed_opens_per_minute_per_address"`
+	UnconfirmedTimeout                  Duration `toml:"unconfirmed_timeout"`
+	ConnectionsPerMinute                int      `toml:"connections_per_minute"`
+	ConnectionsPerMinutePerIP           int      `toml:"connections_per_minute_per_ip"`
+	MonthlyBytesPerAccount              int64    `toml:"monthly_bytes_per_account"`
+	IdleTimeout                         Duration `toml:"idle_timeout"`
+	PingInterval                        Duration `toml:"ping_interval"`
+	AcceptTimeout                       Duration `toml:"accept_timeout"`
+	HelloTimeout                        Duration `toml:"hello_timeout"`
+	MaxPendingHellos                    int      `toml:"max_pending_hellos"`
+	MaxPendingHellosPerIP               int      `toml:"max_pending_hellos_per_ip"`
 }
 
 type Publish struct {
@@ -177,19 +178,20 @@ func Default() Config {
 			ApproverMinAge:  Duration(24 * time.Hour),
 		},
 		Relay: Relay{
-			MaxStreamsPerLabel:        8,
-			MaxUnconfirmedPerLabel:    4,
-			UnconfirmedOpensPerMinute: 120,
-			UnconfirmedTimeout:        Duration(15 * time.Second),
-			ConnectionsPerMinute:      30,
-			ConnectionsPerMinutePerIP: 10,
-			MonthlyBytesPerAccount:    5 * GiB,
-			IdleTimeout:               Duration(10 * time.Minute),
-			PingInterval:              Duration(25 * time.Second),
-			AcceptTimeout:             Duration(10 * time.Second),
-			HelloTimeout:              Duration(5 * time.Second),
-			MaxPendingHellos:          1024,
-			MaxPendingHellosPerIP:     16,
+			MaxStreamsPerLabel:                  8,
+			MaxUnconfirmedPerLabel:              4,
+			UnconfirmedOpensPerMinute:           600,
+			UnconfirmedOpensPerMinutePerAddress: 30,
+			UnconfirmedTimeout:                  Duration(15 * time.Second),
+			ConnectionsPerMinute:                30,
+			ConnectionsPerMinutePerIP:           10,
+			MonthlyBytesPerAccount:              5 * GiB,
+			IdleTimeout:                         Duration(10 * time.Minute),
+			PingInterval:                        Duration(25 * time.Second),
+			AcceptTimeout:                       Duration(10 * time.Second),
+			HelloTimeout:                        Duration(5 * time.Second),
+			MaxPendingHellos:                    1024,
+			MaxPendingHellosPerIP:               16,
 		},
 		Publish: Publish{
 			MaxFileBytes:        16 * MiB,

@@ -447,7 +447,7 @@ func TestDestructiveSyncActionsNeedAnotherDevicesApproval(t *testing.T) {
 	refused("replacing the recovery wrap", "PUT", "/v1/sync/wraps/recovery", wrap)
 	refused("garbage collection", "POST", "/v1/sync/gc", map[string]any{"keep": []string{}})
 	refused("rotation", "POST", "/v1/sync/rotate", map[string]any{"ifMatch": 1, "manifest": "AAAA"})
-	api.Must(t, http.StatusNoContent, "PUT", "/v1/sync/wraps/device:"+api.ID.DeviceID, wrap)
+	refused("replacing its own device wrap", "PUT", "/v1/sync/wraps/device:"+api.ID.DeviceID, wrap)
 
 	other := f.addDevice(t, "second laptop")
 	if res := other.API.Do(t, "DELETE", "/v1/sync/wraps/recovery", nil); res.Status != http.StatusForbidden {
@@ -464,17 +464,14 @@ func TestWrapsOfOtherDevicesCannotBeReplacedWithoutApproval(t *testing.T) {
 	wrap := map[string]string{"blob": "AAAA"}
 	own := "/v1/sync/wraps/device:" + f.a.API.ID.DeviceID
 	other := "/v1/sync/wraps/device:" + b.API.ID.DeviceID
-	f.a.API.Must(t, http.StatusNoContent, "PUT", own, wrap)
-	res := f.a.API.Do(t, "PUT", other, wrap)
-	if res.Status != http.StatusForbidden || res.Map(t)["error"] != "elevation-required" {
-		t.Fatalf("overwriting another device's wrap: %s", res)
+	for name, path := range map[string]string{"another device's wrap": other, "its own existing wrap": own} {
+		res := f.a.API.Do(t, "PUT", path, wrap)
+		if res.Status != http.StatusForbidden || res.Map(t)["error"] != "elevation-required" {
+			t.Errorf("overwriting %s: %s", name, res)
+		}
 	}
+	f.a.API.ElevateByApproval(t, b.API)
 	f.a.API.Must(t, http.StatusNoContent, "PUT", own, wrap)
-	b.API.Must(t, http.StatusNoContent, "PUT", other, wrap)
-	empty := f.addDevice(t, "third laptop")
-	if res := f.a.API.Do(t, "PUT", "/v1/sync/wraps/device:"+empty.API.ID.DeviceID, wrap); res.Status != http.StatusNoContent && res.Status != http.StatusForbidden {
-		t.Fatalf("%s", res)
-	}
 }
 
 func TestFloodingManifestsCannotEraseEarlierHistory(t *testing.T) {

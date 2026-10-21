@@ -71,7 +71,7 @@ func TestDeviceLimit(t *testing.T) {
 func TestInviteIsSingleUseAndExpires(t *testing.T) {
 	d, c := open(t)
 	hash := ids.Hash("code-1")
-	if _, err := d.CreateInvite(t.Context(), hash, "", time.Hour); err != nil {
+	if _, err := d.CreateInvite(t.Context(), hash, "", time.Hour, false); err != nil {
 		t.Fatal(err)
 	}
 	acct, _, err := d.RegisterWithInvite(t.Context(), hash, newDevice("a"), 10)
@@ -83,7 +83,7 @@ func TestInviteIsSingleUseAndExpires(t *testing.T) {
 	}
 
 	bound := ids.Hash("code-2")
-	if _, err := d.CreateInvite(t.Context(), bound, acct.ID, time.Minute); err != nil {
+	if _, err := d.CreateInvite(t.Context(), bound, acct.ID, time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
 	a2, _, err := d.RegisterWithInvite(t.Context(), bound, newDevice("b"), 10)
@@ -92,7 +92,7 @@ func TestInviteIsSingleUseAndExpires(t *testing.T) {
 	}
 
 	late := ids.Hash("code-3")
-	_, _ = d.CreateInvite(t.Context(), late, "", time.Minute)
+	_, _ = d.CreateInvite(t.Context(), late, "", time.Minute, false)
 	c.t = c.t.Add(2 * time.Minute)
 	if _, _, err := d.RegisterWithInvite(t.Context(), late, newDevice("c"), 10); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("expired invite accepted: %v", err)
@@ -103,7 +103,7 @@ func TestInviteStaysUnusedWhenDeviceLimitHit(t *testing.T) {
 	d, _ := open(t)
 	a, _ := register(t, d, "github", "h")
 	code := ids.Hash("bound")
-	_, _ = d.CreateInvite(t.Context(), code, a.ID, time.Hour)
+	_, _ = d.CreateInvite(t.Context(), code, a.ID, time.Hour, false)
 	if _, _, err := d.RegisterWithInvite(t.Context(), code, newDevice("x"), 1); !errors.Is(err, ErrLimit) {
 		t.Fatalf("want ErrLimit, got %v", err)
 	}
@@ -520,5 +520,53 @@ func TestManifestRetentionKeepsADailyCheckpointSoFloodingCannotEraseHistory(t *t
 	versions, _ = d.ManifestVersions(t.Context(), a.ID)
 	if len(versions) != 3 {
 		t.Fatalf("checkpoints older than the retention window must go: %d", len(versions))
+	}
+}
+
+func TestUnelevatedInviteIsRefusedOnceTheAccountHasTwoDevices(t *testing.T) {
+	d, _ := open(t)
+	a, _ := register(t, d, "github", "h")
+	plain, elevated := ids.Hash("plain"), ids.Hash("elevated")
+	_, _ = d.CreateInvite(t.Context(), plain, a.ID, time.Hour, false)
+	_, _ = d.CreateInvite(t.Context(), elevated, a.ID, time.Hour, true)
+	if n, _ := d.LiveInvites(t.Context(), a.ID); n != 2 {
+		t.Fatalf("live invites %d", n)
+	}
+	if _, _, err := d.RegisterWithInvite(t.Context(), plain, newDevice("b"), 10); err != nil {
+		t.Fatalf("the second device of an account needs no elevation: %v", err)
+	}
+	other, _ := d.AddDevice(t.Context(), a.ID, newDevice("c"), 10)
+	_ = other
+	again := ids.Hash("again")
+	_, _ = d.CreateInvite(t.Context(), again, a.ID, time.Hour, false)
+	if _, _, err := d.RegisterWithInvite(t.Context(), again, newDevice("d"), 10); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("an invite minted without elevation must not work once there are two devices: %v", err)
+	}
+	if _, _, err := d.RegisterWithInvite(t.Context(), elevated, newDevice("e"), 10); err != nil {
+		t.Fatalf("an elevated invite keeps working: %v", err)
+	}
+}
+
+func TestUnseenDevicesAndEstablishedCounts(t *testing.T) {
+	d, c := open(t)
+	a, first := register(t, d, "github", "h")
+	c.t = c.t.Add(time.Hour)
+	second, _ := d.AddDevice(t.Context(), a.ID, newDevice("phone"), 10)
+	unseen, err := d.UnseenDevices(t.Context(), first)
+	if err != nil || !unseen[second.ID] || unseen[first.ID] {
+		t.Fatalf("%v %v", unseen, err)
+	}
+	if got, _ := d.UnseenDevices(t.Context(), second); len(got) != 0 {
+		t.Fatalf("a device is not told about devices that were there before it: %v", got)
+	}
+	_ = d.MarkSeen(t.Context(), first.ID, second.ID)
+	if got, _ := d.UnseenDevices(t.Context(), first); len(got) != 0 {
+		t.Fatalf("seen devices stay flagged: %v", got)
+	}
+	if n, _ := d.EstablishedDevices(t.Context(), a.ID, second.ID, 30*time.Minute); n != 1 {
+		t.Fatalf("established %d", n)
+	}
+	if n, _ := d.EstablishedDevices(t.Context(), a.ID, first.ID, 30*time.Minute); n != 0 {
+		t.Fatalf("a device younger than the age counts as established: %d", n)
 	}
 }

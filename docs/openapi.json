@@ -772,9 +772,75 @@
         ]
       }
     },
+    "/v1/devices/{id}/seen": {
+      "post": {
+        "summary": "Acknowledge a device the person has seen on this device",
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Recorded"
+          },
+          "404": {
+            "description": "not-found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, expired or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": ""
+          }
+        ],
+        "tags": [
+          "Accounts"
+        ]
+      }
+    },
     "/v1/devices/{id}": {
       "delete": {
-        "summary": "Revoke a device (another device needs an elevated session)",
+        "summary": "Revoke a device (needs an elevated session, except an established device revoking one still on probation, a device revoking itself while an established one remains, and logout)",
         "security": [
           {
             "bearer": []
@@ -3901,6 +3967,10 @@
           },
           "current": {
             "type": "boolean"
+          },
+          "new": {
+            "type": "boolean",
+            "description": "added after this device and not yet acknowledged with POST /v1/devices/{id}/seen"
           }
         }
       },

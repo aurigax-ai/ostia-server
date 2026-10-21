@@ -143,6 +143,7 @@ func (s *Service) githubPoll(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
+	s.announceDevice(r, acct.ID, dev)
 	httpx.WriteJSON(w, http.StatusCreated, registered{AccountID: acct.ID, DeviceID: dev.ID, Provider: acct.Provider})
 	return nil
 }

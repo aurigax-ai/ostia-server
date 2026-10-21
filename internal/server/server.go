@@ -106,7 +106,7 @@ func New(cfg config.Config, opts Options) (*Server, error) {
 	s.Auth.Mount(mux)
 	if cfg.RelayEnabled() {
 		s.Relay = relay.New(db, s.Auth, cfg.Relay, cfg.Domains.Relay, now)
-		s.Auth.Hooks = auth.Hooks{SessionEnded: s.Relay.KickSession, DeviceRevoked: s.Relay.KickDevice, AccountDeleted: s.Relay.KickDevices}
+		s.Auth.Hooks = auth.Hooks{DeviceAdded: s.Relay.NotifyDeviceAdded, SessionEnded: s.Relay.KickSession, DeviceRevoked: s.Relay.KickDevice, AccountDeleted: s.Relay.KickDevices}
 		s.Relay.Mount(mux)
 	}
 	if cfg.PublishEnabled() {

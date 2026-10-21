@@ -40,6 +40,7 @@ type Hub struct {
 	byIP    *limit.Limiter
 	byLabel *limit.Limiter
 	opens   *limit.Limiter
+	opensBy *limit.Limiter
 	holds   chan struct{}
 	meters  *meters
 
@@ -52,10 +53,13 @@ type Hub struct {
 }
 
 type controlMessage struct {
-	Type   string `json:"t"`
-	Stream string `json:"stream,omitzero"`
-	Peer   string `json:"peer,omitzero"`
-	Family int    `json:"family,omitzero"`
+	Type      string `json:"t"`
+	Stream    string `json:"stream,omitzero"`
+	Peer      string `json:"peer,omitzero"`
+	Family    int    `json:"family,omitzero"`
+	DeviceID  string `json:"deviceId,omitzero"`
+	Name      string `json:"name,omitzero"`
+	CreatedAt int64  `json:"createdAt,omitzero"`
 }
 
 type listener struct {
@@ -160,6 +164,7 @@ func New(db *store.DB, authSvc *auth.Service, cfg config.Relay, domain string, n
 		byIP:      limit.New(limit.Rule{Every: time.Minute / time.Duration(max(cfg.ConnectionsPerMinutePerIP, 1)), Burst: max(cfg.ConnectionsPerMinutePerIP, 1)}, now),
 		byLabel:   limit.New(limit.Rule{Every: time.Minute / time.Duration(max(cfg.ConnectionsPerMinute, 1)), Burst: max(cfg.ConnectionsPerMinute, 1)}, now),
 		opens:     limit.New(limit.Rule{Every: time.Minute / time.Duration(max(cfg.UnconfirmedOpensPerMinute, 1)), Burst: max(cfg.UnconfirmedOpensPerMinute, 1)}, now),
+		opensBy:   limit.New(limit.Rule{Every: time.Minute / time.Duration(max(cfg.UnconfirmedOpensPerMinutePerAddress, 1)), Burst: max(cfg.UnconfirmedOpensPerMinutePerAddress, 1)}, now),
 		holds:     make(chan struct{}, max(cfg.MaxPendingHellos, 1)),
 		meters:    newMeters(db, now),
 		listeners: map[string]*listener{},
@@ -238,7 +243,7 @@ func (h *Hub) HandlePhone(conn net.Conn, label string, hello []byte, deadline ti
 		_ = conn.Close()
 		return
 	}
-	if !h.opens.Allow(label) || h.meters.over(owner.AccountID, h.Cfg.MonthlyBytesPerAccount) {
+	if !h.opensBy.Allow(label+"|"+netkey.Of(ip)) || !h.opens.Allow(label) || h.meters.over(owner.AccountID, h.Cfg.MonthlyBytesPerAccount) {
 		_ = conn.Close()
 		return
 	}
@@ -451,6 +456,20 @@ func (h *Hub) serveAccept(w http.ResponseWriter, r *http.Request, p auth.Princip
 	desktop := websocket.NetConn(context.Background(), ws, websocket.MessageBinary)
 	h.splice(pending, desktop, p)
 	return nil
+}
+
+func (h *Hub) NotifyDeviceAdded(accountID string, device store.Device) {
+	h.mu.Lock()
+	var ls []*listener
+	for _, l := range h.listeners {
+		if l.accountID == accountID && l.deviceID != device.ID {
+			ls = append(ls, l)
+		}
+	}
+	h.mu.Unlock()
+	for _, l := range ls {
+		_ = l.send(controlMessage{Type: "device-added", DeviceID: device.ID, Name: device.Name, CreatedAt: device.CreatedAt})
+	}
 }
 
 func (h *Hub) KickSession(tokenHash []byte) {

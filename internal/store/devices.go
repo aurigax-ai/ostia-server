@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"time"
 
 	"github.com/aurigax-ai/ostia-server/internal/ids"
 )
@@ -129,3 +130,36 @@ func (d *DB) RevokeDevice(ctx context.Context, accountID, id string) (label stri
 }
 
 func DeviceSlot(deviceID string) string { return "device:" + deviceID }
+
+func (d *DB) UnseenDevices(ctx context.Context, viewer Device) (map[string]bool, error) {
+	rows, err := d.sql.QueryContext(ctx, `
+		SELECT v.id FROM devices v
+		WHERE v.account_id = ? AND v.revoked_at = 0 AND v.id != ? AND v.created_at >= ?
+		  AND NOT EXISTS (SELECT 1 FROM device_seen s WHERE s.viewer_device_id = ? AND s.device_id = v.id)`,
+		viewer.AccountID, viewer.ID, viewer.CreatedAt, viewer.ID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]bool{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out[id] = true
+	}
+	return out, rows.Err()
+}
+
+func (d *DB) MarkSeen(ctx context.Context, viewerDeviceID, deviceID string) error {
+	_, err := d.sql.ExecContext(ctx, `INSERT OR IGNORE INTO device_seen (viewer_device_id, device_id) VALUES (?, ?)`, viewerDeviceID, deviceID)
+	return err
+}
+
+func (d *DB) EstablishedDevices(ctx context.Context, accountID, exceptDeviceID string, olderThan time.Duration) (int, error) {
+	var n int
+	err := d.sql.QueryRowContext(ctx, `SELECT COUNT(*) FROM devices WHERE account_id = ? AND revoked_at = 0 AND id != ? AND created_at <= ?`,
+		accountID, exceptDeviceID, d.now().Add(-olderThan).UnixMilli()).Scan(&n)
+	return n, err
+}

@@ -10,7 +10,7 @@ import (
 	"github.com/aurigax-ai/ostia-server/internal/auth"
 )
 
-const unconfirmedByteLimit = 256 << 10
+const unconfirmedByteLimit = 32 << 10
 
 type meteredConn struct {
 	net.Conn
