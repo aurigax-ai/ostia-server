@@ -155,7 +155,7 @@ func TestShareHostSendsStrictHeadersAndNoCookies(t *testing.T) {
 	}
 	shell := e.net.ShareGet(t, sh.ID, "/")
 	csp := shell.Header.Get("Content-Security-Policy")
-	for _, directive := range []string{"default-src 'none'", "connect-src 'self'", "frame-src 'none'", "frame-ancestors 'none'", "base-uri 'none'"} {
+	for _, directive := range []string{"default-src 'none'", "connect-src https://" + apiHost + "/s/;", "script-src https://" + apiHost + "/s/ ", "frame-src 'none'", "frame-ancestors 'none'", "base-uri 'none'"} {
 		if !strings.Contains(csp, directive) {
 			t.Errorf("shell CSP lacks %q: %s", directive, csp)
 		}
@@ -505,8 +505,11 @@ func TestSharesOnTheAPIOriginStillSandboxEveryArtifact(t *testing.T) {
 	if blob := n.ShareGet(t, encrypted.ID, "/blob"); strings.Contains(string(blob.Body), "document.cookie") {
 		t.Fatal("an encrypted share must not be served as readable bytes")
 	}
-	if res := n.ShareGet(t, public.ID, "/blob"); res.Status != http.StatusOK || res.Header.Get("Content-Type") != "application/octet-stream" {
+	if res := n.ShareGet(t, public.ID, "/blob"); res.Status != http.StatusOK || res.Header.Get("Content-Type") != "application/octet-stream" || res.Header.Get("Content-Disposition") != "attachment" {
 		t.Fatalf("a public share's bytes are data, not a document: %s", res)
+	}
+	if res := n.ShareGet(t, "not-a-share-id", "/"); res.Status != http.StatusNotFound || res.Header.Get("X-Content-Type-Options") != "nosniff" || res.Header.Get("Cache-Control") != "no-store" {
+		t.Fatalf("an invalid label must still get the common headers: %s", res)
 	}
 	for _, path := range []string{"/admin/", "/admin/invites", "/v1/shares"} {
 		if res := n.ShareGet(t, public.ID, path); res.Status != http.StatusNotFound {

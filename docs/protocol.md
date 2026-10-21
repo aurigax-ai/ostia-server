@@ -202,7 +202,7 @@ All share routes are on the API host, under `/s/<id>`. A share id is validated b
 |---|---|
 | `GET /s/<id>` (or with a trailing `/`) | The fixed shell page, for every mode. |
 | `GET /s/<id>/meta` | `{v: 1, mode, size, salt, expiresAt, warning}`; `warning` is the server's `publish.share_warning` and no share can change it; `404` unknown or not uploaded, `410` expired or removed |
-| `GET /s/<id>/blob` | The ciphertext, or the file itself for a public share. Answers `404` to a top-level navigation (`Sec-Fetch-Mode: navigate` or `Sec-Fetch-Dest: document`), as does `/meta`, so a link cannot download it |
+| `GET /s/<id>/blob` | The ciphertext, or the file itself for a public share. Sent with `Content-Disposition: attachment`. Answers `404` to a top-level navigation (`Sec-Fetch-Mode: navigate` or `Sec-Fetch-Dest: document`), as does `/meta`, so a link cannot download it |
 | `POST /s/<id>/view` | Counts one view; the shell calls it once the page is shown, after the visitor accepted the notice. `204`; `404` for an unknown, expired or removed share |
 | `POST /s/<id>/report` | `{reason}` as above, for the shell's report button |
 | `GET /s/-/shell.js`, `/s/-/crypto.js`, `/s/-/shell.css` | The shell's static assets; `-` is not a valid share id |

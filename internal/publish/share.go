@@ -17,8 +17,8 @@ import (
 )
 
 const (
-	shellContentSecurityPolicy = "default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src data: blob:; font-src data:; media-src data: blob:; connect-src 'self'; frame-src 'none'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'"
-	dataContentSecurityPolicy  = "default-src 'none'; sandbox"
+	shellPolicyTemplate       = "default-src 'none'; script-src {origin}/s/ 'unsafe-inline'; style-src {origin}/s/ 'unsafe-inline'; img-src data: blob:; font-src data:; media-src data: blob:; connect-src {origin}/s/; frame-src 'none'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'"
+	dataContentSecurityPolicy = "default-src 'none'; sandbox"
 )
 
 const permissionsPolicy = "fullscreen=(), camera=(), microphone=(), geolocation=(), payment=(), usb=(), serial=(), clipboard-read=(), clipboard-write=(), display-capture=(), screen-wake-lock=(), picture-in-picture=()"
@@ -43,17 +43,21 @@ func shareRoute(urlPath string) (label, rest string, ok bool) {
 	return label, "/" + rest, true
 }
 
+func (s *Service) shellContentSecurityPolicy() string {
+	return strings.ReplaceAll(shellPolicyTemplate, "{origin}", s.Scheme+"://"+s.authority(s.APIDomain))
+}
+
 func (s *Service) ShareHandler() http.Handler {
 	read := limit.Rule{Every: time.Second, Burst: 120}
 	reportRule := limit.Rule{Every: 12 * time.Minute, Burst: 5}
 	return s.Guard.PerIP("share.read", read, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		setCommonHeaders(w)
 		label, path, ok := shareRoute(r.URL.Path)
 		if !ok || (label != assetLabel && !ids.ValidID(label)) {
 			http.NotFound(w, r)
 			return
 		}
 		id := label
-		setCommonHeaders(w)
 		if path == "/report" && r.Method == http.MethodPost && label != assetLabel {
 			s.Guard.PerIP("share.report", reportRule, httpx.Handle(func(w http.ResponseWriter, r *http.Request) error {
 				var in struct {
@@ -86,7 +90,7 @@ func (s *Service) ShareHandler() http.Handler {
 		}
 		switch path {
 		case "/", "":
-			s.serveAsset(w, r, "index.html", "text/html; charset=utf-8", shellContentSecurityPolicy)
+			s.serveAsset(w, r, "index.html", "text/html; charset=utf-8", s.shellContentSecurityPolicy())
 		case "/meta":
 			s.serveMeta(w, r, id)
 		case "/blob":
@@ -211,6 +215,7 @@ func (s *Service) serveBlob(w http.ResponseWriter, r *http.Request, id string) {
 	}
 	defer f.Close()
 	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Disposition", "attachment")
 	w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
 	w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
 	if r.Method == http.MethodHead {

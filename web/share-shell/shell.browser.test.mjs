@@ -5,7 +5,7 @@ import { readFileSync } from 'node:fs'
 
 const dir = new URL('./', import.meta.url)
 const goSource = readFileSync(new URL('../../internal/publish/share.go', import.meta.url), 'utf8')
-const shellCsp = goSource.match(/shellContentSecurityPolicy\s*=\s*"([^"]+)"/)[1]
+const shellCspTemplate = goSource.match(/shellPolicyTemplate\s*=\s*"([^"]+)"/)[1]
 const permissionsPolicy = goSource.match(/permissionsPolicy\s*=\s*"([^"]+)"/)[1]
 
 async function loadPlaywright() {
@@ -87,7 +87,7 @@ before(async () => {
     } else if (path === '/' && id !== '-') {
       type = 'text/html'
       body = readFileSync(new URL('index.html', dir))
-      headers['Content-Security-Policy'] = shellCsp
+      headers['Content-Security-Policy'] = shellCspTemplate.replaceAll('{origin}', `http://localhost:${base}`)
       headers['Permissions-Policy'] = permissionsPolicy
     } else if (id === '-' && ['/shell.js', '/crypto.js', '/shell.css'].includes(path)) {
       type = path.endsWith('.css') ? 'text/css' : 'text/javascript'

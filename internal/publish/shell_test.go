@@ -43,8 +43,9 @@ func TestShellRendersTheArtifactInASandboxedFrameWithoutSameOrigin(t *testing.T)
 	if !strings.Contains(string(shell), `"connect-src 'none'; form-action 'none'; base-uri 'none'"`) || !strings.Contains(string(shell), "doc.head.prepend(policy)") {
 		t.Fatal("the artifact document must get its own policy that blocks connections to the share host")
 	}
-	if !strings.Contains(shellContentSecurityPolicy, "default-src 'none'") || !strings.Contains(shellContentSecurityPolicy, "frame-ancestors 'none'") {
-		t.Fatalf("the shell's own policy: %q", shellContentSecurityPolicy)
+	policy := (&Service{APIDomain: "api.test", Scheme: "https", Port: 443}).shellContentSecurityPolicy()
+	if !strings.Contains(policy, "default-src 'none'") || !strings.Contains(policy, "frame-ancestors 'none'") {
+		t.Fatalf("the shell's own policy: %q", policy)
 	}
 }
 
@@ -111,8 +112,17 @@ func TestOnlyTheOperatorControlsTheWarning(t *testing.T) {
 }
 
 func TestTheSharedPageCannotLeaveForAnotherHost(t *testing.T) {
-	if !strings.Contains(shellContentSecurityPolicy, "frame-src 'none'") || strings.Contains(shellContentSecurityPolicy, "frame-src blob:") {
-		t.Fatalf("the shell must refuse every frame navigation: %q", shellContentSecurityPolicy)
+	policy := (&Service{APIDomain: "api.test", Scheme: "https", Port: 8443}).shellContentSecurityPolicy()
+	if !strings.Contains(policy, "frame-src 'none'") || strings.Contains(policy, "frame-src blob:") {
+		t.Fatalf("the shell must refuse every frame navigation: %q", policy)
+	}
+	for _, directive := range []string{"script-src https://api.test:8443/s/ 'unsafe-inline'", "style-src https://api.test:8443/s/ 'unsafe-inline'", "connect-src https://api.test:8443/s/;"} {
+		if !strings.Contains(policy, directive) {
+			t.Fatalf("the shell may reach only /s/ of its own origin, want %q in %q", directive, policy)
+		}
+	}
+	if strings.Contains(policy, "'self'") {
+		t.Fatalf("'self' would let the shell reach the admin and API paths: %q", policy)
 	}
 	shell, err := fs.ReadFile(shareshell.Files, "shell.js")
 	if err != nil {

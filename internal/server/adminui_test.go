@@ -760,7 +760,7 @@ func TestResponsesCarryStrictHeadersAndNoCORS(t *testing.T) {
 		if !strings.Contains(csp, "default-src 'none'") || !strings.Contains(csp, "script-src 'self'") || strings.Contains(csp, "unsafe-inline") || !strings.Contains(csp, "frame-ancestors 'none'") {
 			t.Errorf("%s CSP %q", path, csp)
 		}
-		if h.Get("Cache-Control") != "no-store" || h.Get("X-Content-Type-Options") != "nosniff" || h.Get("Referrer-Policy") != "no-referrer" {
+		if h.Get("Cache-Control") != "no-store" || h.Get("X-Content-Type-Options") != "nosniff" || h.Get("Referrer-Policy") != "no-referrer" || h.Get("Cross-Origin-Opener-Policy") != "same-origin" {
 			t.Errorf("%s headers %v", path, h)
 		}
 		for name := range h {
