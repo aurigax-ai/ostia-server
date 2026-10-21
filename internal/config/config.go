@@ -121,6 +121,7 @@ type Push struct {
 	MaxHandles           int      `toml:"max_handles"`
 	MaxHandlesPerAccount int      `toml:"max_handles_per_account"`
 	TicketTTL            Duration `toml:"ticket_ttl"`
+	TicketBurst          int      `toml:"ticket_burst"`
 	FCM                  FCM      `toml:"fcm"`
 	APNs                 APNs     `toml:"apns"`
 }
@@ -211,7 +212,7 @@ func Default() Config {
 			ManifestCheckpointDays: 14,
 			GCGrace:                Duration(time.Hour),
 		},
-		Push: Push{MaxHandles: 100000, MaxHandlesPerAccount: 20, TicketTTL: Duration(10 * time.Minute)},
+		Push: Push{MaxHandles: 100000, MaxHandlesPerAccount: 20, TicketTTL: Duration(10 * time.Minute), TicketBurst: 3},
 	}
 }
 

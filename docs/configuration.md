@@ -99,5 +99,6 @@
 | `max_handles` | `100000` | Push registrations the server accepts. |
 | `max_handles_per_account` | `20` | Push registrations per account. |
 | `ticket_ttl` | `10m` | How long a registration ticket stays valid. |
+| `ticket_burst` | `3` | Tickets an account may request at once; then one every 10 minutes, so a stolen session cannot cycle the account's handles. |
 | `fcm.service_account_file` | empty | Firebase service account JSON. `fcm.endpoint` overrides the API base for testing. |
 | `apns.key_file`, `key_id`, `team_id`, `topic`, `production` | empty | Apple token-based credentials (`.p8`). `apns.endpoint` overrides the API base for testing. |

@@ -703,7 +703,7 @@
     },
     "/v1/devices/invite": {
       "post": {
-        "summary": "Mint a one-time code that adds a device to this account (needs an elevated session once there are two devices)",
+        "summary": "Mint a one-time code that adds a device to this account (signed with the device key; needs an elevated session once there are two devices)",
         "security": [
           {
             "bearer": []
@@ -725,6 +725,16 @@
                       "description": "Unix milliseconds"
                     }
                   }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "device-signature-required, bad-signature, stale-signature or elevation-required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -755,18 +765,26 @@
                 }
               }
             }
-          },
-          "403": {
-            "description": "elevation-required: approve from another device or re-authenticate with GitHub (see /v1/auth/elevation)",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
           }
         },
+        "parameters": [
+          {
+            "name": "X-Device-Signature",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Device-Timestamp",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
         "tags": [
           "Accounts"
         ]
@@ -936,6 +954,14 @@
               "type": "string"
             },
             "description": ""
+          },
+          {
+            "name": "X-Device-Signature",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "tags": [
@@ -1377,7 +1403,7 @@
             "description": "Approved; the requesting session is elevated"
           },
           "403": {
-            "description": "device-too-new, or a device cannot approve its own request",
+            "description": "device-signature-required, bad-signature, device-too-new, requester-too-new, or a device cannot approve its own request",
             "content": {
               "application/json": {
                 "schema": {

@@ -92,21 +92,34 @@ func (s *Service) approvalStatus(w http.ResponseWriter, r *http.Request, p Princ
 }
 
 func (s *Service) approve(w http.ResponseWriter, r *http.Request, p Principal) error {
+	pending, err := s.DB.PendingApproval(r.Context(), r.PathValue("id"), p.AccountID)
+	if errors.Is(err, store.ErrNotFound) {
+		return httpx.ErrNotFound
+	}
+	if err != nil {
+		return err
+	}
+	if err := s.requireDeviceSignature(r, p, ApproveMessage(p.DeviceID, pending.ID, pending.RequesterDeviceID)); err != nil {
+		return err
+	}
 	approver, err := s.DB.Device(r.Context(), p.DeviceID)
 	if err != nil {
 		return err
 	}
-	if min := s.Cfg.ApproverMinAge.Std(); min > 0 && s.Now().Sub(time.UnixMilli(approver.CreatedAt)) < min {
+	min := s.Cfg.ApproverMinAge.Std()
+	if min > 0 && s.Now().Sub(time.UnixMilli(approver.CreatedAt)) < min {
 		return httpx.Errf(http.StatusForbidden, "device-too-new", "this device joined recently; its approvals are accepted once it has been part of the account long enough")
 	}
 	until := s.Now().Add(s.Cfg.ElevationTTL.Std()).UnixMilli()
-	err = s.DB.Approve(r.Context(), r.PathValue("id"), p.AccountID, p.DeviceID, until)
+	err = s.DB.Approve(r.Context(), pending.ID, p.AccountID, p.DeviceID, until, min)
 	switch {
 	case err == nil:
 		w.WriteHeader(http.StatusNoContent)
 		return nil
 	case errors.Is(err, store.ErrConflict):
 		return httpx.Errf(http.StatusForbidden, "forbidden", "a device cannot approve its own request")
+	case errors.Is(err, store.ErrRequesterTooNew):
+		return httpx.Errf(http.StatusForbidden, "requester-too-new", "the device asking has joined too recently to be elevated")
 	case errors.Is(err, store.ErrNotFound):
 		return httpx.ErrNotFound
 	}

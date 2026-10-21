@@ -84,9 +84,22 @@ DELETE /v1/devices/{id}          204   revokes sessions, the relay label and the
 DELETE /v1/account               204   removes every row and blob, push handles included, and closes the relay listener (elevated session)
 ```
 
+### Actions that need the device key
+
+Some actions change who belongs to the account, so a bearer token alone is not enough: the request must also be signed with the calling device's Ed25519 key (the key registered with the device). The signature goes in `X-Device-Signature` (unpadded base64url) over a prefixed message that names the device and the target:
+
+| Action | Message |
+|---|---|
+| `POST /v1/devices/invite` | `ostia-server/invite/v1\n<device id>\n<timestamp>`; also send `X-Device-Timestamp` (milliseconds, within two minutes of the server clock, and larger than the device's previous one, so a captured request cannot be replayed) |
+| `DELETE /v1/devices/{id}` | `ostia-server/revoke/v1\n<device id>\n<target id>` |
+| `POST /v1/auth/approvals/{id}/approve` | `ostia-server/approve/v1\n<approver id>\n<approval id>\n<requester id>` |
+| `POST /v1/devices/{id}/seen` | body `{sig}` over `ostia-server/seen/v1\n<viewer id>\n<target id>` |
+
+A missing signature answers `403 device-signature-required`, a wrong one `403 bad-signature`, an old or reused timestamp `403 stale-signature`. A stolen session token therefore cannot add, remove or approve devices. An approval is also refused (`403 requester-too-new`) when the device asking for elevation has not belonged to the account for `auth.approver_min_age`, whoever approves.
+
 ### Revoking devices
 
-Revoking another device or the account normally needs an elevated session. Exceptions, so an owner can always remove an intruder: a device that has belonged to the account for `auth.approver_min_age` may revoke a device that is still younger than that (probation) without elevation, and a device may revoke itself without elevation only while an older active device remains (a token alone cannot remove an account's oldest device, even when the account is new). `DELETE /v1/auth/session` (sign out) is always free. A client should show every device with `new: true` to the person and keep asking until they acknowledge it; a relay listener receives `{"t": "device-added", "deviceId", "name", "createdAt"}` when a device joins an account that already had one, and again for every unacknowledged device each time it connects (so a listener that was replaced or offline still learns of it).
+Revoking another device or the account normally needs an elevated session. Exceptions, so an owner can always remove an intruder: a device may revoke a device that is still younger than `auth.approver_min_age` (probation) and was added after it, without elevation, and a device may revoke itself without elevation only while an older active device remains (a token alone cannot remove an account's oldest device, even when the account is new). `DELETE /v1/auth/session` (sign out) is always free. A client should show every device with `new: true` to the person and keep asking until they acknowledge it; a relay listener receives `{"t": "device-added", "deviceId", "name", "createdAt"}` when a device joins an account that already had one, and again for every unacknowledged device each time it connects (so a listener that was replaced or offline still learns of it).
 
 ### Elevated sessions
 

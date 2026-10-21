@@ -83,6 +83,7 @@ gc_grace = "1h0m0s"
 max_handles = 100000
 max_handles_per_account = 20
 ticket_ttl = "10m0s"
+ticket_burst = 3
 
 [push.fcm]
 service_account_file = ""

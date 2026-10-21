@@ -13,6 +13,8 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -108,10 +110,62 @@ func (r Response) Map(t testing.TB) map[string]any {
 func (r Response) String() string { return fmt.Sprintf("%d %s", r.Status, r.Body) }
 
 type API struct {
-	Net    Net
-	ID     *Identity
-	Token  string
-	Client *http.Client
+	Net      Net
+	ID       *Identity
+	Token    string
+	Client   *http.Client
+	Unsigned bool
+
+	mu    sync.Mutex
+	stamp int64
+}
+
+func (a *API) nextStamp() int64 {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.stamp = max(time.Now().UnixMilli(), a.stamp+1)
+	return a.stamp
+}
+
+func (a *API) deviceSignature(method, path string) map[string]string {
+	if a.Unsigned || a.ID == nil || a.ID.Sign == nil || a.Token == "" || a.ID.DeviceID == "" {
+		return nil
+	}
+	sign := func(message string) string {
+		return b64.EncodeToString(ed25519.Sign(a.ID.Sign, []byte(message)))
+	}
+	switch {
+	case method == "POST" && path == "/v1/devices/invite":
+		stamp := a.nextStamp()
+		return map[string]string{
+			"X-Device-Timestamp": fmt.Sprint(stamp),
+			"X-Device-Signature": sign("ostia-server/invite/v1\n" + a.ID.DeviceID + "\n" + fmt.Sprint(stamp)),
+		}
+	case method == "DELETE" && strings.HasPrefix(path, "/v1/devices/"):
+		target := strings.TrimPrefix(path, "/v1/devices/")
+		return map[string]string{"X-Device-Signature": sign("ostia-server/revoke/v1\n" + a.ID.DeviceID + "\n" + target)}
+	case method == "POST" && strings.HasPrefix(path, "/v1/auth/approvals/") && strings.HasSuffix(path, "/approve"):
+		id := strings.TrimSuffix(strings.TrimPrefix(path, "/v1/auth/approvals/"), "/approve")
+		res, err := a.rawUnsigned("GET", "/v1/auth/approvals", nil, nil)
+		if err != nil || res.Status != http.StatusOK {
+			return nil
+		}
+		var list struct {
+			Approvals []struct {
+				ID       string `json:"id"`
+				DeviceID string `json:"deviceId"`
+			} `json:"approvals"`
+		}
+		if json.Unmarshal(res.Body, &list) != nil {
+			return nil
+		}
+		for _, pending := range list.Approvals {
+			if pending.ID == id {
+				return map[string]string{"X-Device-Signature": sign("ostia-server/approve/v1\n" + a.ID.DeviceID + "\n" + id + "\n" + pending.DeviceID)}
+			}
+		}
+	}
+	return nil
 }
 
 func NewAPI(n Net, id *Identity) *API {
@@ -119,6 +173,17 @@ func NewAPI(n Net, id *Identity) *API {
 }
 
 func (a *API) Raw(method, path string, headers map[string]string, body io.Reader) (Response, error) {
+	merged := map[string]string{}
+	for k, v := range a.deviceSignature(method, path) {
+		merged[k] = v
+	}
+	for k, v := range headers {
+		merged[k] = v
+	}
+	return a.rawUnsigned(method, path, merged, body)
+}
+
+func (a *API) rawUnsigned(method, path string, headers map[string]string, body io.Reader) (Response, error) {
 	req, err := http.NewRequest(method, a.Net.URL(path), body)
 	if err != nil {
 		return Response{}, err

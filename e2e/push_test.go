@@ -23,7 +23,7 @@ func newPushFixture(t *testing.T, extra string) *pushFixture {
 	t.Helper()
 	fake := testkit.NewFakePush(t)
 	account, p8 := fake.WriteCredentials(t, t.TempDir())
-	e := newEnvModules(t, "relay = true\npublish = true\nsync = true\npush = true\n", fake.ConfigTOML(account, p8)+extra)
+	e := newEnvModules(t, "relay = true\npublish = true\nsync = true\npush = true\n", fake.ConfigTOML(account, p8)+testkit.WithKey(extra, "[push]", "ticket_burst", "1000"))
 	return &pushFixture{env: e, fake: fake, desktop: e.user(t, "desktop")}
 }
 

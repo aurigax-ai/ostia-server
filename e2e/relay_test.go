@@ -171,10 +171,12 @@ func stillRelayed(t *testing.T, f *relayFixture) (net.Conn, bool) {
 	if err != nil {
 		return nil, false
 	}
-	time.Sleep(200 * time.Millisecond)
-	if _, err := testkit.Converse(conn, "still relayed?"); err != nil {
-		_ = conn.Close()
-		return nil, false
+	for range 4 {
+		time.Sleep(60 * time.Millisecond)
+		if _, err := testkit.Converse(conn, "still relayed?"); err != nil {
+			_ = conn.Close()
+			return nil, false
+		}
 	}
 	return conn, true
 }

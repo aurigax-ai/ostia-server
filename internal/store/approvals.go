@@ -62,7 +62,16 @@ func (d *DB) ApprovalOf(ctx context.Context, id string, tokenHash []byte) (Appro
 	return a, notFound(err)
 }
 
-func (d *DB) Approve(ctx context.Context, id, accountID, approverDeviceID string, elevatedUntil int64) error {
+func (d *DB) PendingApproval(ctx context.Context, id, accountID string) (Approval, error) {
+	a := Approval{ID: id, AccountID: accountID}
+	err := d.sql.QueryRowContext(ctx, `
+		SELECT requester_device_id, created_at, expires_at FROM approvals
+		WHERE id = ? AND account_id = ? AND approved_at = 0 AND expires_at > ?`, id, accountID, d.ms()).
+		Scan(&a.RequesterDeviceID, &a.CreatedAt, &a.ExpiresAt)
+	return a, notFound(err)
+}
+
+func (d *DB) Approve(ctx context.Context, id, accountID, approverDeviceID string, elevatedUntil int64, minRequesterAge time.Duration) error {
 	return d.tx(ctx, func(tx *sql.Tx) error {
 		var requesterDevice string
 		var tokenHash []byte
@@ -74,6 +83,13 @@ func (d *DB) Approve(ctx context.Context, id, accountID, approverDeviceID string
 		}
 		if requesterDevice == approverDeviceID {
 			return ErrConflict
+		}
+		var requesterCreated int64
+		if err := tx.QueryRowContext(ctx, `SELECT created_at FROM devices WHERE id = ?`, requesterDevice).Scan(&requesterCreated); err != nil {
+			return notFound(err)
+		}
+		if minRequesterAge > 0 && d.now().Sub(time.UnixMilli(requesterCreated)) < minRequesterAge {
+			return ErrRequesterTooNew
 		}
 		if _, err := tx.ExecContext(ctx, `UPDATE approvals SET approved_at = ? WHERE id = ?`, d.ms(), id); err != nil {
 			return err

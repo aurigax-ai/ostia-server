@@ -123,7 +123,7 @@ func New(cfg config.Config, opts Options) (*Server, error) {
 		if err != nil {
 			return nil, err
 		}
-		s.Push = &push.Service{DB: db, Key: key, Auth: s.Auth, Guard: s.Guard, Now: now, MaxHandles: cfg.Push.MaxHandles, MaxHandlesPerAccount: cfg.Push.MaxHandlesPerAccount, TicketTTL: cfg.Push.TicketTTL.Std(), Sender: sender}
+		s.Push = &push.Service{DB: db, Key: key, Auth: s.Auth, Guard: s.Guard, Now: now, MaxHandles: cfg.Push.MaxHandles, MaxHandlesPerAccount: cfg.Push.MaxHandlesPerAccount, TicketTTL: cfg.Push.TicketTTL.Std(), TicketBurst: cfg.Push.TicketBurst, Sender: sender}
 		s.Push.Mount(mux)
 	}
 	mux.Handle("GET /v1/info", s.Guard.PerIP("info", limit.Rule{Every: time.Second, Burst: 30}, httpx.Handle(s.info)))

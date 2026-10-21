@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -21,10 +22,41 @@ import (
 )
 
 type env struct {
-	svc   *Service
-	srv   *httptest.Server
-	clock *time.Time
-	gh    *fakeGitHub
+	svc      *Service
+	srv      *httptest.Server
+	clock    *time.Time
+	gh       *fakeGitHub
+	owners   map[string]*device
+	unsigned map[string]bool
+	stamp    int64
+}
+
+func (e *env) deviceHeaders(t *testing.T, method, path, token string) map[string]string {
+	t.Helper()
+	d := e.owners[token]
+	if d == nil || e.unsigned[token] {
+		return nil
+	}
+	sign := func(message []byte) string { return httpx.EncodeB64(ed25519.Sign(d.sign, message)) }
+	switch {
+	case method == "POST" && path == "/v1/devices/invite":
+		e.stamp = max(e.clock.UnixMilli(), e.stamp+1)
+		return map[string]string{timestampHeader: strconv.FormatInt(e.stamp, 10), signatureHeader: sign(InviteMessage(d.id, e.stamp))}
+	case method == "DELETE" && strings.HasPrefix(path, "/v1/devices/"):
+		return map[string]string{signatureHeader: sign(RevokeMessage(d.id, strings.TrimPrefix(path, "/v1/devices/")))}
+	case method == "POST" && strings.HasPrefix(path, "/v1/auth/approvals/") && strings.HasSuffix(path, "/approve"):
+		id := strings.TrimSuffix(strings.TrimPrefix(path, "/v1/auth/approvals/"), "/approve")
+		dev, err := e.svc.DB.Device(t.Context(), d.id)
+		if err != nil {
+			return nil
+		}
+		pending, err := e.svc.DB.PendingApproval(t.Context(), id, dev.AccountID)
+		if err != nil {
+			return nil
+		}
+		return map[string]string{signatureHeader: sign(ApproveMessage(d.id, id, pending.RequesterDeviceID))}
+	}
+	return nil
 }
 
 type fakeGitHub struct {
@@ -78,7 +110,7 @@ func newFakeGitHub() *fakeGitHub {
 func newEnv(t *testing.T) *env {
 	t.Helper()
 	now := time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC)
-	e := &env{clock: &now, gh: newFakeGitHub()}
+	e := &env{clock: &now, gh: newFakeGitHub(), owners: map[string]*device{}, unsigned: map[string]bool{}}
 	t.Cleanup(e.gh.srv.Close)
 	clock := func() time.Time { return *e.clock }
 	db, err := store.Open(filepath.Join(t.TempDir(), "db"), clock)
@@ -143,6 +175,9 @@ func (e *env) call(t *testing.T, method, path, token string, body any) (int, map
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
+	for k, v := range e.deviceHeaders(t, method, path, token) {
+		req.Header.Set(k, v)
+	}
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -197,7 +232,9 @@ func (e *env) session(t *testing.T, d *device) string {
 	if status != 200 {
 		t.Fatalf("verify %d %v", status, out)
 	}
-	return out["token"].(string)
+	token := out["token"].(string)
+	e.owners[token] = d
+	return token
 }
 
 func TestInviteRegistrationThenKeySession(t *testing.T) {
@@ -960,5 +997,75 @@ func TestNewDevicesAreAnnouncedAndFlaggedUntilSeen(t *testing.T) {
 	}
 	if status, _ := e.call(t, "POST", "/v1/devices/"+strings.Repeat("a", 26)+"/seen", tokenA, sign(a.sign, a.id, strings.Repeat("a", 26))); status != 404 {
 		t.Fatalf("unknown device: %d", status)
+	}
+}
+
+func TestSignedActionsRefuseBareTokensStaleTimestampsAndReplays(t *testing.T) {
+	e := newEnv(t)
+	d := newDevice("laptop")
+	e.signIn(t, d, e.invite(t, ""))
+	token := e.session(t, d)
+
+	e.unsigned[token] = true
+	if status, out := e.call(t, "POST", "/v1/devices/invite", token, nil); status != 403 || out["error"] != "device-signature-required" {
+		t.Fatalf("a bare token minted an invite: %d %v", status, out)
+	}
+	delete(e.unsigned, token)
+
+	send := func(stamp int64) (int, map[string]any) {
+		req, _ := http.NewRequest("POST", e.srv.URL+"/v1/devices/invite", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set(timestampHeader, strconv.FormatInt(stamp, 10))
+		req.Header.Set(signatureHeader, httpx.EncodeB64(ed25519.Sign(d.sign, InviteMessage(d.id, stamp))))
+		res, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer res.Body.Close()
+		var out map[string]any
+		_ = json.UnmarshalRead(res.Body, &out)
+		return res.StatusCode, out
+	}
+	now := e.clock.UnixMilli()
+	if status, out := send(now - int64(10*time.Minute/time.Millisecond)); status != 403 || out["error"] != "stale-signature" {
+		t.Fatalf("an old timestamp: %d %v", status, out)
+	}
+	if status, _ := send(now); status != 201 {
+		t.Fatalf("a fresh signature: %d", status)
+	}
+	if status, out := send(now); status != 403 || out["error"] != "stale-signature" {
+		t.Fatalf("a replayed signature: %d %v", status, out)
+	}
+}
+
+func TestApprovalIsRefusedForARequesterThatJustJoinedEvenFromAnEstablishedDevice(t *testing.T) {
+	e := newEnv(t)
+	e.svc.Cfg.ApproverMinAge = config.Duration(24 * time.Hour)
+	a, b := newDevice("laptop"), newDevice("new phone")
+	e.signIn(t, a, e.invite(t, ""))
+	*e.clock = e.clock.Add(25 * time.Hour)
+	tokenA := e.session(t, a)
+	_, out := e.post(t, "/v1/devices/invite", tokenA, nil)
+	e.signIn(t, b, out["code"].(string))
+	tokenB := e.session(t, b)
+	_, out = e.post(t, "/v1/auth/elevation/approval", tokenB, nil)
+	id := out["approvalId"].(string)
+	if status, out := e.call(t, "POST", "/v1/auth/approvals/"+id+"/approve", tokenA, nil); status != 403 || out["error"] != "requester-too-new" {
+		t.Fatalf("A approving its own new device: %d %v", status, out)
+	}
+	e.unsigned[tokenA] = true
+	if status, out := e.call(t, "POST", "/v1/auth/approvals/"+id+"/approve", tokenA, nil); status != 403 || out["error"] != "device-signature-required" {
+		t.Fatalf("a bare token approving: %d %v", status, out)
+	}
+}
+
+func TestADeviceDoesNotAcknowledgeItself(t *testing.T) {
+	e := newEnv(t)
+	d := newDevice("laptop")
+	e.signIn(t, d, e.invite(t, ""))
+	token := e.session(t, d)
+	sig := httpx.EncodeB64(ed25519.Sign(d.sign, SeenMessage(d.id, d.id)))
+	if status, _ := e.call(t, "POST", "/v1/devices/"+d.id+"/seen", token, map[string]string{"sig": sig}); status != 400 {
+		t.Fatalf("%d", status)
 	}
 }

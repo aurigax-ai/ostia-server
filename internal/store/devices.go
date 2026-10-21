@@ -164,3 +164,12 @@ func (d *DB) OlderActiveDevices(ctx context.Context, device Device) (int, error)
 		device.AccountID, device.ID, device.CreatedAt, device.CreatedAt, device.ID).Scan(&n)
 	return n, err
 }
+
+func (d *DB) AdvanceSigningCounter(ctx context.Context, deviceID string, ms int64) (bool, error) {
+	res, err := d.sql.ExecContext(ctx, `UPDATE devices SET last_signed_ms = ? WHERE id = ? AND last_signed_ms < ?`, ms, deviceID, ms)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n == 1, err
+}

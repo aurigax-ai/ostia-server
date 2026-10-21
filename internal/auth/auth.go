@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -25,6 +26,12 @@ const (
 	RegisterContext  = "ostia-server/register/v1"
 	ChallengeContext = "ostia-server/auth/v1"
 	SeenContext      = "ostia-server/seen/v1"
+	InviteContext    = "ostia-server/invite/v1"
+	RevokeContext    = "ostia-server/revoke/v1"
+	ApproveContext   = "ostia-server/approve/v1"
+	signatureHeader  = "X-Device-Signature"
+	timestampHeader  = "X-Device-Timestamp"
+	signatureSkew    = 2 * time.Minute
 
 	keySize                = 32
 	maxNameLength          = 64
@@ -384,6 +391,21 @@ func (s *Service) listDevices(w http.ResponseWriter, r *http.Request, p Principa
 }
 
 func (s *Service) deviceInvite(w http.ResponseWriter, r *http.Request, p Principal) error {
+	stamp, err := strconv.ParseInt(r.Header.Get(timestampHeader), 10, 64)
+	if err != nil {
+		return httpx.Errf(http.StatusForbidden, "device-signature-required", "send X-Device-Timestamp (milliseconds) and sign it with the device key")
+	}
+	if skew := s.Now().Sub(time.UnixMilli(stamp)); skew > signatureSkew || skew < -signatureSkew {
+		return httpx.Errf(http.StatusForbidden, "stale-signature", "the signed timestamp is too far from the server's clock")
+	}
+	if err := s.requireDeviceSignature(r, p, InviteMessage(p.DeviceID, stamp)); err != nil {
+		return err
+	}
+	if fresh, err := s.DB.AdvanceSigningCounter(r.Context(), p.DeviceID, stamp); err != nil {
+		return err
+	} else if !fresh {
+		return httpx.Errf(http.StatusForbidden, "stale-signature", "a signed request cannot be replayed")
+	}
 	active, err := s.DB.ActiveDeviceCount(r.Context(), p.AccountID)
 	if err != nil {
 		return err
@@ -407,6 +429,33 @@ func (s *Service) deviceInvite(w http.ResponseWriter, r *http.Request, p Princip
 	return nil
 }
 
+func InviteMessage(deviceID string, ms int64) []byte {
+	return []byte(InviteContext + "\n" + deviceID + "\n" + strconv.FormatInt(ms, 10))
+}
+
+func RevokeMessage(signerID, targetID string) []byte {
+	return []byte(RevokeContext + "\n" + signerID + "\n" + targetID)
+}
+
+func ApproveMessage(approverID, approvalID, requesterID string) []byte {
+	return []byte(ApproveContext + "\n" + approverID + "\n" + approvalID + "\n" + requesterID)
+}
+
+func (s *Service) requireDeviceSignature(r *http.Request, p Principal, message []byte) error {
+	signature, err := httpx.DecodeB64(r.Header.Get(signatureHeader))
+	if err != nil || len(signature) == 0 {
+		return httpx.Errf(http.StatusForbidden, "device-signature-required", "this action must be signed with the device's key; a session token alone is not enough")
+	}
+	device, err := s.DB.Device(r.Context(), p.DeviceID)
+	if err != nil {
+		return err
+	}
+	if !ed25519.Verify(ed25519.PublicKey(device.SignPub), message, signature) {
+		return httpx.Errf(http.StatusForbidden, "bad-signature", "the device signature does not match")
+	}
+	return nil
+}
+
 func SeenMessage(viewerID, targetID string) []byte {
 	return []byte(SeenContext + "\n" + viewerID + "\n" + targetID)
 }
@@ -421,6 +470,9 @@ func (s *Service) markSeen(w http.ResponseWriter, r *http.Request, p Principal) 
 	target, err := s.DB.Device(r.Context(), r.PathValue("id"))
 	if err != nil || target.AccountID != p.AccountID {
 		return httpx.ErrNotFound
+	}
+	if target.ID == p.DeviceID {
+		return httpx.Errf(http.StatusBadRequest, "bad-request", "a device does not acknowledge itself")
 	}
 	viewer, err := s.DB.Device(r.Context(), p.DeviceID)
 	if err != nil {
@@ -453,13 +505,16 @@ func (s *Service) needsElevationToRevoke(r *http.Request, p Principal, id string
 	if err != nil || target.AccountID != p.AccountID {
 		return true, nil
 	}
-	established := s.Now().Sub(time.UnixMilli(self.CreatedAt)) >= min
+	older := self.CreatedAt < target.CreatedAt || (self.CreatedAt == target.CreatedAt && self.ID < target.ID)
 	probation := s.Now().Sub(time.UnixMilli(target.CreatedAt)) < min
-	return !(established && probation), nil
+	return !(older && probation), nil
 }
 
 func (s *Service) revokeDevice(w http.ResponseWriter, r *http.Request, p Principal) error {
 	id := r.PathValue("id")
+	if err := s.requireDeviceSignature(r, p, RevokeMessage(p.DeviceID, id)); err != nil {
+		return err
+	}
 	needs, err := s.needsElevationToRevoke(r, p, id)
 	if err != nil {
 		return err

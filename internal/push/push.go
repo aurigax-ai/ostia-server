@@ -45,9 +45,11 @@ type Service struct {
 	MaxHandles           int
 	MaxHandlesPerAccount int
 	TicketTTL            time.Duration
+	TicketBurst          int
 	Sender               Sender
 
 	perHandle limit.All
+	tickets   *limit.Limiter
 }
 
 func (s *Service) Mount(mux *httpx.Mux) {
@@ -55,6 +57,7 @@ func (s *Service) Mount(mux *httpx.Mux) {
 		limit.New(limit.Rule{Every: 30 * time.Second, Burst: 1}, s.Now),
 		limit.New(limit.Rule{Every: time.Minute, Burst: 60}, s.Now),
 	}
+	s.tickets = limit.New(limit.Rule{Every: 10 * time.Minute, Burst: max(s.TicketBurst, 1)}, s.Now)
 	mux.Handle("POST /v1/push/tickets", s.Auth.Authed(s.ticket))
 	mux.Handle("POST /v1/push/register", s.Guard.PerIP("push.register", limit.Rule{Every: 6 * time.Second, Burst: 10}, httpx.Handle(s.register)))
 	mux.Handle("POST /v1/push/{handle}", s.Auth.Authed(s.ping))
@@ -68,6 +71,10 @@ func (s *Service) Sweep() {
 }
 
 func (s *Service) ticket(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
+	if !s.tickets.Allow(p.AccountID) {
+		w.Header().Set("Retry-After", "600")
+		return httpx.ErrRateLimited
+	}
 	ticket := ids.Token()
 	expires, err := s.DB.CreatePushTicket(r.Context(), ids.Hash(ticket), p.AccountID, s.TicketTTL)
 	if errors.Is(err, store.ErrLimit) {

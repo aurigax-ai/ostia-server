@@ -154,32 +154,69 @@ func TestElevationRoutesRequireASession(t *testing.T) {
 	}
 }
 
-func TestStolenTokenCannotTurnADeviceInviteIntoAnElevatedSession(t *testing.T) {
+func stolenCopy(e *env, owner *testkit.API) *testkit.API {
+	stolen := testkit.NewAPI(e.net, &testkit.Identity{Name: "copy of the owner", DeviceID: owner.ID.DeviceID, AccountID: owner.ID.AccountID})
+	stolen.Token = owner.Token
+	stolen.Unsigned = true
+	return stolen
+}
+
+func requireSignature(t *testing.T, api *testkit.API, what, method, path string, body any) {
+	t.Helper()
+	res := api.Do(t, method, path, body)
+	if res.Status != http.StatusForbidden || res.Map(t)["error"] != "device-signature-required" {
+		t.Errorf("%s without the device key was not refused: %s", what, res)
+	}
+}
+
+func TestSessionTokenAloneCannotAddRemoveOrApproveDevices(t *testing.T) {
+	e := newEnv(t, "")
+	owner := e.user(t, "laptop")
+	phone := e.device(t, owner, "phone")
+	stolen := stolenCopy(e, owner)
+
+	requireSignature(t, stolen, "minting an invite", "POST", "/v1/devices/invite", nil)
+	requireSignature(t, stolen, "revoking a device", "DELETE", "/v1/devices/"+phone.ID.DeviceID, nil)
+	requireSignature(t, stolen, "revoking itself", "DELETE", "/v1/devices/"+owner.ID.DeviceID, nil)
+
+	approval := phone.Must(t, http.StatusCreated, "POST", "/v1/auth/elevation/approval", nil).Map(t)["approvalId"].(string)
+	requireSignature(t, stolen, "approving a request", "POST", "/v1/auth/approvals/"+approval+"/approve", nil)
+	if phone.Elevated(t) {
+		t.Fatal("the stolen token elevated another session")
+	}
+	owner.Must(t, http.StatusNoContent, "POST", "/v1/auth/approvals/"+approval+"/approve", nil)
+
+	wrong := testkit.NewAPI(e.net, testkit.NewIdentity("wrong key"))
+	wrong.ID.DeviceID, wrong.ID.AccountID = owner.ID.DeviceID, owner.ID.AccountID
+	wrong.Token = owner.Token
+	res := wrong.Do(t, "POST", "/v1/devices/invite", nil)
+	if res.Status != http.StatusForbidden || res.Map(t)["error"] != "bad-signature" {
+		t.Fatalf("a signature from another key: %s", res)
+	}
+}
+
+func TestStolenTokenCannotElevateItselfThroughADeviceItAdded(t *testing.T) {
 	e := newEnv(t, "[auth]\nsession_ttl = \"1s\"\napprover_min_age = \"2s\"\n")
 	owner := e.user(t, "laptop")
-	stolen := testkit.NewAPI(e.net, testkit.NewIdentity("copy of the owner"))
-	stolen.ID = owner.ID
-	stolen.Token = owner.Token
+	time.Sleep(2300 * time.Millisecond)
+	owner.SignIn(t)
 
-	code := stolen.Must(t, http.StatusCreated, "POST", "/v1/devices/invite", nil).Map(t)["code"].(string)
+	code := owner.Must(t, http.StatusCreated, "POST", "/v1/devices/invite", nil).Map(t)["code"].(string)
 	attacker := testkit.NewAPI(e.net, testkit.NewIdentity("attacker"))
 	attacker.Onboard(t, code)
 
-	approval := stolen.Must(t, http.StatusCreated, "POST", "/v1/auth/elevation/approval", nil).Map(t)["approvalId"].(string)
-	res := attacker.Do(t, "POST", "/v1/auth/approvals/"+approval+"/approve", nil)
-	if res.Status != http.StatusForbidden || res.Map(t)["error"] != "device-too-new" {
-		t.Fatalf("a device the stolen token just added approved: %s", res)
+	approval := attacker.Must(t, http.StatusCreated, "POST", "/v1/auth/elevation/approval", nil).Map(t)["approvalId"].(string)
+	res := owner.Do(t, "POST", "/v1/auth/approvals/"+approval+"/approve", nil)
+	if res.Status != http.StatusForbidden || res.Map(t)["error"] != "requester-too-new" {
+		t.Fatalf("an approval for a device that has just joined must be refused even from an established device: %s", res)
 	}
-	requireElevation(t, stolen, "deleting the account with a stolen token", "DELETE", "/v1/account", nil)
-	requireElevation(t, stolen, "revoking the owner's device", "DELETE", "/v1/devices/"+attacker.ID.DeviceID, nil)
+	requireElevation(t, attacker, "deleting the account with the new device", "DELETE", "/v1/account", nil)
 
 	time.Sleep(2300 * time.Millisecond)
-	owner.SignIn(t)
 	attacker.SignIn(t)
-	if res := owner.Do(t, "POST", "/v1/devices/invite", nil); res.Status != http.StatusForbidden {
-		t.Fatalf("with two devices an invite needs approval: %s", res)
-	}
-	owner.ElevateByApproval(t, attacker)
+	owner.SignIn(t)
+	approval = attacker.Must(t, http.StatusCreated, "POST", "/v1/auth/elevation/approval", nil).Map(t)["approvalId"].(string)
+	owner.Must(t, http.StatusNoContent, "POST", "/v1/auth/approvals/"+approval+"/approve", nil)
 }
 
 func TestApprovalCardsCarryTheRequestersAge(t *testing.T) {
@@ -208,6 +245,16 @@ func TestTwoInvitesCannotBeMintedWithoutApprovalAndStaleOnesDie(t *testing.T) {
 	one := testkit.NewAPI(e.net, testkit.NewIdentity("first extra"))
 	one.Onboard(t, first)
 	requireElevation(t, owner, "a third device", "POST", "/v1/devices/invite", nil)
+}
+
+func TestAnOlderDeviceRemovesAYoungerOneOnProbationEvenWhenItIsNotEstablished(t *testing.T) {
+	e := newEnv(t, "[auth]\napprover_min_age = \"24h\"\n")
+	owner := e.user(t, "laptop")
+	code := owner.Must(t, http.StatusCreated, "POST", "/v1/devices/invite", nil).Map(t)["code"].(string)
+	intruder := testkit.NewAPI(e.net, testkit.NewIdentity("intruder"))
+	intruder.Onboard(t, code)
+	requireElevation(t, intruder, "the younger device revoking the older", "DELETE", "/v1/devices/"+owner.ID.DeviceID, nil)
+	owner.Must(t, http.StatusNoContent, "DELETE", "/v1/devices/"+intruder.ID.DeviceID, nil)
 }
 
 func TestOwnerCanRemoveAnIntruderDuringItsProbation(t *testing.T) {

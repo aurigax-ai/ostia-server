@@ -17,7 +17,8 @@ CREATE TABLE devices (
 	box_pub BLOB NOT NULL,
 	created_at INTEGER NOT NULL,
 	last_seen INTEGER NOT NULL,
-	revoked_at INTEGER NOT NULL DEFAULT 0
+	revoked_at INTEGER NOT NULL DEFAULT 0,
+	last_signed_ms INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX devices_account ON devices(account_id);
 CREATE TABLE sessions (

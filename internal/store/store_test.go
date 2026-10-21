@@ -455,17 +455,17 @@ func TestElevationLivesOnTheSessionAndApprovalNeedsAnotherDevice(t *testing.T) {
 		t.Fatalf("pending: %+v", pending)
 	}
 	until := c.t.Add(5 * time.Minute).UnixMilli()
-	if err := d.Approve(t.Context(), approval.ID, a.ID, first.ID, until); !errors.Is(err, ErrConflict) {
+	if err := d.Approve(t.Context(), approval.ID, a.ID, first.ID, until, 0); !errors.Is(err, ErrConflict) {
 		t.Fatalf("self approval: %v", err)
 	}
 	other, _ := register(t, d, "github", "stranger")
-	if err := d.Approve(t.Context(), approval.ID, other.ID, second.ID, until); !errors.Is(err, ErrNotFound) {
+	if err := d.Approve(t.Context(), approval.ID, other.ID, second.ID, until, 0); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("approval across accounts: %v", err)
 	}
-	if err := d.Approve(t.Context(), approval.ID, a.ID, second.ID, until); err != nil {
+	if err := d.Approve(t.Context(), approval.ID, a.ID, second.ID, until, 0); err != nil {
 		t.Fatal(err)
 	}
-	if err := d.Approve(t.Context(), approval.ID, a.ID, second.ID, until); !errors.Is(err, ErrNotFound) {
+	if err := d.Approve(t.Context(), approval.ID, a.ID, second.ID, until, 0); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("approving twice: %v", err)
 	}
 	sess, _ = d.LookupSession(t.Context(), token)
@@ -482,7 +482,7 @@ func TestElevationLivesOnTheSessionAndApprovalNeedsAnotherDevice(t *testing.T) {
 
 	late, _ := d.CreateApproval(t.Context(), a.ID, first.ID, token, time.Minute)
 	c.t = c.t.Add(2 * time.Minute)
-	if err := d.Approve(t.Context(), late.ID, a.ID, second.ID, until); !errors.Is(err, ErrNotFound) {
+	if err := d.Approve(t.Context(), late.ID, a.ID, second.ID, until, 0); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("expired approval: %v", err)
 	}
 }
