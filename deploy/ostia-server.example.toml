@@ -42,11 +42,13 @@ invite_ttl = "168h0m0s"
 device_invite_ttl = "10m0s"
 elevation_ttl = "5m0s"
 approval_ttl = "5m0s"
+approver_min_age = "24h0m0s"
 
 [relay]
 max_streams_per_label = 8
 max_unconfirmed_per_label = 4
 unconfirmed_timeout = "15s"
+unconfirmed_opens_per_minute = 120
 connections_per_minute = 30
 connections_per_minute_per_ip = 10
 monthly_bytes_per_account = 5368709120
@@ -73,6 +75,7 @@ max_blob_bytes = 16777216
 max_manifest_bytes = 4194304
 quota_bytes = 536870912
 manifest_history = 10
+manifest_checkpoint_days = 14
 gc_grace = "1h0m0s"
 
 [push]

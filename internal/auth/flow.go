@@ -9,6 +9,7 @@ import (
 
 	"github.com/aurigax-ai/ostia-server/internal/httpx"
 	"github.com/aurigax-ai/ostia-server/internal/ids"
+	"github.com/aurigax-ai/ostia-server/internal/netkey"
 	"github.com/aurigax-ai/ostia-server/internal/store"
 )
 
@@ -32,7 +33,7 @@ func (o flowOwner) is(other flowOwner) bool {
 }
 
 func (s *Service) startFlow(w http.ResponseWriter, r *http.Request, owner flowOwner) error {
-	ip := s.Guard.IP(r)
+	ip := netkey.Of(s.Guard.IP(r))
 	s.mu.Lock()
 	inFlight := 0
 	for id, f := range s.flows {

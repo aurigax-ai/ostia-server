@@ -54,7 +54,7 @@ func (h *Hub) splice(p *pendingStream, desktopConn net.Conn, principal auth.Prin
 	h.mu.Lock()
 	if h.closed {
 		h.mu.Unlock()
-		owner.unconfirmed.Add(-1)
+		owner.finish(s.id)
 		s.close()
 		return
 	}
@@ -66,11 +66,7 @@ func (h *Hub) splice(p *pendingStream, desktopConn net.Conn, principal auth.Prin
 		delete(h.streams, s)
 		delete(h.byID, s.id)
 		h.mu.Unlock()
-		if s.confirmed.Load() {
-			owner.confirmed.Add(-1)
-		} else {
-			owner.unconfirmed.Add(-1)
-		}
+		owner.finish(s.id)
 		s.close()
 	}()
 

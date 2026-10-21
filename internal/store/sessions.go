@@ -49,3 +49,10 @@ func (d *DB) Elevate(ctx context.Context, tokenHash []byte, until int64) error {
 	res, err := d.sql.ExecContext(ctx, `UPDATE sessions SET elevated_until = ? WHERE token_hash = ?`, until, tokenHash)
 	return affected(res, err)
 }
+
+func (d *DB) CountRows(ctx context.Context, sessions, invites *int) error {
+	if err := d.sql.QueryRowContext(ctx, `SELECT COUNT(*) FROM sessions`).Scan(sessions); err != nil {
+		return err
+	}
+	return d.sql.QueryRowContext(ctx, `SELECT COUNT(*) FROM invites`).Scan(invites)
+}

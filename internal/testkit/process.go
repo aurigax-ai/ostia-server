@@ -113,8 +113,23 @@ var (
 	listeningHTTP  = regexp.MustCompile(`listening http=(\S+)`)
 )
 
+func WithKey(extra, table, key, value string) string {
+	if extra != "" && !strings.HasSuffix(extra, "\n") {
+		extra += "\n"
+	}
+	if strings.Contains(extra, key+" ") {
+		return extra
+	}
+	line := key + " = " + value + "\n"
+	if strings.Contains(extra, table+"\n") {
+		return strings.Replace(extra, table+"\n", table+"\n"+line, 1)
+	}
+	return extra + table + "\n" + line
+}
+
 func StartProcess(t testing.TB, binary string, cfg Config) *Process {
 	t.Helper()
+	cfg.Extra = WithKey(cfg.Extra, "[auth]", "approver_min_age", `"0s"`)
 	dir := t.TempDir()
 	dataDir := filepath.Join(dir, "data")
 	cfgPath := filepath.Join(dir, "ostia-server.toml")

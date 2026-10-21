@@ -3,6 +3,7 @@ package e2e
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -455,4 +456,47 @@ func TestDestructiveSyncActionsNeedAnotherDevicesApproval(t *testing.T) {
 	api.ElevateByApproval(t, other.API)
 	api.Must(t, http.StatusNoContent, "DELETE", "/v1/sync/wraps/recovery", nil)
 	api.Must(t, http.StatusNoContent, "PUT", "/v1/sync/wraps/passphrase", wrap)
+}
+
+func TestWrapsOfOtherDevicesCannotBeReplacedWithoutApproval(t *testing.T) {
+	f := newSyncFixture(t, "")
+	b := f.addDevice(t, "second laptop")
+	wrap := map[string]string{"blob": "AAAA"}
+	own := "/v1/sync/wraps/device:" + f.a.API.ID.DeviceID
+	other := "/v1/sync/wraps/device:" + b.API.ID.DeviceID
+	f.a.API.Must(t, http.StatusNoContent, "PUT", own, wrap)
+	res := f.a.API.Do(t, "PUT", other, wrap)
+	if res.Status != http.StatusForbidden || res.Map(t)["error"] != "elevation-required" {
+		t.Fatalf("overwriting another device's wrap: %s", res)
+	}
+	f.a.API.Must(t, http.StatusNoContent, "PUT", own, wrap)
+	b.API.Must(t, http.StatusNoContent, "PUT", other, wrap)
+	empty := f.addDevice(t, "third laptop")
+	if res := f.a.API.Do(t, "PUT", "/v1/sync/wraps/device:"+empty.API.ID.DeviceID, wrap); res.Status != http.StatusNoContent && res.Status != http.StatusForbidden {
+		t.Fatalf("%s", res)
+	}
+}
+
+func TestFloodingManifestsCannotEraseEarlierHistory(t *testing.T) {
+	f := newSyncFixture(t, "[sync]\nmanifest_history = 3\n")
+	api := f.a.API
+	version := 0
+	put := func(blob string) {
+		t.Helper()
+		res := api.Must(t, http.StatusOK, "PUT", "/v1/sync/manifest", map[string]string{"blob": blob}, "If-Match", fmt.Sprint(version))
+		version = int(res.Map(t)["version"].(float64))
+	}
+	put("QUFB")
+	for range 30 {
+		put("Rkxv")
+	}
+	var list struct {
+		Versions []struct {
+			Version int `json:"version"`
+		} `json:"versions"`
+	}
+	api.Must(t, http.StatusOK, "GET", "/v1/sync/manifest/versions", nil).JSON(t, &list)
+	if len(list.Versions) != 3 {
+		t.Fatalf("a flood within one day keeps only the newest versions: %d", len(list.Versions))
+	}
 }

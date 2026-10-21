@@ -13,6 +13,7 @@ type Approval struct {
 	AccountID         string
 	RequesterDeviceID string
 	RequesterName     string
+	RequesterCreated  int64
 	CreatedAt         int64
 	ExpiresAt         int64
 	ApprovedAt        int64
@@ -33,7 +34,7 @@ func (d *DB) CreateApproval(ctx context.Context, accountID, deviceID string, tok
 
 func (d *DB) PendingApprovals(ctx context.Context, accountID, exceptDeviceID string) ([]Approval, error) {
 	rows, err := d.sql.QueryContext(ctx, `
-		SELECT a.id, a.account_id, a.requester_device_id, v.name, a.created_at, a.expires_at
+		SELECT a.id, a.account_id, a.requester_device_id, v.name, v.created_at, a.created_at, a.expires_at
 		FROM approvals a JOIN devices v ON v.id = a.requester_device_id
 		WHERE a.account_id = ? AND a.requester_device_id != ? AND a.approved_at = 0 AND a.expires_at > ?
 		ORDER BY a.created_at`, accountID, exceptDeviceID, d.ms())
@@ -44,7 +45,7 @@ func (d *DB) PendingApprovals(ctx context.Context, accountID, exceptDeviceID str
 	var out []Approval
 	for rows.Next() {
 		var a Approval
-		if err := rows.Scan(&a.ID, &a.AccountID, &a.RequesterDeviceID, &a.RequesterName, &a.CreatedAt, &a.ExpiresAt); err != nil {
+		if err := rows.Scan(&a.ID, &a.AccountID, &a.RequesterDeviceID, &a.RequesterName, &a.RequesterCreated, &a.CreatedAt, &a.ExpiresAt); err != nil {
 			return nil, err
 		}
 		out = append(out, a)

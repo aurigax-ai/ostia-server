@@ -356,3 +356,41 @@ func TestNonTLSConnectionsAreNotHeldWhenThePoolIsNearlyFull(t *testing.T) {
 		t.Fatal("a non-TLS connection was held instead of closed while the pool was nearly full")
 	}
 }
+
+func TestAddressesInOneIPv6PrefixShareThePerAddressCap(t *testing.T) {
+	ln := newFakeListener()
+	defer ln.Close()
+	router := &Router{
+		HelloTimeout:    3 * time.Second,
+		MaxPending:      32,
+		MaxPendingPerIP: 2,
+		Classify:        func(string) (Kind, string) { return Other, "" },
+		OnRelay:         func(net.Conn, string, []byte, time.Time) {},
+		OnOther:         func(c net.Conn) { _ = c.Close() },
+	}
+	go func() { _ = router.Serve(ln) }()
+	var held []net.Conn
+	for i := range 8 {
+		held = append(held, ln.dial(fmt.Sprintf("2001:db8:1:2::%x", i+1)))
+	}
+	defer func() {
+		for _, c := range held {
+			_ = c.Close()
+		}
+	}()
+	time.Sleep(100 * time.Millisecond)
+	refused := 0
+	for _, c := range held {
+		if closedWithin(c, 50*time.Millisecond) {
+			refused++
+		}
+	}
+	if refused != 6 {
+		t.Fatalf("a host that owns a /64 must not get a cap per address: %d of 8 refused", refused)
+	}
+	other := ln.dial("2001:db8:1:3::1")
+	defer other.Close()
+	if closedWithin(other, 50*time.Millisecond) {
+		t.Fatal("a different /64 was refused")
+	}
+}

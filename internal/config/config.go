@@ -75,11 +75,13 @@ type Auth struct {
 	DeviceInviteTTL Duration `toml:"device_invite_ttl"`
 	ElevationTTL    Duration `toml:"elevation_ttl"`
 	ApprovalTTL     Duration `toml:"approval_ttl"`
+	ApproverMinAge  Duration `toml:"approver_min_age"`
 }
 
 type Relay struct {
 	MaxStreamsPerLabel        int      `toml:"max_streams_per_label"`
 	MaxUnconfirmedPerLabel    int      `toml:"max_unconfirmed_per_label"`
+	UnconfirmedOpensPerMinute int      `toml:"unconfirmed_opens_per_minute"`
 	UnconfirmedTimeout        Duration `toml:"unconfirmed_timeout"`
 	ConnectionsPerMinute      int      `toml:"connections_per_minute"`
 	ConnectionsPerMinutePerIP int      `toml:"connections_per_minute_per_ip"`
@@ -105,11 +107,12 @@ type Publish struct {
 }
 
 type Sync struct {
-	MaxBlobBytes     int64    `toml:"max_blob_bytes"`
-	MaxManifestBytes int64    `toml:"max_manifest_bytes"`
-	QuotaBytes       int64    `toml:"quota_bytes"`
-	ManifestHistory  int      `toml:"manifest_history"`
-	GCGrace          Duration `toml:"gc_grace"`
+	MaxBlobBytes           int64    `toml:"max_blob_bytes"`
+	MaxManifestBytes       int64    `toml:"max_manifest_bytes"`
+	QuotaBytes             int64    `toml:"quota_bytes"`
+	ManifestHistory        int      `toml:"manifest_history"`
+	ManifestCheckpointDays int      `toml:"manifest_checkpoint_days"`
+	GCGrace                Duration `toml:"gc_grace"`
 }
 
 type Push struct {
@@ -171,10 +174,12 @@ func Default() Config {
 			DeviceInviteTTL: Duration(10 * time.Minute),
 			ElevationTTL:    Duration(5 * time.Minute),
 			ApprovalTTL:     Duration(5 * time.Minute),
+			ApproverMinAge:  Duration(24 * time.Hour),
 		},
 		Relay: Relay{
 			MaxStreamsPerLabel:        8,
 			MaxUnconfirmedPerLabel:    4,
+			UnconfirmedOpensPerMinute: 120,
 			UnconfirmedTimeout:        Duration(15 * time.Second),
 			ConnectionsPerMinute:      30,
 			ConnectionsPerMinutePerIP: 10,
@@ -197,11 +202,12 @@ func Default() Config {
 			SweepInterval:       Duration(time.Hour),
 		},
 		Sync: Sync{
-			MaxBlobBytes:     16 * MiB,
-			MaxManifestBytes: 4 * MiB,
-			QuotaBytes:       512 * MiB,
-			ManifestHistory:  10,
-			GCGrace:          Duration(time.Hour),
+			MaxBlobBytes:           16 * MiB,
+			MaxManifestBytes:       4 * MiB,
+			QuotaBytes:             512 * MiB,
+			ManifestHistory:        10,
+			ManifestCheckpointDays: 14,
+			GCGrace:                Duration(time.Hour),
 		},
 		Push: Push{MaxHandles: 100000, MaxHandlesPerAccount: 20, TicketTTL: Duration(10 * time.Minute)},
 	}
@@ -282,6 +288,7 @@ func (c Config) Validate() error {
 		need(c.Push.FCM.ServiceAccountFile != "" || c.Push.APNs.KeyFile != "", "modules.push needs push.fcm or push.apns credentials")
 	}
 	need(c.Auth.SessionTTL.Std() > 0, "auth.session_ttl must be positive")
+	need(c.Auth.ApproverMinAge == 0 || c.Auth.ApproverMinAge >= c.Auth.SessionTTL, "auth.approver_min_age must be 0 or at least auth.session_ttl, otherwise a stolen session outlives the wait")
 	need(c.Publish.MaxExpiry >= c.Publish.DefaultExpiry, "publish.max_expiry must not be below publish.default_expiry")
 	return errors.Join(errs...)
 }

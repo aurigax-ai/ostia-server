@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/aurigax-ai/ostia-server/internal/limit"
+	"github.com/aurigax-ai/ostia-server/internal/netkey"
 )
 
 type Error struct {
@@ -190,7 +191,7 @@ func (g *Guard) PerIP(class string, rule limit.Rule, next http.Handler) http.Han
 	l := g.limiter(class, rule)
 	retry := strconv.Itoa(max(1, int(rule.Every/time.Second)))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !l.Allow(g.IP(r)) {
+		if !l.Allow(netkey.Of(g.IP(r))) {
 			w.Header().Set("Retry-After", retry)
 			WriteError(w, r, ErrRateLimited)
 			return

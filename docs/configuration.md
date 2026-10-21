@@ -50,15 +50,17 @@
 | `device_invite_ttl` | `10m` | Lifetime of a code a signed-in device mints for a new device. |
 | `elevation_ttl` | `5m` | How long a session stays elevated after another device approved it or a fresh GitHub sign-in succeeded. |
 | `approval_ttl` | `5m` | How long a request for another device's approval stays open. |
+| `approver_min_age` | `24h` | How long a device must have belonged to the account before its approvals count. `0` turns the wait off (tests only); otherwise it must be at least `session_ttl`. |
 
 ## `[relay]`
 
 | Key | Default | |
 |---|---|---|
 | `max_streams_per_label` | `8` | Concurrent phone connections per desktop that the desktop confirmed. |
-| `max_unconfirmed_per_label` | `4` | Connections the desktop has not confirmed yet (see the protocol). |
+| `max_unconfirmed_per_label` | `4` | Connections the desktop has not confirmed yet (see the protocol). When full, the oldest is evicted. |
 | `unconfirmed_timeout` | `15s` | An unconfirmed connection is closed after this long. |
-| `connections_per_minute` | `30` | New connections per desktop. |
+| `connections_per_minute` | `30` | Confirmed streams per desktop and minute. |
+| `unconfirmed_opens_per_minute` | `120` | New connections per desktop and minute, confirmed or not. |
 | `connections_per_minute_per_ip` | `10` | New connections per source address. |
 | `monthly_bytes_per_account` | `5368709120` | Relayed bytes per account and month; `0` is unlimited. |
 | `idle_timeout` | `10m` | A stream with no bytes is closed. |
@@ -85,7 +87,8 @@
 |---|---|---|
 | `max_blob_bytes`, `max_manifest_bytes` | `16777216`, `4194304` | |
 | `quota_bytes` | `536870912` | Blob storage per account. |
-| `manifest_history` | `10` | Sealed manifest versions kept for recovery. |
+| `manifest_history` | `10` | Newest sealed manifest versions kept. |
+| `manifest_checkpoint_days` | `14` | Also keep the last version of each of this many earlier days. |
 | `gc_grace` | `1h` | `POST /v1/sync/gc` never removes blobs younger than this, so a device that is still uploading is safe. |
 
 ## `[push]`

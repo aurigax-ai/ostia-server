@@ -153,3 +153,48 @@ func TestElevationRoutesRequireASession(t *testing.T) {
 		}
 	}
 }
+
+func TestStolenTokenCannotTurnADeviceInviteIntoAnElevatedSession(t *testing.T) {
+	e := newEnv(t, "[auth]\nsession_ttl = \"1s\"\napprover_min_age = \"2s\"\n")
+	owner := e.user(t, "laptop")
+	stolen := testkit.NewAPI(e.net, testkit.NewIdentity("copy of the owner"))
+	stolen.ID = owner.ID
+	stolen.Token = owner.Token
+
+	code := stolen.Must(t, http.StatusCreated, "POST", "/v1/devices/invite", nil).Map(t)["code"].(string)
+	attacker := testkit.NewAPI(e.net, testkit.NewIdentity("attacker"))
+	attacker.Onboard(t, code)
+
+	approval := stolen.Must(t, http.StatusCreated, "POST", "/v1/auth/elevation/approval", nil).Map(t)["approvalId"].(string)
+	res := attacker.Do(t, "POST", "/v1/auth/approvals/"+approval+"/approve", nil)
+	if res.Status != http.StatusForbidden || res.Map(t)["error"] != "device-too-new" {
+		t.Fatalf("a device the stolen token just added approved: %s", res)
+	}
+	requireElevation(t, stolen, "deleting the account with a stolen token", "DELETE", "/v1/account", nil)
+	requireElevation(t, stolen, "revoking the owner's device", "DELETE", "/v1/devices/"+attacker.ID.DeviceID, nil)
+
+	time.Sleep(2300 * time.Millisecond)
+	owner.SignIn(t)
+	attacker.SignIn(t)
+	if res := owner.Do(t, "POST", "/v1/devices/invite", nil); res.Status != http.StatusForbidden {
+		t.Fatalf("with two devices an invite needs approval: %s", res)
+	}
+	owner.ElevateByApproval(t, attacker)
+}
+
+func TestApprovalCardsCarryTheRequestersAge(t *testing.T) {
+	e := newEnv(t, "")
+	laptop := e.user(t, "laptop")
+	phone := e.device(t, laptop, "phone")
+	laptop.Must(t, http.StatusCreated, "POST", "/v1/auth/elevation/approval", nil)
+	var list struct {
+		Approvals []struct {
+			DeviceName      string `json:"deviceName"`
+			DeviceCreatedAt int64  `json:"deviceCreatedAt"`
+		} `json:"approvals"`
+	}
+	phone.Must(t, http.StatusOK, "GET", "/v1/auth/approvals", nil).JSON(t, &list)
+	if len(list.Approvals) != 1 || list.Approvals[0].DeviceName != "laptop" || list.Approvals[0].DeviceCreatedAt == 0 {
+		t.Fatalf("%+v", list.Approvals)
+	}
+}

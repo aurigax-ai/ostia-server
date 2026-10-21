@@ -78,20 +78,20 @@ A nonce is single use and lives 60 seconds. A device holds at most five open non
 
 ```
 GET    /v1/devices               {devices: [{id, name, signPub, boxPub, createdAt, lastSeen, current?}]}
-POST   /v1/devices/invite        201 {code, expiresAt}      one-time code for a new device of this account, valid 10 minutes by default
+POST   /v1/devices/invite        201 {code, expiresAt}      one-time code for a new device of this account, valid 10 minutes by default; an elevated session once the account has two or more devices
 DELETE /v1/devices/{id}          204   revokes sessions, the relay label and the device's key wrap; open relay streams close (another device: elevated session)
 DELETE /v1/account               204   removes every row and blob, push handles included, and closes the relay listener (elevated session)
 ```
 
 ### Elevated sessions
 
-A stolen bearer token must not be able to destroy an account. These actions need a session that was elevated within the last `auth.elevation_ttl` (five minutes), otherwise they answer `403 elevation-required`: revoking another device, deleting the account, deleting a sync wrap, replacing the passphrase or recovery wrap, `POST /v1/sync/gc` and `POST /v1/sync/rotate`. A session is elevated one of two ways, per session and never for the approving device:
+A stolen bearer token must not be able to destroy an account. These actions need a session that was elevated within the last `auth.elevation_ttl` (five minutes), otherwise they answer `403 elevation-required`: revoking another device, deleting the account, deleting a sync wrap, replacing the passphrase or recovery wrap, `POST /v1/sync/gc` and `POST /v1/sync/rotate`. A session is elevated one of two ways, per session and never for the approving device. Adding a device must not be a way around this, so `POST /v1/devices/invite` also needs an elevated session once the account has two or more devices, and a device may approve only after it has been part of the account for `auth.approver_min_age` (24 hours, longer than a session lives): a stolen token that adds a device of its own cannot use that device to approve itself (`403 device-too-new`).
 
 ```
 GET  /v1/auth/elevation                          {elevatedUntil}              0 when not elevated
 
 POST /v1/auth/elevation/approval                 201 {approvalId, expiresAt}  409 no-second-device with one device
-GET  /v1/auth/approvals                          {approvals: [{id, deviceId, deviceName, createdAt, expiresAt}]}   requests from the account's other devices
+GET  /v1/auth/approvals                          {approvals: [{id, deviceId, deviceName, deviceCreatedAt, createdAt, expiresAt}]}   requests from the account's other devices
 POST /v1/auth/approvals/{id}/approve             204   403 for the requesting device itself
 GET  /v1/auth/approvals/{id}                     {status: "pending"|"approved", elevatedUntil?}   the requester polls
 DELETE /v1/auth/approvals/{id}                   204   cancel or deny
@@ -100,7 +100,7 @@ POST /v1/auth/elevation/github                   like /v1/auth/github/device, fo
 POST /v1/auth/elevation/github/poll {flowId}     200 {elevatedUntil} | 202 pending | 403 wrong-account
 ```
 
-The approving device must show the person who is asking (`deviceName`) and approve only on their click.
+The approving device must show who is asking (`deviceName`) and how long that device has existed (`deviceCreatedAt`, "added 3 minutes ago"), and approve only on the person's click. A client should also tell the person on every device when `GET /v1/devices` shows a device it has not seen before.
 
 ## Relay
 
@@ -115,7 +115,7 @@ The label is a random 128-bit value (26 characters, `a-z2-7`), stable per device
 ### Desktop side
 
 1. `GET /v1/relay/listen` (WebSocket, `Authorization` header). A newer connection for the same device replaces the older one.
-2. The listener lives as long as the session that opened it: when the session expires, is ended with `DELETE /v1/auth/session`, or the device is revoked, the server closes it. Open a new session and connect again before the old one expires; a newer listener replaces the older at once. The server sends JSON text frames: `{"t": "ping"}` every `relay.ping_interval` and `{"t": "incoming", "stream": "<id>", "peer": "ip:port", "family": 4|6}` per phone connection. The desktop answers pings with `{"t": "pong"}`. A listener that stays silent for 2.5 intervals is dropped.
+2. The listener lives as long as the session that opened it: when the session expires, is ended with `DELETE /v1/auth/session`, or the device is revoked, the server closes it at once. Open a new session and connect again before the old one expires; a newer listener replaces the older at once. The server sends JSON text frames: `{"t": "ping"}` every `relay.ping_interval` and `{"t": "incoming", "stream": "<id>", "peer": "ip:port", "family": 4|6}` per phone connection. The desktop answers pings with `{"t": "pong"}`. A listener that stays silent for 2.5 intervals is dropped.
 3. For each `incoming` the desktop opens `GET /v1/relay/accept/<stream>` (WebSocket, same bearer) within `relay.accept_timeout` (10 seconds). A stream id works once and only for the device it was offered to.
 4. Binary frames on the accept socket carry the phone's TCP stream in both directions. The first bytes the desktop receives are the phone's TLS ClientHello, then the rest of the stream.
 
@@ -126,7 +126,7 @@ The Ostia desktop writes `PROXY TCP4|TCP6 <peer ip> 127.0.0.1 <port> <port>\r\n`
 ### Phone side and limits
 
 - The server reads only the SNI of the ClientHello. A known label with no desktop listening is reset at once. An unknown label, a non-TLS first message, or a stalled handshake is held for `relay.hello_timeout` (5 seconds) and closed without a reply, so scanning learns nothing.
-- Per label: `relay.max_streams_per_label` confirmed streams, `relay.max_unconfirmed_per_label` unconfirmed ones, and `relay.connections_per_minute` new connections. Per source address: `relay.connections_per_minute_per_ip`. Per account: `relay.monthly_bytes_per_account`, counted in memory and flushed every 10 seconds. A stream with no bytes for `relay.idle_timeout` is closed.
+- Per label: `relay.max_streams_per_label` confirmed streams and `relay.connections_per_minute` confirmations a minute; `relay.max_unconfirmed_per_label` unconfirmed streams, where a new connection evicts the oldest unconfirmed one when the pool is full (squatting on a label cannot lock out the real phone), and `relay.unconfirmed_opens_per_minute` new connections. Per source address: `relay.connections_per_minute_per_ip`. Per account: `relay.monthly_bytes_per_account`, counted in memory and flushed every 10 seconds. A stream with no bytes for `relay.idle_timeout` is closed.
 - There is no presence endpoint: nothing tells a third party whether a desktop is online.
 
 ## Publish
@@ -231,7 +231,7 @@ The manifest is JSON, sealed with `manifestKey` and AAD `ostia-sync/manifest/v1`
 {"counter": 7, "files": {"settings.json": {"blobId": "…", "hash": "…"}}, "devices": [{"id": "…", "name": "…"}]}
 ```
 
-The server stores sealed manifests with a monotonically increasing `version`, and keeps the last `sync.manifest_history`.
+The server stores sealed manifests with a monotonically increasing `version`. It keeps the newest `sync.manifest_history`, plus the last version of each of the previous `sync.manifest_checkpoint_days` days, so a flood of writes from a stolen token cannot push every earlier version out of the history.
 
 **Rollback guard.** Each device remembers the highest `counter` it has seen and refuses a manifest with a lower one (`stale-manifest`). A server that serves an old manifest is caught as soon as a device has seen a newer one.
 
@@ -255,7 +255,7 @@ GET  /v1/sync/blobs/{blobId}          raw bytes
 PUT  /v1/sync/blobs/{blobId}          raw bytes → 201 created | 200 identical | 409 | 413 | 507
 GET  /v1/sync/wraps                   {wraps: [{slot, updatedAt}]}
 GET  /v1/sync/wraps/{slot}            {slot, blob, updatedAt}
-PUT  /v1/sync/wraps/{slot}            {blob} → 204        slot: passphrase | recovery | device:<id of an active device>
+PUT  /v1/sync/wraps/{slot}            {blob} → 204        slot: passphrase | recovery | device:<id of an active device>; replacing an existing wrap needs an elevated session, except a device replacing its own `device:<self>` slot
 DELETE /v1/sync/wraps/{slot}          204
 POST /v1/sync/rotate                  {ifMatch, manifest, wraps: {slot: blob}, deleteSlots: [slot]} → 200 {version} | 412
 POST /v1/sync/gc                      {keep: [blobId]} → {deleted}     removes blobs older than sync.gc_grace that are not listed
@@ -296,7 +296,7 @@ DELETE /v1/push/{handle} (session)                         204
 |---|---|
 | 400 | `bad-request`, `bad-proof`, `bad-slot`, `size-mismatch` |
 | 401 | `unauthorized` |
-| 403 | `forbidden`, `invalid-invite`, `denied`, `wrong-account`, `invalid-ticket`, `elevation-required`, `public-disabled`, `publish-disabled` |
+| 403 | `forbidden`, `invalid-invite`, `denied`, `device-too-new`, `wrong-account`, `invalid-ticket`, `elevation-required`, `public-disabled`, `publish-disabled` |
 | 404 | `not-found`, `no-manifest`, `unknown-flow`, `unknown-device` |
 | 409 | `conflict`, `blob-exists`, `already-uploaded`, `device-limit`, `no-second-device`, `not-a-github-account` |
 | 410 | `gone`, `expired` |

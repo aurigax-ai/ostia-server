@@ -169,17 +169,17 @@ func TestManifestCompareAndSetAndHistory(t *testing.T) {
 	if _, err := d.CurrentManifest(t.Context(), a.ID); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("fresh account has a manifest: %v", err)
 	}
-	v, err := d.PutManifest(t.Context(), a.ID, 0, []byte("one"), 3)
+	v, err := d.PutManifest(t.Context(), a.ID, 0, []byte("one"), Retention{Versions: 3})
 	if err != nil || v != 1 {
 		t.Fatalf("first put: %d %v", v, err)
 	}
-	if _, err := d.PutManifest(t.Context(), a.ID, 0, []byte("stale"), 3); !errors.Is(err, ErrVersionMismatch) {
+	if _, err := d.PutManifest(t.Context(), a.ID, 0, []byte("stale"), Retention{Versions: 3}); !errors.Is(err, ErrVersionMismatch) {
 		t.Fatalf("stale put accepted: %v", err)
 	} else if cur, ok := CurrentOf(err); !ok || cur != 1 {
 		t.Fatalf("mismatch must report the current version: %d %v", cur, ok)
 	}
 	for i := range 4 {
-		if _, err := d.PutManifest(t.Context(), a.ID, int64(1+i), []byte("next"), 3); err != nil {
+		if _, err := d.PutManifest(t.Context(), a.ID, int64(1+i), []byte("next"), Retention{Versions: 3}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -192,7 +192,7 @@ func TestManifestCompareAndSetAndHistory(t *testing.T) {
 func TestRotateIsAtomic(t *testing.T) {
 	d, _ := open(t)
 	a, dev := register(t, d, "github", "h")
-	_, _ = d.PutManifest(t.Context(), a.ID, 0, []byte("m1"), 10)
+	_, _ = d.PutManifest(t.Context(), a.ID, 0, []byte("m1"), Retention{Versions: 10})
 	_ = d.PutWrap(t.Context(), a.ID, "passphrase", []byte("old"))
 	_ = d.PutWrap(t.Context(), a.ID, DeviceSlot(dev.ID), []byte("olddev"))
 
@@ -205,7 +205,7 @@ func TestRotateIsAtomic(t *testing.T) {
 	}
 
 	v, err := d.Rotate(t.Context(), a.ID, Rotation{
-		IfMatch: 1, Manifest: []byte("m2"), History: 10,
+		IfMatch: 1, Manifest: []byte("m2"), Retention: Retention{Versions: 10},
 		Wraps:       map[string][]byte{"passphrase": []byte("new")},
 		DeleteSlots: []string{DeviceSlot(dev.ID)},
 	})
@@ -330,7 +330,7 @@ func TestReportsSummary(t *testing.T) {
 func TestDeleteAccountCascades(t *testing.T) {
 	d, _ := open(t)
 	a, dev := register(t, d, "github", "h")
-	_, _ = d.PutManifest(t.Context(), a.ID, 0, []byte("m"), 10)
+	_, _ = d.PutManifest(t.Context(), a.ID, 0, []byte("m"), Retention{Versions: 10})
 	_ = d.PutWrap(t.Context(), a.ID, "passphrase", []byte("w"))
 	_, _ = d.LabelFor(t.Context(), dev.ID, a.ID)
 	_ = d.CreateShare(t.Context(), Share{ID: "s1", AccountID: a.ID, Mode: "link", Size: 1, DeleteTokenHash: []byte("x")}, ShareQuota{})
@@ -478,5 +478,47 @@ func TestElevationLivesOnTheSessionAndApprovalNeedsAnotherDevice(t *testing.T) {
 	c.t = c.t.Add(2 * time.Minute)
 	if err := d.Approve(t.Context(), late.ID, a.ID, second.ID, until); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("expired approval: %v", err)
+	}
+}
+
+func TestManifestRetentionKeepsADailyCheckpointSoFloodingCannotEraseHistory(t *testing.T) {
+	d, c := open(t)
+	a, _ := register(t, d, "github", "h")
+	keep := Retention{Versions: 3, CheckpointDays: 3}
+	version := int64(0)
+	put := func(label string) {
+		t.Helper()
+		next, err := d.PutManifest(t.Context(), a.ID, version, []byte(label), keep)
+		if err != nil {
+			t.Fatal(err)
+		}
+		version = next
+	}
+	put("day1-a")
+	put("day1-b")
+	c.t = c.t.Add(24 * time.Hour)
+	put("day2-a")
+	put("day2-b")
+	c.t = c.t.Add(24 * time.Hour)
+	for range 40 {
+		put("flood")
+	}
+	versions, _ := d.ManifestVersions(t.Context(), a.ID)
+	if len(versions) != 3+2 {
+		t.Fatalf("want the newest 3 plus a checkpoint for each of the two earlier days, got %d: %+v", len(versions), versions)
+	}
+	kept := map[string]bool{}
+	for _, v := range versions {
+		m, _ := d.ManifestAt(t.Context(), a.ID, v.Version)
+		kept[string(m.Blob)] = true
+	}
+	if !kept["day1-b"] || !kept["day2-b"] || kept["day1-a"] || kept["day2-a"] {
+		t.Fatalf("checkpoints must be the last version of each earlier day: %v", kept)
+	}
+	c.t = c.t.Add(5 * 24 * time.Hour)
+	put("late")
+	versions, _ = d.ManifestVersions(t.Context(), a.ID)
+	if len(versions) != 3 {
+		t.Fatalf("checkpoints older than the retention window must go: %d", len(versions))
 	}
 }

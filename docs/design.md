@@ -36,7 +36,7 @@ Each operator uses their own FCM and APNs credentials. Platform tokens are bound
 
 ## Elevated sessions for destructive actions
 
-The bearer token lives in the desktop's main process for an hour. If it leaks, an attacker must not be able to delete devices, wraps, blobs or the account. Those actions need another signed-in device to approve (the person clicks on that device) or a fresh GitHub sign-in by the same GitHub user. Elevation lasts five minutes and is attached to the session that asked. The cost is that an account with a single non-GitHub device cannot do these things itself; the operator can still delete the account from the command line.
+The bearer token lives in the desktop's main process for an hour. If it leaks, an attacker must not be able to delete devices, wraps, blobs or the account. Those actions need another signed-in device to approve (the person clicks on that device) or a fresh GitHub sign-in by the same GitHub user. Elevation lasts five minutes and is attached to the session that asked. The approver must also have belonged to the account for a day (longer than a session lives), and adding a third device is itself elevated: otherwise a stolen token could invite a device of its own and use it to approve itself. The cost is that an account with a single non-GitHub device cannot do these things itself; the operator can still delete the account from the command line.
 
 ## Client addresses behind a proxy
 
@@ -44,11 +44,11 @@ Rate limits key on the client address. Behind a proxy that address is only known
 
 ## Relay streams start unconfirmed
 
-A label is an identifier, not a secret: it is in the pairing QR and in every address list. Without a check, anyone who learned it could hold the label's connection slots and burn the owner's byte quota with idle or garbage streams. A stream is therefore unconfirmed until the desktop says its gateway accepted the phone (valid device token or live pairing code). Unconfirmed streams are short lived, capped separately, and unbilled. The accept side of the relay never learns what the traffic is; the gateway tells the desktop client, which tells the relay only the stream id.
+A label is an identifier, not a secret: it is in the pairing QR and in every address list. Without a check, anyone who learned it could hold the label's connection slots and burn the owner's byte quota with idle or garbage streams. A stream is therefore unconfirmed until the desktop says its gateway accepted the phone (valid device token or live pairing code). Unconfirmed streams are short lived, capped separately, and unbilled; when the pool is full the oldest unconfirmed stream is evicted so squatters cannot lock out the real phone, and the per-label budget is spent only on confirmed streams. The accept side of the relay never learns what the traffic is; the gateway tells the desktop client, which tells the relay only the stream id.
 
 ## Pre-handshake connections are pooled per address
 
-The router holds a connection until its ClientHello arrives, which is a slow-connection attack surface. The pool is capped, each source address may hold only a few places, and when the pool is three quarters full the router stops holding connections that are not TLS.
+The router holds a connection until its ClientHello arrives, which is a slow-connection attack surface. The pool is capped, each source address (an IPv6 /64 counts as one) may hold only a few places, and when the pool is three quarters full the router stops holding connections that are not TLS.
 
 ## The share domain is a different site
 

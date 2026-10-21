@@ -3,6 +3,7 @@ package auth
 import (
 	"errors"
 	"net/http"
+	"time"
 
 	"github.com/aurigax-ai/ostia-server/internal/httpx"
 	"github.com/aurigax-ai/ostia-server/internal/store"
@@ -59,15 +60,16 @@ func (s *Service) listApprovals(w http.ResponseWriter, r *http.Request, p Princi
 		return err
 	}
 	type entry struct {
-		ID         string `json:"id"`
-		DeviceID   string `json:"deviceId"`
-		DeviceName string `json:"deviceName"`
-		CreatedAt  int64  `json:"createdAt"`
-		ExpiresAt  int64  `json:"expiresAt"`
+		ID              string `json:"id"`
+		DeviceID        string `json:"deviceId"`
+		DeviceName      string `json:"deviceName"`
+		DeviceCreatedAt int64  `json:"deviceCreatedAt"`
+		CreatedAt       int64  `json:"createdAt"`
+		ExpiresAt       int64  `json:"expiresAt"`
 	}
 	out := make([]entry, 0, len(pending))
 	for _, a := range pending {
-		out = append(out, entry{a.ID, a.RequesterDeviceID, a.RequesterName, a.CreatedAt, a.ExpiresAt})
+		out = append(out, entry{a.ID, a.RequesterDeviceID, a.RequesterName, a.RequesterCreated, a.CreatedAt, a.ExpiresAt})
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"approvals": out})
 	return nil
@@ -90,8 +92,15 @@ func (s *Service) approvalStatus(w http.ResponseWriter, r *http.Request, p Princ
 }
 
 func (s *Service) approve(w http.ResponseWriter, r *http.Request, p Principal) error {
+	approver, err := s.DB.Device(r.Context(), p.DeviceID)
+	if err != nil {
+		return err
+	}
+	if min := s.Cfg.ApproverMinAge.Std(); min > 0 && s.Now().Sub(time.UnixMilli(approver.CreatedAt)) < min {
+		return httpx.Errf(http.StatusForbidden, "device-too-new", "this device joined recently; its approvals are accepted once it has been part of the account long enough")
+	}
 	until := s.Now().Add(s.Cfg.ElevationTTL.Std()).UnixMilli()
-	err := s.DB.Approve(r.Context(), r.PathValue("id"), p.AccountID, p.DeviceID, until)
+	err = s.DB.Approve(r.Context(), r.PathValue("id"), p.AccountID, p.DeviceID, until)
 	switch {
 	case err == nil:
 		w.WriteHeader(http.StatusNoContent)

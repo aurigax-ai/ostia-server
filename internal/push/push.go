@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"time"
 
 	"github.com/aurigax-ai/ostia-server/internal/auth"
@@ -166,8 +167,11 @@ func (s *Service) ping(w http.ResponseWriter, r *http.Request, p auth.Principal)
 
 func (s *Service) remove(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
 	h, err := s.owned(r, p)
-	if err != nil {
+	if errors.Is(err, httpx.ErrGone) {
 		return httpx.ErrNotFound
+	}
+	if err != nil {
+		return err
 	}
 	if err := s.DB.DeletePushHandle(r.Context(), h.Handle); err != nil {
 		return err
@@ -177,3 +181,10 @@ func (s *Service) remove(w http.ResponseWriter, r *http.Request, p auth.Principa
 }
 
 func newHandle() string { return ids.New() + ids.New()[:handleExtra] }
+
+func scrubURL(err error) error {
+	if urlErr, ok := errors.AsType[*url.Error](err); ok {
+		return urlErr.Err
+	}
+	return err
+}

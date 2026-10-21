@@ -16,6 +16,7 @@ import (
 	"github.com/aurigax-ai/ostia-server/internal/httpx"
 	"github.com/aurigax-ai/ostia-server/internal/ids"
 	"github.com/aurigax-ai/ostia-server/internal/limit"
+	"github.com/aurigax-ai/ostia-server/internal/netkey"
 	"github.com/aurigax-ai/ostia-server/internal/serverkey"
 	"github.com/aurigax-ai/ostia-server/internal/store"
 )
@@ -37,6 +38,7 @@ const (
 )
 
 type Hooks struct {
+	SessionEnded   func(tokenHash []byte)
 	DeviceRevoked  func(deviceID string)
 	AccountDeleted func(deviceIDs []string)
 }
@@ -211,7 +213,8 @@ func normalizeCode(code string) string {
 	}, code)
 }
 
-func (s *Service) newChallenge(deviceID string, registered bool) (string, error) {
+func (s *Service) newChallenge(deviceID, ip string, registered bool) (string, error) {
+	key := deviceID + "|" + ip
 	nonce := ids.Token()
 	if !registered {
 		return nonce, nil
@@ -222,8 +225,8 @@ func (s *Service) newChallenge(deviceID string, registered bool) (string, error)
 	if len(s.challenges) >= maxChallenges {
 		return "", httpx.Err(http.StatusServiceUnavailable, "busy")
 	}
-	live := s.challengesOf[deviceID][:0]
-	for _, older := range s.challengesOf[deviceID] {
+	live := s.challengesOf[key][:0]
+	for _, older := range s.challengesOf[key] {
 		c, ok := s.challenges[older]
 		if ok && now.Before(c.expires) {
 			live = append(live, older)
@@ -236,7 +239,7 @@ func (s *Service) newChallenge(deviceID string, registered bool) (string, error)
 		live = live[1:]
 	}
 	s.challenges[nonce] = challenge{deviceID: deviceID, expires: now.Add(challengeTTL)}
-	s.challengesOf[deviceID] = append(live, nonce)
+	s.challengesOf[key] = append(live, nonce)
 	return nonce, nil
 }
 
@@ -286,7 +289,7 @@ func (s *Service) challenge(w http.ResponseWriter, r *http.Request) error {
 	}
 	dev, err := s.DB.Device(r.Context(), in.DeviceID)
 	registered := err == nil && dev.RevokedAt == 0
-	nonce, err := s.newChallenge(in.DeviceID, registered)
+	nonce, err := s.newChallenge(in.DeviceID, netkey.Of(s.Guard.IP(r)), registered)
 	if err != nil {
 		return err
 	}
@@ -328,6 +331,9 @@ func (s *Service) logout(w http.ResponseWriter, r *http.Request, p Principal) er
 	if err := s.DB.DeleteSession(r.Context(), p.TokenHash); err != nil {
 		return err
 	}
+	if s.Hooks.SessionEnded != nil {
+		s.Hooks.SessionEnded(p.TokenHash)
+	}
 	w.WriteHeader(http.StatusNoContent)
 	return nil
 }
@@ -356,6 +362,15 @@ func (s *Service) listDevices(w http.ResponseWriter, r *http.Request, p Principa
 }
 
 func (s *Service) deviceInvite(w http.ResponseWriter, r *http.Request, p Principal) error {
+	count, err := s.DB.ActiveDeviceCount(r.Context(), p.AccountID)
+	if err != nil {
+		return err
+	}
+	if count >= 2 {
+		if err := s.NeedElevation(p); err != nil {
+			return err
+		}
+	}
 	code, expires, err := s.CreateInvite(r.Context(), p.AccountID, s.Cfg.DeviceInviteTTL.Std())
 	if err != nil {
 		return err

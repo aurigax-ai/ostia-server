@@ -165,6 +165,20 @@ func TestKnownLabelWithoutListenerIsResetImmediately(t *testing.T) {
 	})
 }
 
+func stillRelayed(t *testing.T, f *relayFixture) (net.Conn, bool) {
+	t.Helper()
+	conn, err := testkit.DialAuthed(t.Context(), f.env.net, f.desktop.Host, f.cert.Fingerprint, f.gateway.Token)
+	if err != nil {
+		return nil, false
+	}
+	time.Sleep(200 * time.Millisecond)
+	if _, err := testkit.Converse(conn, "still relayed?"); err != nil {
+		_ = conn.Close()
+		return nil, false
+	}
+	return conn, true
+}
+
 func TestRelayLimitsConfirmedStreamsPerLabel(t *testing.T) {
 	f := newRelayFixture(t, "[relay]\nmax_streams_per_label = 2\nconnections_per_minute = 100\nconnections_per_minute_per_ip = 100\n")
 	var held []net.Conn
@@ -176,7 +190,8 @@ func TestRelayLimitsConfirmedStreamsPerLabel(t *testing.T) {
 		held = append(held, conn)
 		defer conn.Close()
 	}
-	if _, err := testkit.DialAuthed(t.Context(), f.env.net, f.desktop.Host, f.cert.Fingerprint, f.gateway.Token); err == nil {
+	if conn, ok := stillRelayed(t, f); ok {
+		_ = conn.Close()
 		t.Fatal("a third confirmed stream was relayed")
 	}
 	_ = held[0].Close()
@@ -190,8 +205,8 @@ func TestRelayLimitsConfirmedStreamsPerLabel(t *testing.T) {
 	})
 }
 
-func TestUnconfirmedStreamsAreClosedAndStayOutOfTheConfirmedSlots(t *testing.T) {
-	f := newRelayFixture(t, "[relay]\nmax_streams_per_label = 2\nmax_unconfirmed_per_label = 2\nunconfirmed_timeout = \"700ms\"\nconnections_per_minute = 100\nconnections_per_minute_per_ip = 100\n")
+func TestAFullUnconfirmedPoolEvictsTheOldestInsteadOfRefusingTheRealPhone(t *testing.T) {
+	f := newRelayFixture(t, "[relay]\nmax_streams_per_label = 2\nmax_unconfirmed_per_label = 2\nunconfirmed_timeout = \"30s\"\n")
 	var squatters []net.Conn
 	for range 2 {
 		conn, err := testkit.DialPhone(t.Context(), f.env.net, f.desktop.Host, f.cert.Fingerprint)
@@ -201,24 +216,73 @@ func TestUnconfirmedStreamsAreClosedAndStayOutOfTheConfirmedSlots(t *testing.T) 
 		squatters = append(squatters, conn)
 		defer conn.Close()
 	}
-	if _, err := testkit.DialPhone(t.Context(), f.env.net, f.desktop.Host, f.cert.Fingerprint); err == nil {
-		t.Fatal("unconfirmed streams are not capped")
+	conn, err := testkit.DialAuthed(t.Context(), f.env.net, f.desktop.Host, f.cert.Fingerprint, f.gateway.Token)
+	if err != nil {
+		t.Fatalf("squatters holding every unconfirmed slot must not lock the real phone out: %v", err)
 	}
+	defer conn.Close()
+	_ = squatters[0].SetReadDeadline(time.Now().Add(3 * time.Second))
+	if _, err := squatters[0].Read(make([]byte, 1)); err == nil {
+		t.Fatal("the oldest unconfirmed stream was not evicted")
+	}
+	if _, err := testkit.Converse(conn, "still here"); err != nil {
+		t.Fatalf("the real phone must keep working: %v", err)
+	}
+}
+
+func TestUnconfirmedStreamsAreClosedAfterTheTimeout(t *testing.T) {
+	f := newRelayFixture(t, "[relay]\nunconfirmed_timeout = \"700ms\"\n")
+	conn, err := testkit.DialPhone(t.Context(), f.env.net, f.desktop.Host, f.cert.Fingerprint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
 	start := time.Now()
-	for _, conn := range squatters {
-		_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-		if _, err := conn.Read(make([]byte, 1)); err == nil || time.Since(start) > 3*time.Second {
-			t.Fatalf("a stream whose hello the desktop never confirmed must be closed after the timeout: %v after %v", err, time.Since(start))
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if _, err := conn.Read(make([]byte, 1)); err == nil || time.Since(start) > 3*time.Second {
+		t.Fatalf("an unconfirmed stream must be closed after the timeout: %v after %v", err, time.Since(start))
+	}
+}
+
+func TestUnconfirmedOpensArePerLabelRateLimited(t *testing.T) {
+	f := newRelayFixture(t, "[relay]\nunconfirmed_opens_per_minute = 5\n")
+	succeeded := 0
+	for range 12 {
+		if conn, err := testkit.DialPhone(t.Context(), f.env.net, f.desktop.Host, f.cert.Fingerprint); err == nil {
+			succeeded++
+			_ = conn.Close()
 		}
 	}
-	waitUntil(t, "the unconfirmed slots free up", func() bool {
-		conn, err := testkit.DialAuthed(t.Context(), f.env.net, f.desktop.Host, f.cert.Fingerprint, f.gateway.Token)
-		if err != nil {
-			return false
+	if succeeded > 6 || succeeded == 0 {
+		t.Fatalf("unconfirmed opens are not limited: %d succeeded", succeeded)
+	}
+}
+
+func TestRefusedConfirmationsDoNotLoosenTheStreamLimit(t *testing.T) {
+	f := newRelayFixture(t, "[relay]\nmax_streams_per_label = 1\n")
+	first, err := testkit.DialAuthed(t.Context(), f.env.net, f.desktop.Host, f.cert.Fingerprint, f.gateway.Token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close()
+	for range 4 {
+		if conn, ok := stillRelayed(t, f); ok {
+			_ = conn.Close()
+			t.Fatal("a second confirmed stream was relayed past the limit of one")
 		}
-		defer conn.Close()
-		return true
+	}
+	_ = first.Close()
+	var held net.Conn
+	waitUntil(t, "the slot frees up", func() bool {
+		conn, ok := stillRelayed(t, f)
+		held = conn
+		return ok
 	})
+	defer held.Close()
+	if conn, ok := stillRelayed(t, f); ok {
+		_ = conn.Close()
+		t.Fatal("the counter drifted and a second stream got through")
+	}
 }
 
 func TestConfirmedStreamsLeaveTheUnconfirmedPool(t *testing.T) {
@@ -261,17 +325,28 @@ func TestRelayLimitsNewConnectionsPerSourceAddress(t *testing.T) {
 	}
 }
 
-func TestRelayLimitsNewConnectionsPerLabel(t *testing.T) {
+func TestRelayLimitsConfirmedConnectionsPerLabel(t *testing.T) {
 	f := newRelayFixture(t, "[relay]\nconnections_per_minute = 5\nconnections_per_minute_per_ip = 100\n")
 	succeeded := 0
 	for range 12 {
-		if conn, err := testkit.DialPhone(t.Context(), f.env.net, f.desktop.Host, f.cert.Fingerprint); err == nil {
+		if conn, err := testkit.DialAuthed(t.Context(), f.env.net, f.desktop.Host, f.cert.Fingerprint, f.gateway.Token); err == nil {
 			succeeded++
 			_ = conn.Close()
 		}
 	}
 	if succeeded > 6 || succeeded == 0 {
 		t.Fatalf("label rate limit not applied: %d succeeded", succeeded)
+	}
+	f2 := newRelayFixture(t, "[relay]\nconnections_per_minute = 2\nconnections_per_minute_per_ip = 100\n")
+	for range 6 {
+		if conn, err := testkit.DialPhone(t.Context(), f2.env.net, f2.desktop.Host, f2.cert.Fingerprint); err == nil {
+			_ = conn.Close()
+		}
+	}
+	if conn, err := testkit.DialAuthed(t.Context(), f2.env.net, f2.desktop.Host, f2.cert.Fingerprint, f2.gateway.Token); err != nil {
+		t.Fatalf("unconfirmed connections must not spend the label's confirmed budget: %v", err)
+	} else {
+		_ = conn.Close()
 	}
 }
 

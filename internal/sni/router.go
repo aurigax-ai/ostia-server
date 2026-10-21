@@ -6,6 +6,8 @@ import (
 	"net"
 	"sync"
 	"time"
+
+	"github.com/aurigax-ai/ostia-server/internal/netkey"
 )
 
 type Kind int
@@ -31,9 +33,9 @@ type Router struct {
 func addressOf(conn net.Conn) string {
 	host, _, err := net.SplitHostPort(conn.RemoteAddr().String())
 	if err != nil {
-		return conn.RemoteAddr().String()
+		return netkey.Of(conn.RemoteAddr().String())
 	}
-	return host
+	return netkey.Of(host)
 }
 
 func (r *Router) admit(ip string) bool {
