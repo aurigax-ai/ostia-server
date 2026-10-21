@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -768,5 +769,70 @@ func TestGarbageCollectionIsBoundToTheManifestVersion(t *testing.T) {
 	info := f.env.anonymous().Must(t, http.StatusOK, "GET", "/v1/info", nil).Map(t)
 	if info["syncGCBound"] != true {
 		t.Fatalf("/v1/info must advertise the bound gc: %v", info)
+	}
+}
+
+func TestGarbageCollectionNeedsTheDevicesSignatureAndAnEstablishedDevice(t *testing.T) {
+	f := newSyncFixture(t, "[sync]\ngc_grace = \"0s\"\n")
+	if _, err := f.a.Sync(t, settings("theme", "dark")); err != nil {
+		t.Fatal(err)
+	}
+	stolen := stolenCopy(f.env, f.a.API)
+	bare := stolen.Do(t, "POST", "/v1/sync/gc", map[string]any{"keep": []string{}}, "If-Match", "1")
+	if bare.Status != http.StatusForbidden || bare.Map(t)["error"] != "device-signature-required" {
+		t.Fatalf("garbage collection with a bare token: %s", bare)
+	}
+	if usage := f.a.API.Must(t, http.StatusOK, "GET", "/v1/sync/usage", nil).Map(t); usage["blobs"].(float64) != 1 {
+		t.Fatalf("a bare token deleted blobs: %v", usage)
+	}
+	young := newSyncFixture(t, "[auth]\napprover_min_age = \"24h\"\n[sync]\ngc_grace = \"0s\"\n")
+	res := young.a.API.Do(t, "POST", "/v1/sync/gc", map[string]any{"keep": []string{}}, "If-Match", "0")
+	if res.Status != http.StatusForbidden || res.Map(t)["error"] != "device-too-new" {
+		t.Fatalf("a device still on probation must not collect garbage: %s", res)
+	}
+}
+
+func TestGarbageCollectionAndBlobUploadsNeverLeaveARowWithoutItsFile(t *testing.T) {
+	f := newSyncFixture(t, "[sync]\ngc_grace = \"0s\"\n")
+	if _, err := f.a.Sync(t, settings("theme", "dark")); err != nil {
+		t.Fatal(err)
+	}
+	put := func(id string, content []byte) int {
+		res, err := f.a.API.Raw("PUT", "/v1/sync/blobs/"+id, map[string]string{"Content-Type": "application/octet-stream"}, bytes.NewReader(content))
+		if err != nil {
+			t.Error(err)
+			return 0
+		}
+		return res.Status
+	}
+	for round := range 12 {
+		content := []byte(fmt.Sprintf("sealed blob %d", round))
+		id := testkit.BlobID(f.a.Key, fmt.Sprintf("race-%d.json", round), content)
+		if status := put(id, content); status != http.StatusCreated {
+			t.Fatalf("round %d first upload: %d", round, status)
+		}
+		var wg sync.WaitGroup
+		var status int
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			status = put(id, content)
+		}()
+		go func() {
+			defer wg.Done()
+			f.a.API.Do(t, "POST", "/v1/sync/gc", map[string]any{"keep": []string{}}, "If-Match", "1")
+		}()
+		wg.Wait()
+		if status != http.StatusOK && status != http.StatusCreated {
+			t.Fatalf("round %d: upload answered %d", round, status)
+		}
+		res := f.a.API.Do(t, "GET", "/v1/sync/blobs/"+id, nil)
+		rows := f.a.API.Must(t, http.StatusOK, "GET", "/v1/sync/usage", nil).Map(t)["blobs"].(float64)
+		switch {
+		case res.Status == http.StatusOK && bytes.Equal(res.Body, content) && rows == 1:
+		case res.Status == http.StatusNotFound && rows == 0:
+		default:
+			t.Fatalf("round %d: the row and the file disagree after a concurrent upload and gc: GET %d, %v rows", round, res.Status, rows)
+		}
 	}
 }

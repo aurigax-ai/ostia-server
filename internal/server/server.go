@@ -435,7 +435,8 @@ func (s *Server) sweep(ctx context.Context) {
 		"revoked devices": func(ctx context.Context) error {
 			return s.DB.SweepRevokedDevices(ctx, s.Cfg.Auth.RevokedDeviceRetention.Std())
 		},
-		"admin": s.DB.SweepAdmin,
+		"admin":              s.DB.SweepAdmin,
+		"abandoned accounts": s.Auth.PurgeAbandoned,
 	} {
 		if err := task(ctx); err != nil {
 			slog.Error("sweep "+name, "err", err)

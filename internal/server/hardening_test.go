@@ -207,6 +207,9 @@ func TestSweepDeletesRevokedDevicesPastTheirRetention(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err := srv.DB.AddDevice(t.Context(), acct.ID, store.NewDevice{Name: "b", SignPub: make([]byte, 32), BoxPub: make([]byte, 32)}, 10); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := srv.DB.RevokeDevice(t.Context(), acct.ID, gone.ID); err != nil {
 		t.Fatal(err)
 	}
@@ -275,5 +278,36 @@ func TestStartupSweepRemovesOnlyScratchDirectoriesAndNeverOperatorFiles(t *testi
 	}
 	if kept, err := os.ReadFile(precious); err != nil || string(kept) != "keep" {
 		t.Errorf("a symlink was followed into %s: %v", target, err)
+	}
+}
+
+func TestSweepPurgesAccountsWithNoActiveDevice(t *testing.T) {
+	now := time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC)
+	cfg := config.Default()
+	cfg.DataDir = t.TempDir()
+	cfg.Domains.API = "api.test"
+	cfg.Listen.HTTPS, cfg.Listen.HTTP = "", "127.0.0.1:0"
+	cfg.Modules = config.Modules{Sync: true}
+	srv, err := New(cfg, Options{Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = srv.DB.Close() })
+	device := store.NewDevice{Name: "a", SignPub: make([]byte, 32), BoxPub: make([]byte, 32)}
+	acct, dev, err := srv.DB.RegisterProvider(t.Context(), "github", "h", device, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keep, _, err := srv.DB.RegisterProvider(t.Context(), "github", "other", device, 10)
+	_ = keep
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := srv.DB.RevokeDevice(t.Context(), acct.ID, dev.ID); err != nil {
+		t.Fatal(err)
+	}
+	srv.sweep(t.Context())
+	if abandoned, err := srv.DB.AbandonedAccounts(t.Context()); err != nil || len(abandoned) != 0 {
+		t.Fatalf("the sweep must retry the purge of a departed account: %v %v", abandoned, err)
 	}
 }

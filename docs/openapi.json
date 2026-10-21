@@ -867,6 +867,15 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "X-Device-Timestamp",
+            "in": "header",
+            "required": true,
+            "description": "Unix milliseconds, within two minutes of the server clock and larger than this device's previous signed timestamp",
+            "schema": {
+              "type": "integer"
+            }
           }
         ],
         "tags": [
@@ -3241,7 +3250,7 @@
     },
     "/v1/sync/gc": {
       "post": {
-        "summary": "Delete blobs that are not listed and are older than the grace period (any current device, no elevation; bound to the manifest version with If-Match)",
+        "summary": "Delete blobs that are not listed and are older than the grace period (an established current device, no elevation; signed with the device key and bound to the manifest version with If-Match)",
         "security": [
           {
             "bearer": []
@@ -3309,6 +3318,16 @@
                 }
               }
             }
+          },
+          "403": {
+            "description": "device-signature-required, bad-signature, stale-signature or device-too-new",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           }
         },
         "requestBody": {
@@ -3344,6 +3363,24 @@
             "description": "The manifest version the caller pushed; 412 version-mismatch when the manifest has moved",
             "schema": {
               "type": "string"
+            }
+          },
+          {
+            "name": "X-Device-Signature",
+            "in": "header",
+            "required": true,
+            "description": "Base64url Ed25519 signature over \"ostia-server/manifest-put/v1\\n<device id>\\n<timestamp>\\n<If-Match as a decimal number>\\n<unpadded base64url SHA-256 of the exact request body>\"",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Device-Timestamp",
+            "in": "header",
+            "required": true,
+            "description": "Unix milliseconds, within two minutes of the server clock and larger than this device's previous signed timestamp",
+            "schema": {
+              "type": "integer"
             }
           }
         ]

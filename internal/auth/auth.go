@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -28,7 +29,8 @@ const (
 	ChallengeContext   = "ostia-server/auth/v1"
 	InviteContext      = "ostia-server/invite/v1"
 	ElevateContext     = "ostia-server/elevate/v1"
-	RevokeContext      = "ostia-server/revoke/v1"
+	RevokeContext      = "ostia-server/revoke/v2"
+	SyncGCContext      = "ostia-server/sync-gc/v1"
 	ApproveContext     = "ostia-server/approve/v1"
 	WrapReadContext    = "ostia-server/wrap-read/v1"
 	ManifestPutContext = "ostia-server/manifest-put/v1"
@@ -477,8 +479,24 @@ func (s *Service) RequireSignature(r *http.Request, p Principal, context string,
 	return nil
 }
 
-func RevokeMessage(signerID, targetID string) []byte {
-	return []byte(RevokeContext + "\n" + signerID + "\n" + targetID)
+func RevokeMessage(signerID string, ms int64, targetID string) []byte {
+	return StampedMessage(RevokeContext, signerID, ms, targetID)
+}
+
+func SyncGCMessage(deviceID string, ms int64, ifMatch int64, body []byte) []byte {
+	return StampedMessage(SyncGCContext, deviceID, ms, ManifestPutFields(ifMatch, body)...)
+}
+
+func (s *Service) RequireEstablishedDevice(ctx context.Context, p Principal) error {
+	device, err := s.DB.Device(ctx, p.DeviceID)
+	if err != nil {
+		return err
+	}
+	min := s.Cfg.ApproverMinAge.Std()
+	if min > 0 && s.Now().Sub(time.UnixMilli(device.CreatedAt)) < min {
+		return httpx.Errf(http.StatusForbidden, "device-too-new", "this device joined recently; it may do this once it has been part of the account long enough")
+	}
+	return nil
 }
 
 func ApproveMessage(approverID, approvalID, requesterID string) []byte {
@@ -523,7 +541,7 @@ func (s *Service) needsElevationToRevoke(r *http.Request, p Principal, id string
 
 func (s *Service) revokeDevice(w http.ResponseWriter, r *http.Request, p Principal) error {
 	id := r.PathValue("id")
-	if err := s.requireDeviceSignature(r, p, RevokeMessage(p.DeviceID, id)); err != nil {
+	if err := s.RequireSignedTimestamp(r, p, RevokeContext, id); err != nil {
 		return err
 	}
 	needs, err := s.needsElevationToRevoke(r, p, id)
@@ -552,16 +570,31 @@ func (s *Service) revokeDevice(w http.ResponseWriter, r *http.Request, p Princip
 }
 
 func (s *Service) purgeIfAbandoned(ctx context.Context, accountID string) error {
-	active, err := s.DB.ActiveDeviceCount(ctx, accountID)
-	if err != nil || active > 0 {
-		return err
-	}
 	keys, _, err := s.DB.PurgeDeparted(ctx, accountID)
 	if err != nil {
 		return err
 	}
+	s.deleteBlobs(ctx, keys)
+	return nil
+}
+
+func (s *Service) deleteBlobs(ctx context.Context, keys []string) {
 	for _, key := range keys {
-		_ = s.Blobs.Delete(ctx, key)
+		if err := s.Blobs.Delete(ctx, key); err != nil {
+			slog.Error("delete a blob of a departed account", "err", err)
+		}
+	}
+}
+
+func (s *Service) PurgeAbandoned(ctx context.Context) error {
+	accounts, err := s.DB.AbandonedAccounts(ctx)
+	if err != nil {
+		return err
+	}
+	for _, id := range accounts {
+		if err := s.purgeIfAbandoned(ctx, id); err != nil {
+			return err
+		}
 	}
 	return nil
 }

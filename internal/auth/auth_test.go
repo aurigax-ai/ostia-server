@@ -46,7 +46,8 @@ func (e *env) deviceHeaders(t *testing.T, method, path, token string) map[string
 		e.stamp = max(e.clock.UnixMilli(), e.stamp+1)
 		return map[string]string{timestampHeader: strconv.FormatInt(e.stamp, 10), signatureHeader: sign(ElevateMessage(d.id, e.stamp))}
 	case method == "DELETE" && strings.HasPrefix(path, "/v1/devices/"):
-		return map[string]string{signatureHeader: sign(RevokeMessage(d.id, strings.TrimPrefix(path, "/v1/devices/")))}
+		e.stamp = max(e.clock.UnixMilli(), e.stamp+1)
+		return map[string]string{timestampHeader: strconv.FormatInt(e.stamp, 10), signatureHeader: sign(RevokeMessage(d.id, e.stamp, strings.TrimPrefix(path, "/v1/devices/")))}
 	case method == "POST" && strings.HasPrefix(path, "/v1/auth/approvals/") && strings.HasSuffix(path, "/approve"):
 		id := strings.TrimSuffix(strings.TrimPrefix(path, "/v1/auth/approvals/"), "/approve")
 		dev, err := e.svc.DB.Device(t.Context(), d.id)

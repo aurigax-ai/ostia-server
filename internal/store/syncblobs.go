@@ -45,9 +45,13 @@ func (d *DB) DeleteSyncBlob(ctx context.Context, accountID, blobID string) error
 	return affected(res, err)
 }
 
-func (d *DB) TouchSyncBlob(ctx context.Context, accountID, blobID string) error {
-	_, err := d.sql.ExecContext(ctx, `UPDATE sync_blobs SET created_at = ? WHERE account_id = ? AND blob_id = ?`, d.ms(), accountID, blobID)
-	return err
+func (d *DB) TouchSyncBlob(ctx context.Context, accountID, blobID string) (bool, error) {
+	res, err := d.sql.ExecContext(ctx, `UPDATE sync_blobs SET created_at = ? WHERE account_id = ? AND blob_id = ?`, d.ms(), accountID, blobID)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n == 1, err
 }
 
 func (d *DB) CollectSyncBlobs(ctx context.Context, accountID string, ifMatch int64, keep map[string]bool, grace time.Duration) ([]string, error) {

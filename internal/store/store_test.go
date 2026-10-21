@@ -2,9 +2,11 @@ package store
 
 import (
 	"bytes"
+	"database/sql"
 	"errors"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -244,8 +246,11 @@ func TestSyncBlobQuotaAndUnreferenced(t *testing.T) {
 	if _, err := d.CollectSyncBlobs(t.Context(), a.ID, 7, map[string]bool{}, time.Hour); !errors.Is(err, ErrVersionMismatch) {
 		t.Fatalf("a moved manifest must stop the collection: %v", err)
 	}
-	if err := d.TouchSyncBlob(t.Context(), a.ID, "aaaaaaaaaaaaaaaa"); err != nil {
-		t.Fatal(err)
+	if touched, err := d.TouchSyncBlob(t.Context(), a.ID, "nosuchblobid0000"); err != nil || touched {
+		t.Fatalf("touching a blob that is gone must say so: %v %v", touched, err)
+	}
+	if touched, err := d.TouchSyncBlob(t.Context(), a.ID, "aaaaaaaaaaaaaaaa"); err != nil || !touched {
+		t.Fatalf("%v %v", touched, err)
 	}
 	if stale, _ := d.CollectSyncBlobs(t.Context(), a.ID, 0, map[string]bool{}, time.Hour); len(stale) != 0 {
 		t.Fatalf("a re-uploaded blob is fresh again and must survive the grace period: %v", stale)
@@ -870,5 +875,108 @@ func TestDeleteAdminSessionsEndsEveryOne(t *testing.T) {
 	}
 	if _, err := d.AdminSession(t.Context(), ids.Hash("a")); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("%v", err)
+	}
+}
+
+func TestPurgeDepartedDoesNothingWhileADeviceIsActive(t *testing.T) {
+	d, _ := open(t)
+	a, first := register(t, d, "github", "h")
+	if err := d.PutWrap(t.Context(), a.ID, "passphrase", []byte("w")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.RevokeDevice(t.Context(), a.ID, first.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.AddDevice(t.Context(), a.ID, newDevice("joined while the last one left"), 10); err != nil {
+		t.Fatal(err)
+	}
+	keys, deleted, err := d.PurgeDeparted(t.Context(), a.ID)
+	if err != nil || len(keys) != 0 || deleted {
+		t.Fatalf("the account has a device again: %v %v %v", keys, deleted, err)
+	}
+	if _, err := d.Wrap(t.Context(), a.ID, "passphrase"); err != nil {
+		t.Fatalf("a joined device lost the wrap: %v", err)
+	}
+}
+
+func TestAbandonedAccountsAreFoundAndOnlyLiveSharesKeepThemAlive(t *testing.T) {
+	d, c := open(t)
+	share := func(a Account, expiresIn time.Duration) string {
+		id := ids.New()
+		expires := int64(0)
+		if expiresIn != 0 {
+			expires = c.t.Add(expiresIn).UnixMilli()
+		}
+		if err := d.CreateShare(t.Context(), Share{ID: id, AccountID: a.ID, Mode: "link", Size: 1, ExpiresAt: expires, DeleteTokenHash: []byte("h")}, ShareQuota{MaxShares: 5, MaxBytes: 100}); err != nil {
+			t.Fatal(err)
+		}
+		if err := d.MarkUploaded(t.Context(), id); err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+	active, _ := register(t, d, "github", "active")
+	removedOnly, rd := register(t, d, "github", "removed")
+	expiredOnly, ed := register(t, d, "github", "expired")
+	live, ld := register(t, d, "github", "live")
+	if err := d.TakeDown(t.Context(), share(removedOnly, 0)); err != nil {
+		t.Fatal(err)
+	}
+	expiredID := share(expiredOnly, time.Minute)
+	share(live, 0)
+	for acct, dev := range map[string]Device{removedOnly.ID: rd, expiredOnly.ID: ed, live.ID: ld} {
+		if _, err := d.RevokeDevice(t.Context(), acct, dev.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	c.t = c.t.Add(time.Hour)
+	abandoned, err := d.AbandonedAccounts(t.Context())
+	if err != nil || len(abandoned) != 3 || slices.Contains(abandoned, active.ID) {
+		t.Fatalf("abandoned: %v %v", abandoned, err)
+	}
+	if _, gone, err := d.PurgeDeparted(t.Context(), removedOnly.ID); err != nil || !gone {
+		t.Fatalf("an account whose shares are all removed goes: %v %v", gone, err)
+	}
+	keys, gone, err := d.PurgeDeparted(t.Context(), expiredOnly.ID)
+	if err != nil || !gone || !slices.Contains(keys, ShareBlobKey(expiredID)) {
+		t.Fatalf("expired shares are not live, and their blobs are returned: %v %v %v", gone, keys, err)
+	}
+	if _, gone, err := d.PurgeDeparted(t.Context(), live.ID); err != nil || gone {
+		t.Fatalf("a live share keeps its account: %v %v", gone, err)
+	}
+}
+
+func TestADatabaseAtSchemaV1UpgradesToV2(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "db.sqlite")
+	raw, err := sql.Open("sqlite", "file:"+path+"?_pragma=foreign_keys(1)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, stmt := range []string{
+		schemaV1,
+		`PRAGMA user_version = 1`,
+		`INSERT INTO accounts (id, provider, provider_id_hash, created_at) VALUES ('acct', 'github', 'h', 1)`,
+		`INSERT INTO devices (id, account_id, name, sign_pub, box_pub, created_at, last_seen) VALUES ('d1', 'acct', 'a', x'00', x'00', 1, 1), ('d2', 'acct', 'b', x'00', x'00', 1, 1)`,
+		`INSERT INTO device_seen (viewer_device_id, device_id) VALUES ('d1', 'd2')`,
+	} {
+		if _, err := raw.Exec(stmt); err != nil {
+			t.Fatalf("%v\n%s", err, stmt)
+		}
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	c := &clock{t: time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC)}
+	d, err := Open(path, JournalWAL, c.now)
+	if err != nil {
+		t.Fatalf("a deployed V1 database must open: %v", err)
+	}
+	defer d.Close()
+	var version, seen, devices int
+	_ = d.sql.QueryRowContext(t.Context(), `PRAGMA user_version`).Scan(&version)
+	_ = d.sql.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM sqlite_master WHERE name = 'device_seen'`).Scan(&seen)
+	_ = d.sql.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM devices`).Scan(&devices)
+	if version != 2 || seen != 0 || devices != 2 {
+		t.Fatalf("version %d, device_seen tables %d, devices %d", version, seen, devices)
 	}
 }
