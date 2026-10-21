@@ -593,7 +593,7 @@ func (s *Service) PurgeAbandoned(ctx context.Context) error {
 	}
 	for _, id := range accounts {
 		if err := s.purgeIfAbandoned(ctx, id); err != nil {
-			return err
+			slog.Error("purge an abandoned account", "err", err)
 		}
 	}
 	return nil
