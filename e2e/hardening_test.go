@@ -1,8 +1,11 @@
 package e2e
 
 import (
+	"bufio"
 	"bytes"
 	"crypto/ed25519"
+	"crypto/tls"
+	"encoding/json"
 	"fmt"
 	"io"
 	"io/fs"
@@ -351,7 +354,47 @@ func TestAdminBackupStreamsToStandardOutputForKubectlExec(t *testing.T) {
 	if accounts, err := db.Accounts(t.Context()); err != nil || len(accounts) != 1 {
 		t.Fatalf("restored accounts: %+v %v", accounts, err)
 	}
-	if left, _ := filepath.Glob(filepath.Join(f.env.proc.DataDir, "backup-*")); len(left) != 0 {
+	if left, _ := filepath.Glob(filepath.Join(f.env.proc.DataDir, ".backup-scratch-*")); len(left) != 0 {
 		t.Fatalf("plaintext scratch left in the data directory: %v", left)
+	}
+}
+
+func TestManifestPushRefusesMissingOrStaleTimestampsWithoutReadingTheBody(t *testing.T) {
+	f := newSyncFixture(t, "")
+	owner := f.a.API
+	for name, stamp := range map[string]string{
+		"no timestamp":     "",
+		"stale timestamp":  fmt.Sprint(time.Now().Add(-10 * time.Minute).UnixMilli()),
+		"future timestamp": fmt.Sprint(time.Now().Add(10 * time.Minute).UnixMilli()),
+	} {
+		conn, err := tls.Dial("tcp", f.env.net.HTTPSAddr, &tls.Config{RootCAs: f.env.net.Roots, ServerName: apiHost})
+		if err != nil {
+			t.Fatal(err)
+		}
+		request := "PUT /v1/sync/manifest HTTP/1.1\r\nHost: " + apiHost + "\r\nAuthorization: Bearer " + owner.Token +
+			"\r\nIf-Match: 0\r\nContent-Type: application/json\r\nContent-Length: 4000000\r\n"
+		if stamp != "" {
+			request += "X-Device-Timestamp: " + stamp + "\r\nX-Device-Signature: AAAA\r\n"
+		}
+		_, _ = conn.Write([]byte(request + "\r\n"))
+		_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+		res, err := http.ReadResponse(bufio.NewReader(conn), nil)
+		if err != nil {
+			t.Errorf("%s: the server waited for a body that never comes: %v", name, err)
+			_ = conn.Close()
+			continue
+		}
+		var body struct {
+			Error string `json:"error"`
+		}
+		_ = json.NewDecoder(res.Body).Decode(&body)
+		want := "stale-signature"
+		if stamp == "" {
+			want = "device-signature-required"
+		}
+		if res.StatusCode != http.StatusForbidden || body.Error != want {
+			t.Errorf("%s: %d %s, want 403 %s", name, res.StatusCode, body.Error, want)
+		}
+		_ = conn.Close()
 	}
 }

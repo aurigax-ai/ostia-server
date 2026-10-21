@@ -67,7 +67,7 @@ func TestBackupIsEncryptedToTheRecipientAndRestorable(t *testing.T) {
 	if bytes.Contains(encrypted, []byte(marker)) || bytes.HasPrefix(encrypted, []byte("SQLite format 3")) {
 		t.Fatal("the backup holds the database in clear")
 	}
-	if left, _ := filepath.Glob(filepath.Join(a.Cfg.DataDir, scratchPattern)); len(left) != 0 {
+	if left, _ := filepath.Glob(filepath.Join(a.Cfg.DataDir, scratchPrefix+"*")); len(left) != 0 {
 		t.Fatalf("a plaintext copy was left behind: %v", left)
 	}
 
@@ -109,7 +109,7 @@ func TestBackupLeavesNoPlaintextScratchWhenItFailsOrIsCancelled(t *testing.T) {
 	a := openTestAdmin(t)
 	identity, _ := age.GenerateX25519Identity()
 	left := func() []string {
-		l, _ := filepath.Glob(filepath.Join(a.Cfg.DataDir, scratchPattern))
+		l, _ := filepath.Glob(filepath.Join(a.Cfg.DataDir, scratchPrefix+"*"))
 		return l
 	}
 	if err := a.Backup(t.Context(), identity.Recipient(), &failingWriter{}); err == nil {
@@ -133,7 +133,7 @@ func TestStartingTheServerRemovesScratchLeftByAKilledBackup(t *testing.T) {
 	cfg.DataDir = t.TempDir()
 	cfg.Domains.API = "api.test"
 	cfg.Listen.HTTPS, cfg.Listen.HTTP = "", "127.0.0.1:0"
-	stale := filepath.Join(cfg.DataDir, "backup-123456")
+	stale := filepath.Join(cfg.DataDir, scratchPrefix+"123456")
 	if err := os.MkdirAll(stale, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -232,5 +232,48 @@ func TestRoutesThatCarryMegabytesGetTheBulkDeadline(t *testing.T) {
 	}
 	if !slices.Equal(got, want) {
 		t.Fatalf("bulk routes\n got %v\nwant %v", got, want)
+	}
+}
+
+func TestStartupSweepRemovesOnlyScratchDirectoriesAndNeverOperatorFiles(t *testing.T) {
+	cfg := config.Default()
+	cfg.DataDir = t.TempDir()
+	cfg.Domains.API = "api.test"
+	cfg.Listen.HTTPS, cfg.Listen.HTTP = "", "127.0.0.1:0"
+	target := t.TempDir()
+	precious := filepath.Join(target, "precious")
+	if err := os.WriteFile(precious, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	keep := map[string]func(string) error{
+		"backup-2026-10-21.age":     func(p string) error { return os.WriteFile(p, []byte("age"), 0o600) },
+		"backup-2026-10-21":         func(p string) error { return os.Mkdir(p, 0o700) },
+		scratchPrefix + "a-file":    func(p string) error { return os.WriteFile(p, []byte("x"), 0o600) },
+		scratchPrefix + "a-symlink": func(p string) error { return os.Symlink(target, p) },
+	}
+	for name, create := range keep {
+		if err := create(filepath.Join(cfg.DataDir, name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	gone := filepath.Join(cfg.DataDir, scratchPrefix+"real")
+	if err := os.MkdirAll(filepath.Join(gone, "inner"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	srv, err := New(cfg, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = srv.DB.Close() })
+	for name := range keep {
+		if _, err := os.Lstat(filepath.Join(cfg.DataDir, name)); err != nil {
+			t.Errorf("%s was removed: %v", name, err)
+		}
+	}
+	if _, err := os.Stat(gone); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the scratch directory survived: %v", err)
+	}
+	if kept, err := os.ReadFile(precious); err != nil || string(kept) != "keep" {
+		t.Errorf("a symlink was followed into %s: %v", target, err)
 	}
 }

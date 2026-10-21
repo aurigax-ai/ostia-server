@@ -122,11 +122,15 @@ func (s *Service) putManifest(w http.ResponseWriter, r *http.Request, p auth.Pri
 	if err != nil {
 		return err
 	}
+	stamp, err := s.Auth.SignedTimestamp(r)
+	if err != nil {
+		return err
+	}
 	body, err := httpx.ReadBody(w, r, s.manifestLimit())
 	if err != nil {
 		return err
 	}
-	if err := s.Auth.RequireSignedTimestamp(r, p, auth.ManifestPutContext, auth.ManifestPutFields(expected, body)...); err != nil {
+	if err := s.Auth.RequireSignature(r, p, auth.ManifestPutContext, stamp, auth.ManifestPutFields(expected, body)...); err != nil {
 		return err
 	}
 	var in struct {

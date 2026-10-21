@@ -6,21 +6,24 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"filippo.io/age"
 )
 
-const scratchPattern = "backup-*"
+const scratchPrefix = ".backup-scratch-"
 
 func removeScratch(dataDir string) {
-	stale, _ := filepath.Glob(filepath.Join(dataDir, scratchPattern))
-	for _, dir := range stale {
-		_ = os.RemoveAll(dir)
+	entries, _ := os.ReadDir(dataDir)
+	for _, entry := range entries {
+		if entry.IsDir() && strings.HasPrefix(entry.Name(), scratchPrefix) {
+			_ = os.RemoveAll(filepath.Join(dataDir, entry.Name()))
+		}
 	}
 }
 
 func (a *Admin) Backup(ctx context.Context, recipient age.Recipient, out io.Writer) error {
-	scratch, err := os.MkdirTemp(a.Cfg.DataDir, "backup-")
+	scratch, err := os.MkdirTemp(a.Cfg.DataDir, scratchPrefix)
 	if err != nil {
 		return err
 	}

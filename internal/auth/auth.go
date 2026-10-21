@@ -450,14 +450,26 @@ func ManifestPutMessage(deviceID string, ms int64, ifMatch int64, body []byte) [
 	return StampedMessage(ManifestPutContext, deviceID, ms, ManifestPutFields(ifMatch, body)...)
 }
 
-func (s *Service) RequireSignedTimestamp(r *http.Request, p Principal, context string, fields ...string) error {
+func (s *Service) SignedTimestamp(r *http.Request) (int64, error) {
 	stamp, err := strconv.ParseInt(r.Header.Get(timestampHeader), 10, 64)
 	if err != nil {
-		return httpx.Errf(http.StatusForbidden, "device-signature-required", "send X-Device-Timestamp (milliseconds) and sign it with the device key")
+		return 0, httpx.Errf(http.StatusForbidden, "device-signature-required", "send X-Device-Timestamp (milliseconds) and sign it with the device key")
 	}
 	if skew := s.Now().Sub(time.UnixMilli(stamp)); skew > signatureSkew || skew < -signatureSkew {
-		return httpx.Errf(http.StatusForbidden, "stale-signature", "the signed timestamp is too far from the server's clock")
+		return 0, httpx.Errf(http.StatusForbidden, "stale-signature", "the signed timestamp is too far from the server's clock")
 	}
+	return stamp, nil
+}
+
+func (s *Service) RequireSignedTimestamp(r *http.Request, p Principal, context string, fields ...string) error {
+	stamp, err := s.SignedTimestamp(r)
+	if err != nil {
+		return err
+	}
+	return s.RequireSignature(r, p, context, stamp, fields...)
+}
+
+func (s *Service) RequireSignature(r *http.Request, p Principal, context string, stamp int64, fields ...string) error {
 	if err := s.requireDeviceSignature(r, p, StampedMessage(context, p.DeviceID, stamp, fields...)); err != nil {
 		return err
 	}
