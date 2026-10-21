@@ -35,6 +35,7 @@ type Hub struct {
 	Auth   *auth.Service
 	Cfg    config.Relay
 	Domain string
+	Port   int
 	Now    func() time.Time
 
 	byIP    *limit.Limiter
@@ -158,9 +159,9 @@ func (s *stream) close() {
 	_ = s.desktop.Close()
 }
 
-func New(db *store.DB, authSvc *auth.Service, cfg config.Relay, domain string, now func() time.Time) *Hub {
+func New(db *store.DB, authSvc *auth.Service, cfg config.Relay, domain string, port int, now func() time.Time) *Hub {
 	h := &Hub{
-		DB: db, Auth: authSvc, Cfg: cfg, Domain: domain, Now: now,
+		DB: db, Auth: authSvc, Cfg: cfg, Domain: domain, Port: port, Now: now,
 		byIP:      limit.New(limit.Rule{Every: time.Minute / time.Duration(max(cfg.ConnectionsPerMinutePerIP, 1)), Burst: max(cfg.ConnectionsPerMinutePerIP, 1)}, now),
 		byLabel:   limit.New(limit.Rule{Every: time.Minute / time.Duration(max(cfg.ConnectionsPerMinute, 1)), Burst: max(cfg.ConnectionsPerMinute, 1)}, now),
 		opens:     limit.New(limit.Rule{Every: time.Minute / time.Duration(max(cfg.UnconfirmedOpensPerMinute, 1)), Burst: max(cfg.UnconfirmedOpensPerMinute, 1)}, now),
@@ -196,7 +197,7 @@ func (h *Hub) label(w http.ResponseWriter, r *http.Request, p auth.Principal) er
 	if err != nil {
 		return err
 	}
-	httpx.WriteJSON(w, http.StatusOK, map[string]any{"label": label, "host": h.Host(label), "port": 443})
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"label": label, "host": h.Host(label), "port": h.Port})
 	return nil
 }
 

@@ -129,7 +129,7 @@ The relay forwards a phone's TLS connection to the desktop without terminating i
 POST /v1/relay/label   200 {label, host, port: 443}
 ```
 
-The label is a random 128-bit value (26 characters, `a-z2-7`), stable per device. `host` is `<label>.<relay domain>`. The phone connects to `host:443` and verifies the desktop's pinned certificate fingerprint, not the name. DNS for `*.<relay domain>` points at the server.
+The label is a random 128-bit value (26 characters, `a-z2-7`), stable per device. `host` is `<label>.<relay domain>` and `port` is the server's `domains.port` (443 by default). The phone connects to `host:443` and verifies the desktop's pinned certificate fingerprint, not the name. DNS for `*.<relay domain>` points at the server.
 
 ### Desktop side
 

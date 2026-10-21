@@ -6,6 +6,7 @@ api = "api.example.com"
 share = "example-share.net"
 relay = "r.example.com"
 scheme = "https"
+port = 443
 
 [listen]
 https = ":443"

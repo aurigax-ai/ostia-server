@@ -105,12 +105,12 @@ func New(cfg config.Config, opts Options) (*Server, error) {
 	mux := httpx.NewMux()
 	s.Auth.Mount(mux)
 	if cfg.RelayEnabled() {
-		s.Relay = relay.New(db, s.Auth, cfg.Relay, cfg.Domains.Relay, now)
+		s.Relay = relay.New(db, s.Auth, cfg.Relay, cfg.Domains.Relay, cfg.Domains.Port, now)
 		s.Auth.Hooks = auth.Hooks{DeviceAdded: s.Relay.NotifyDeviceAdded, SessionEnded: s.Relay.KickSession, DeviceRevoked: s.Relay.KickDevice, AccountDeleted: s.Relay.KickDevices}
 		s.Relay.Mount(mux)
 	}
 	if cfg.PublishEnabled() {
-		s.Publish = &publish.Service{DB: db, Blobs: blobs, Auth: s.Auth, Cfg: cfg.Publish, APIDomain: cfg.Domains.API, ShareDomain: cfg.Domains.Share, Scheme: cfg.Domains.Scheme, Now: now, Guard: s.Guard}
+		s.Publish = &publish.Service{DB: db, Blobs: blobs, Auth: s.Auth, Cfg: cfg.Publish, APIDomain: cfg.Domains.API, ShareDomain: cfg.Domains.Share, Scheme: cfg.Domains.Scheme, Port: cfg.Domains.Port, Now: now, Guard: s.Guard}
 		s.Publish.MountAPI(mux)
 		s.share = s.Publish.ShareHandler()
 	}

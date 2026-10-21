@@ -37,6 +37,7 @@ type Domains struct {
 	Share  string `toml:"share"`
 	Relay  string `toml:"relay"`
 	Scheme string `toml:"scheme"`
+	Port   int    `toml:"port"`
 }
 
 type Listen struct {
@@ -163,7 +164,7 @@ func Default() Config {
 	return Config{
 		DataDir:  "./data",
 		LogLevel: "info",
-		Domains:  Domains{Scheme: "https"},
+		Domains:  Domains{Scheme: "https", Port: 443},
 		Listen:   Listen{HTTPS: ":443", ClientIPHeader: "X-Forwarded-For"},
 		TLS:      TLS{Mode: TLSFiles, ForwardProxyProtocol: true},
 		Modules:  Modules{Relay: true, Publish: true, Sync: true},
@@ -252,6 +253,7 @@ func (c Config) Validate() error {
 	}
 	need(c.DataDir != "", "data_dir is required")
 	need(c.Domains.Scheme == "https" || c.Domains.Scheme == "http", "domains.scheme must be https or http")
+	need(c.Domains.Port >= 1 && c.Domains.Port <= 65535, "domains.port must be a port number")
 	need(c.Domains.API != "", "domains.api is required")
 	if c.Modules.Relay {
 		need(c.Domains.Relay != "", "domains.relay is required when modules.relay is on")
