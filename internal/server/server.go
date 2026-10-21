@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"io"
+	"log"
 	"log/slog"
 	"net"
 	"net/http"
@@ -225,12 +226,23 @@ func (s *Server) ReloadCertificates() error {
 	return s.certs.Reload()
 }
 
+func (s *Server) newHTTPServer(errorLog *log.Logger) *http.Server {
+	return &http.Server{
+		Handler:           s.Handler(),
+		ReadHeaderTimeout: readHeaderWait,
+		ReadTimeout:       httpx.BulkWait,
+		WriteTimeout:      httpx.BulkWait,
+		IdleTimeout:       idleConnWait,
+		ErrorLog:          errorLog,
+	}
+}
+
 func (s *Server) Run(ctx context.Context) error {
 	ctx, stop := context.WithCancel(ctx)
 	defer stop()
 	var wg sync.WaitGroup
 	errs := make(chan error, 4)
-	httpServer := &http.Server{Handler: s.Handler(), ReadHeaderTimeout: readHeaderWait, IdleTimeout: idleConnWait, ErrorLog: slog.NewLogLogger(slog.Default().Handler(), slog.LevelDebug)}
+	httpServer := s.newHTTPServer(slog.NewLogLogger(slog.Default().Handler(), slog.LevelDebug))
 	var closers []func()
 
 	if s.Cfg.Listen.HTTP != "" {
@@ -260,7 +272,7 @@ func (s *Server) Run(ctx context.Context) error {
 				errs <- err
 			}
 		})
-		secured := &http.Server{Handler: s.Handler(), ReadHeaderTimeout: readHeaderWait, IdleTimeout: idleConnWait, ErrorLog: httpServer.ErrorLog}
+		secured := s.newHTTPServer(httpServer.ErrorLog)
 		if s.Cfg.TLS.Mode == config.TLSFiles {
 			wg.Go(func() {
 				if err := secured.Serve(terminated); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -377,6 +389,9 @@ func (s *Server) sweep(ctx context.Context) {
 		"invites":      s.DB.SweepInvites,
 		"approvals":    s.DB.SweepApprovals,
 		"push tickets": s.DB.SweepPushTickets,
+		"revoked devices": func(ctx context.Context) error {
+			return s.DB.SweepRevokedDevices(ctx, s.Cfg.Auth.RevokedDeviceRetention.Std())
+		},
 	} {
 		if err := task(ctx); err != nil {
 			slog.Error("sweep "+name, "err", err)

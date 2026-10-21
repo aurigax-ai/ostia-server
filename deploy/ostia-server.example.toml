@@ -44,6 +44,7 @@ device_invite_ttl = "10m0s"
 elevation_ttl = "5m0s"
 approval_ttl = "5m0s"
 approver_min_age = "24h0m0s"
+revoked_device_retention = "720h0m0s"
 
 [relay]
 max_streams_per_label = 8

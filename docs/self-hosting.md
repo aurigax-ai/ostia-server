@@ -85,12 +85,25 @@ Push is off by default. Turn it on with `modules.push = true` and give the serve
 
 ## Backups
 
-Back up `data_dir` as a whole: `ostia.sqlite` (copy it with `sqlite3 ostia.sqlite ".backup backup.sqlite"` while running), `blobs/` and `server.key`. `server.key` seals push tokens and keys the GitHub-id hashes; without it GitHub users would get new accounts and push registrations would stop opening.
+Back up `data_dir` as a whole: the database, `blobs/` and `server.key`. `server.key` seals push tokens and keys the GitHub-id hashes; without it GitHub users would get new accounts and push registrations would stop opening.
+
+Take the database with the server's own command, which copies it consistently while the server runs and encrypts the copy to an [age](https://age-encryption.org) public key, so no plaintext copy is left on the node or in transit:
+
+```
+age-keygen -o backup.key                       # once, keep backup.key off the node
+ostia-server admin backup -recipient age1... -out /backups/ostia-$(date +%F).sqlite.age
+age -d -i backup.key ostia-2026-10-21.sqlite.age > ostia.sqlite     # to restore
+```
+
+`-out` must not exist yet and is created with mode 0600. The scratch copy is made inside `data_dir` (mode 0700) and deleted before the command returns. `blobs/` holds ciphertext only and `server.key` is 32 bytes; copy them with your usual tool, to storage you trust with the key.
+
+Everything the server writes is owner-only (the process sets umask 077, and the database files are forced to 0600 on start). Create `data_dir` mode 0700 as well, so other users on the host cannot list it. The database runs with `secure_delete` on, so deleted rows are overwritten rather than left in free pages.
 
 ## Administration
 
 ```
 ostia-server admin invite [-ttl 168h]
+ostia-server admin backup -recipient <age1...> -out <file>
 ostia-server admin accounts
 ostia-server admin reports
 ostia-server admin takedown <share-id>
@@ -99,11 +112,11 @@ ostia-server admin enable-publish <account-id>
 ostia-server admin delete-account <account-id>
 ```
 
-These work against the same data directory while the server is running. A reported share is disabled with `takedown`; its content is deleted and the share page says it was removed. Repeat abuse is handled with `disable-publish`.
+`invite` refuses a ttl of zero or below and one longer than `auth.invite_ttl`: a code always expires. These work against the same data directory while the server is running. A reported share is disabled with `takedown`; its content is deleted and the share page says it was removed. Repeat abuse is handled with `disable-publish`.
 
 ## Privacy defaults
 
-No access logs, no addresses or user agents stored, view counts only. Addresses are held in memory for rate limiting and for the lifetime of a relayed connection. Telemetry and analytics do not exist.
+No access logs, no addresses or user agents stored, view counts only. Addresses are held in memory for rate limiting and for the lifetime of a relayed connection. A device's last activity is stored as a day, not a time, and a revoked device is deleted after a retention period. Telemetry and analytics do not exist.
 
 ## Upgrading
 

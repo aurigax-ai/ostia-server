@@ -23,6 +23,13 @@ const registerContext = "ostia-server/register/v1"
 
 const challengeContext = "ostia-server/auth/v1"
 
+const (
+	inviteContext      = "ostia-server/invite/v1"
+	elevateContext     = "ostia-server/elevate/v1"
+	wrapReadContext    = "ostia-server/wrap-read/v1"
+	manifestPutContext = "ostia-server/manifest-put/v1"
+)
+
 type Net struct {
 	HTTPSAddr string
 	Roots     *x509.CertPool
@@ -134,19 +141,22 @@ func (a *API) deviceSignature(method, path string) map[string]string {
 	sign := func(message string) string {
 		return b64.EncodeToString(ed25519.Sign(a.ID.Sign, []byte(message)))
 	}
+	stamped := func(context string) map[string]string {
+		stamp := a.nextStamp()
+		return map[string]string{
+			"X-Device-Timestamp": fmt.Sprint(stamp),
+			"X-Device-Signature": sign(context + "\n" + a.ID.DeviceID + "\n" + fmt.Sprint(stamp)),
+		}
+	}
 	switch {
 	case method == "POST" && path == "/v1/devices/invite":
-		stamp := a.nextStamp()
-		return map[string]string{
-			"X-Device-Timestamp": fmt.Sprint(stamp),
-			"X-Device-Signature": sign("ostia-server/invite/v1\n" + a.ID.DeviceID + "\n" + fmt.Sprint(stamp)),
-		}
+		return stamped(inviteContext)
 	case method == "POST" && path == "/v1/auth/elevation/approval":
-		stamp := a.nextStamp()
-		return map[string]string{
-			"X-Device-Timestamp": fmt.Sprint(stamp),
-			"X-Device-Signature": sign("ostia-server/elevate/v1\n" + a.ID.DeviceID + "\n" + fmt.Sprint(stamp)),
-		}
+		return stamped(elevateContext)
+	case method == "GET" && (path == "/v1/sync/wraps/passphrase" || path == "/v1/sync/wraps/recovery"):
+		return stamped(wrapReadContext)
+	case method == "PUT" && path == "/v1/sync/manifest":
+		return stamped(manifestPutContext)
 	case method == "DELETE" && strings.HasPrefix(path, "/v1/devices/"):
 		target := strings.TrimPrefix(path, "/v1/devices/")
 		return map[string]string{"X-Device-Signature": sign("ostia-server/revoke/v1\n" + a.ID.DeviceID + "\n" + target)}

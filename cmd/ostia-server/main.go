@@ -23,6 +23,7 @@ const (
 )
 
 func main() {
+	syscall.Umask(0o077)
 	if err := run(os.Args[1:]); err != nil {
 		fmt.Fprintln(os.Stderr, "ostia-server:", err)
 		os.Exit(1)
@@ -97,6 +98,7 @@ ostia-server admin [-config file] <command>
     disable-publish <account-id>       stop an account from publishing
     enable-publish <account-id>        allow an account to publish again
     delete-account <account-id>        remove an account and everything it stored
+    backup -recipient <age1...> -out <file>   write the database, encrypted to an age public key
 ostia-server version
 `
 
@@ -154,6 +156,8 @@ func admin(args []string) error {
 			fmt.Printf("%s\treports=%d\tlatest %s\taccount=%s\tremoved=%t\n", r.ShareID, r.Reports, time.UnixMilli(r.Latest).UTC().Format(time.RFC3339), r.AccountID, r.Removed)
 		}
 		return nil
+	case "backup":
+		return backup(ctx, a, operands)
 	case "takedown", "disable-publish", "enable-publish", "delete-account":
 		if len(operands) != 1 {
 			return fmt.Errorf("%s needs exactly one id", command)

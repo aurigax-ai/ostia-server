@@ -5,9 +5,15 @@ import (
 	"time"
 )
 
+const (
+	DefaultMaxKeys = 50000
+	overflowKey    = "\x00overflow"
+)
+
 type Rule struct {
-	Every time.Duration
-	Burst int
+	Every   time.Duration
+	Burst   int
+	MaxKeys int
 }
 
 type bucket struct {
@@ -23,11 +29,18 @@ type Limiter struct {
 }
 
 func New(rule Rule, now func() time.Time) *Limiter {
+	if rule.MaxKeys <= 0 {
+		rule.MaxKeys = DefaultMaxKeys
+	}
 	return &Limiter{rule: rule, now: now, keys: map[string]*bucket{}}
 }
 
 func (l *Limiter) refilled(key string, at time.Time) *bucket {
 	b, ok := l.keys[key]
+	if !ok && len(l.keys) >= l.rule.MaxKeys {
+		key = overflowKey
+		b, ok = l.keys[key]
+	}
 	if !ok {
 		b = &bucket{tokens: float64(l.rule.Burst), last: at}
 		l.keys[key] = b

@@ -78,6 +78,8 @@ type Auth struct {
 	ElevationTTL    Duration `toml:"elevation_ttl"`
 	ApprovalTTL     Duration `toml:"approval_ttl"`
 	ApproverMinAge  Duration `toml:"approver_min_age"`
+
+	RevokedDeviceRetention Duration `toml:"revoked_device_retention"`
 }
 
 type Relay struct {
@@ -179,6 +181,8 @@ func Default() Config {
 			ElevationTTL:    Duration(5 * time.Minute),
 			ApprovalTTL:     Duration(5 * time.Minute),
 			ApproverMinAge:  Duration(24 * time.Hour),
+
+			RevokedDeviceRetention: Duration(30 * 24 * time.Hour),
 		},
 		Relay: Relay{
 			MaxStreamsPerLabel:                  8,
@@ -300,6 +304,9 @@ func (c Config) Validate() error {
 		need(c.Push.FCM.ServiceAccountFile != "" || c.Push.APNs.KeyFile != "", "modules.push needs push.fcm or push.apns credentials")
 	}
 	need(c.Auth.SessionTTL.Std() > 0, "auth.session_ttl must be positive")
+	need(c.Auth.InviteTTL.Std() > 0, "auth.invite_ttl must be positive, an invite code that never expires is not allowed")
+	need(c.Auth.DeviceInviteTTL.Std() > 0, "auth.device_invite_ttl must be positive, an invite code that never expires is not allowed")
+	need(c.Auth.RevokedDeviceRetention.Std() > 0, "auth.revoked_device_retention must be positive")
 	need(c.Auth.ApproverMinAge == 0 || c.Auth.ApproverMinAge >= c.Auth.SessionTTL, "auth.approver_min_age must be 0 or at least auth.session_ttl, otherwise a stolen session outlives the wait")
 	need(c.Publish.MaxExpiry >= c.Publish.DefaultExpiry, "publish.max_expiry must not be below publish.default_expiry")
 	return errors.Join(errs...)

@@ -90,7 +90,7 @@ func TestClientIPIgnoresHeadersFromUntrustedPeers(t *testing.T) {
 	}
 }
 
-func TestClientIPTakesTheRightmostUntrustedHop(t *testing.T) {
+func TestClientIPTrustsExactlyTheNearestHop(t *testing.T) {
 	p := proxies(t, "X-Forwarded-For", "10.0.0.0/8", "192.0.2.7")
 	cases := []struct {
 		name      string
@@ -100,11 +100,12 @@ func TestClientIPTakesTheRightmostUntrustedHop(t *testing.T) {
 		{"single client", []string{"198.51.100.9"}, "198.51.100.9"},
 		{"forged leftmost entry", []string{"1.2.3.4, 198.51.100.9"}, "198.51.100.9"},
 		{"forged entry in another header line", []string{"1.2.3.4", "198.51.100.9"}, "198.51.100.9"},
-		{"trusted hops on the right are skipped", []string{"198.51.100.9, 10.1.1.1, 192.0.2.7"}, "198.51.100.9"},
-		{"forged entry behind an inner proxy", []string{"6.6.6.6, 198.51.100.9, 10.1.1.1"}, "198.51.100.9"},
+		{"a client inside the trusted range is itself, not what it forged", []string{"6.6.6.6, 10.1.1.1"}, "10.1.1.1"},
+		{"an inner proxy is the last hop, whatever is left of it", []string{"198.51.100.9, 10.1.1.1"}, "10.1.1.1"},
+		{"spaces around the hop", []string{"1.2.3.4 ,   198.51.100.9  "}, "198.51.100.9"},
 		{"garbage falls back to the peer", []string{"not-an-ip"}, "10.0.0.1"},
 		{"garbage on the right falls back to the peer", []string{"198.51.100.9, junk"}, "10.0.0.1"},
-		{"all hops trusted falls back to the peer", []string{"10.2.2.2, 10.3.3.3"}, "10.0.0.1"},
+		{"empty last hop falls back to the peer", []string{"198.51.100.9,"}, "10.0.0.1"},
 		{"no header", nil, "10.0.0.1"},
 	}
 	for _, c := range cases {

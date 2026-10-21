@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"os"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -19,7 +20,10 @@ var (
 	ErrLimit           = errors.New("limit reached")
 	ErrGone            = errors.New("gone")
 	ErrRequesterTooNew = errors.New("requester too new")
+	ErrInvalidTTL      = errors.New("ttl must be positive")
 )
+
+const fileMode = 0o600
 
 var migrations = []string{schemaV1}
 
@@ -29,11 +33,15 @@ type DB struct {
 }
 
 func Open(path string, now func() time.Time) (*DB, error) {
+	if err := restrictFiles(path); err != nil {
+		return nil, err
+	}
 	q := url.Values{}
 	q.Add("_pragma", "journal_mode(WAL)")
 	q.Add("_pragma", "busy_timeout(5000)")
 	q.Add("_pragma", "foreign_keys(1)")
 	q.Add("_pragma", "synchronous(NORMAL)")
+	q.Add("_pragma", "secure_delete(1)")
 	q.Set("_txlock", "immediate")
 	conn, err := sql.Open("sqlite", "file:"+path+"?"+q.Encode())
 	if err != nil {
@@ -46,6 +54,22 @@ func Open(path string, now func() time.Time) (*DB, error) {
 		return nil, err
 	}
 	return d, nil
+}
+
+func restrictFiles(path string) error {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, fileMode)
+	if err != nil {
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		if err := os.Chmod(path+suffix, fileMode); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	return nil
 }
 
 func (d *DB) Close() error { return d.sql.Close() }

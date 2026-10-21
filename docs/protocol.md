@@ -77,8 +77,8 @@ A nonce is single use and lives 60 seconds. A device holds at most five open non
 ### Devices and accounts
 
 ```
-GET    /v1/devices               {devices: [{id, name, signPub, boxPub, createdAt, lastSeen, current?, new?}]}   `new`: added after the calling device and not yet acknowledged
-POST   /v1/devices/invite        201 {code, expiresAt}      one-time code for a new device of this account, valid 10 minutes by default; an elevated session once the account has two or more devices
+GET    /v1/devices               {devices: [{id, name, signPub, boxPub, createdAt, lastSeen, current?, new?}]}   `lastSeen` is the start of the UTC day of the device's last activity, in Unix milliseconds: the server keeps no finer time   `new`: added after the calling device and not yet acknowledged
+POST   /v1/devices/invite        201 {code, expiresAt}      one-time code for a new device of this account, valid 10 minutes by default (every code has an expiry); an elevated session once the account has two or more devices
 POST   /v1/devices/{id}/seen     {sig} → 204   the person has seen this device on the calling device; clears its `new` flag. `sig` is the calling device's Ed25519 signature over `ostia-server/seen/v1\n<calling device id>\n<target device id>`: a stolen session token does not hold that key and cannot silence the warning
 DELETE /v1/devices/{id}          204   revokes sessions, the relay label and the device's key wrap; open relay streams close
 DELETE /v1/account               204   removes every row and blob, push handles included, and closes the relay listener (elevated session)
@@ -92,15 +92,19 @@ Some actions change who belongs to the account, so a bearer token alone is not e
 |---|---|
 | `POST /v1/devices/invite` | `ostia-server/invite/v1\n<device id>\n<timestamp>`; also send `X-Device-Timestamp` (milliseconds, within two minutes of the server clock, and larger than the device's previous one, so a captured request cannot be replayed) |
 | `POST /v1/auth/elevation/approval` | `ostia-server/elevate/v1\n<device id>\n<timestamp>`, with `X-Device-Timestamp` as for invites |
+| `GET /v1/sync/wraps/passphrase`, `GET /v1/sync/wraps/recovery` | `ostia-server/wrap-read/v1\n<device id>\n<timestamp>`, with `X-Device-Timestamp` as for invites. The message does not name the slot |
+| `PUT /v1/sync/manifest` | `ostia-server/manifest-put/v1\n<device id>\n<timestamp>`, with `X-Device-Timestamp` as for invites |
 | `DELETE /v1/devices/{id}` | `ostia-server/revoke/v1\n<device id>\n<target id>` |
 | `POST /v1/auth/approvals/{id}/approve` | `ostia-server/approve/v1\n<approver id>\n<approval id>\n<requester id>` |
 | `POST /v1/devices/{id}/seen` | body `{sig}` over `ostia-server/seen/v1\n<viewer id>\n<target id>` |
 
-A missing signature answers `403 device-signature-required`, a wrong one `403 bad-signature`, an old or reused timestamp `403 stale-signature`. A stolen session token therefore cannot add, remove or approve devices. An approval is also refused (`403 requester-too-new`) when the device asking for elevation has not belonged to the account for `auth.approver_min_age`, whoever approves.
+A missing signature answers `403 device-signature-required`, a wrong one `403 bad-signature`, an old or reused timestamp `403 stale-signature`. A stolen session token therefore cannot add, remove or approve devices, download the passphrase or recovery wrap to guess it offline, or push manifest versions that push real history out.
+
+The timestamp counter is one per device, shared by every action in the table: a timestamp must be larger than the last one the server accepted from that device, whichever action it signed. A client keeps `stamp = max(now, previous stamp + 1)` and does not send two signed requests concurrently. A signed request that fails after the signature was checked (for example a manifest `PUT` answered `412`) has still used its timestamp, so a retry signs a new one. Only the passphrase and recovery wraps are signed reads; `device:<id>` wraps, the manifest, blobs and listings stay readable with the token, since they are sealed to a device key or under `K`. An approval is also refused (`403 requester-too-new`) when the device asking for elevation has not belonged to the account for `auth.approver_min_age`, whoever approves.
 
 ### Revoking devices
 
-Revoking another device or the account normally needs an elevated session. Exceptions, so an owner can always remove an intruder: a device may revoke a device that is still younger than `auth.approver_min_age` (probation) and was added after it, without elevation, and a device may revoke itself without elevation only while an older active device remains (a token alone cannot remove an account's oldest device, even when the account is new). `DELETE /v1/auth/session` (sign out) is always free. A client should show every device with `new: true` to the person and keep asking until they acknowledge it; a relay listener receives `{"t": "device-added", "deviceId", "name", "createdAt"}` when a device joins an account that already had one, and again for every unacknowledged device each time it connects (so a listener that was replaced or offline still learns of it).
+Revoking another device or the account normally needs an elevated session. Exceptions, so an owner can always remove an intruder: a device may revoke a device that is still younger than `auth.approver_min_age` (probation) and was added after it, without elevation, and a device may revoke itself without elevation only while an older active device remains (a token alone cannot remove an account's oldest device, even when the account is new). `DELETE /v1/auth/session` (sign out) is always free. The row of a revoked device is deleted `auth.revoked_device_retention` (30 days) after the revocation. A client should show every device with `new: true` to the person and keep asking until they acknowledge it; a relay listener receives `{"t": "device-added", "deviceId", "name", "createdAt"}` when a device joins an account that already had one, and again for every unacknowledged device each time it connects (so a listener that was replaced or offline still learns of it).
 
 ### Elevated sessions
 
@@ -297,13 +301,13 @@ A new device gets `K` from the passphrase, the recovery key, or from a signed-in
 
 ```
 GET  /v1/sync/manifest[?version=N]    {version, blob, updatedAt}; 404 no-manifest
-PUT  /v1/sync/manifest                {blob}; If-Match: <current version, 0 for none> → 200 {version}
+PUT  /v1/sync/manifest                {blob}; If-Match: <current version, 0 for none>; signed with the device key → 200 {version}
                                       412 {error: "version-mismatch", current}; 428 without If-Match
 GET  /v1/sync/manifest/versions       {versions: [{version, updatedAt}]}
 GET  /v1/sync/blobs/{blobId}          raw bytes
 PUT  /v1/sync/blobs/{blobId}          raw bytes → 201 created | 200 identical | 409 | 413 | 507
 GET  /v1/sync/wraps                   {wraps: [{slot, updatedAt}]}
-GET  /v1/sync/wraps/{slot}            {slot, blob, updatedAt}
+GET  /v1/sync/wraps/{slot}            {slot, blob, updatedAt}; the passphrase and recovery slots are signed with the device key (`403 device-signature-required`)
 PUT  /v1/sync/wraps/{slot}            {blob} → 204        slot: passphrase | recovery | device:<id of an active device>; an unelevated session may only fill an empty slot; replacing any existing wrap needs an elevated session. A `device:<id>` blob must be a version 2 wrap signed by the calling device (`400 bad-wrap`, `403 wrong-signer`), see Wrapping `K`
 DELETE /v1/sync/wraps/{slot}          204
 POST /v1/sync/rotate                  {ifMatch, manifest, wraps: {slot: blob}, deleteSlots: [slot]} → 200 {version} | 412 | 400 bad-wrap | 403 wrong-signer     every device wrap is checked like a PUT

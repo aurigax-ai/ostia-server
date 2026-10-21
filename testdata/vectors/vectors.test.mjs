@@ -166,3 +166,13 @@ test('registration proof and challenge signature verify', () => {
   assert.ok(verify(null, Buffer.from(auth.challengeMessage), pub, b64(auth.challengeSignature)))
   assert.ok(!verify(null, Buffer.from(`${auth.challengeMessage}x`), pub, b64(auth.challengeSignature)))
 })
+
+test('signed wrap read and manifest push verify and are not interchangeable', () => {
+  const pub = ed25519Public(b64(auth.signPub))
+  assert.equal(auth.wrapReadMessage, `ostia-server/wrap-read/v1\n${auth.deviceId}\n${auth.timestamp}`)
+  assert.ok(verify(null, Buffer.from(auth.wrapReadMessage), pub, b64(auth.wrapReadSignature)))
+  assert.equal(auth.manifestPutMessage, `ostia-server/manifest-put/v1\n${auth.deviceId}\n${auth.timestamp}`)
+  assert.ok(verify(null, Buffer.from(auth.manifestPutMessage), pub, b64(auth.manifestPutSignature)))
+  assert.ok(!verify(null, Buffer.from(auth.manifestPutMessage), pub, b64(auth.wrapReadSignature)))
+  assert.ok(!verify(null, Buffer.from(auth.wrapReadMessage), pub, b64(auth.manifestPutSignature)))
+})

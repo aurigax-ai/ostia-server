@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"time"
 
 	"github.com/aurigax-ai/ostia-server/internal/ids"
 )
@@ -54,8 +55,15 @@ func (d *DB) DevicesOf(ctx context.Context, accountID string) ([]Device, error) 
 	return out, rows.Err()
 }
 
+func startOfDay(ms int64) int64 { return ms - ms%dayMillis }
+
 func (d *DB) TouchDevice(ctx context.Context, id string) error {
-	_, err := d.sql.ExecContext(ctx, `UPDATE devices SET last_seen = ? WHERE id = ?`, d.ms(), id)
+	_, err := d.sql.ExecContext(ctx, `UPDATE devices SET last_seen = ? WHERE id = ? AND last_seen < ?`, startOfDay(d.ms()), id, startOfDay(d.ms()))
+	return err
+}
+
+func (d *DB) SweepRevokedDevices(ctx context.Context, retention time.Duration) error {
+	_, err := d.sql.ExecContext(ctx, `DELETE FROM devices WHERE revoked_at > 0 AND revoked_at < ?`, d.now().Add(-retention).UnixMilli())
 	return err
 }
 
@@ -67,7 +75,7 @@ func addDevice(ctx context.Context, tx *sql.Tx, now int64, accountID string, nd 
 	if maxDevices > 0 && count >= maxDevices {
 		return Device{}, ErrLimit
 	}
-	dev := Device{ID: ids.New(), AccountID: accountID, Name: nd.Name, SignPub: nd.SignPub, BoxPub: nd.BoxPub, CreatedAt: now, LastSeen: now}
+	dev := Device{ID: ids.New(), AccountID: accountID, Name: nd.Name, SignPub: nd.SignPub, BoxPub: nd.BoxPub, CreatedAt: now, LastSeen: startOfDay(now)}
 	_, err := tx.ExecContext(ctx, `INSERT INTO devices (`+deviceColumns+`) VALUES (?, ?, ?, ?, ?, ?, ?, 0)`,
 		dev.ID, dev.AccountID, dev.Name, dev.SignPub, dev.BoxPub, dev.CreatedAt, dev.LastSeen)
 	return dev, err

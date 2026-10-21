@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"time"
 
@@ -45,6 +46,9 @@ func OpenAdmin(cfg config.Config) (*Admin, error) {
 func (a *Admin) Close() error { return a.DB.Close() }
 
 func (a *Admin) Invite(ctx context.Context, ttl time.Duration) (code string, expiresAt int64, err error) {
+	if max := a.Cfg.Auth.InviteTTL.Std(); ttl > max {
+		return "", 0, fmt.Errorf("an invite code may live at most auth.invite_ttl (%s), not %s", max, ttl)
+	}
 	return a.Auth.CreateInvite(ctx, "", ttl, false)
 }
 

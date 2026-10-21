@@ -63,7 +63,7 @@ func (s *Service) uploadURL(id string) string {
 func (s *Service) MountAPI(mux *httpx.Mux) {
 	mux.Handle("POST /v1/shares", s.Auth.Authed(s.create))
 	mux.Handle("GET /v1/shares", s.Auth.Authed(s.list))
-	mux.Handle("PUT /v1/shares/{id}/blob", s.Auth.Authed(s.upload))
+	mux.HandleBulk("PUT /v1/shares/{id}/blob", s.Auth.Authed(s.upload))
 	mux.Handle("DELETE /v1/shares/{id}", s.Guard.PerIP("shares.delete", limit.Rule{Every: time.Second, Burst: 30}, httpx.Handle(s.delete)))
 	mux.Handle("POST /v1/report/{id}", s.Guard.PerIP("report", limit.Rule{Every: 12 * time.Minute, Burst: 5}, httpx.Handle(s.reportByID)))
 }

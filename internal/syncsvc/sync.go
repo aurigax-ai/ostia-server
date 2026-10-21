@@ -38,8 +38,8 @@ func (s *Service) Mount(mux *httpx.Mux) {
 	mux.Handle("GET /v1/sync/manifest", s.Auth.Authed(s.getManifest))
 	mux.Handle("PUT /v1/sync/manifest", s.Auth.Authed(s.putManifest))
 	mux.Handle("GET /v1/sync/manifest/versions", s.Auth.Authed(s.manifestVersions))
-	mux.Handle("GET /v1/sync/blobs/{blobId}", s.Auth.Authed(s.getBlob))
-	mux.Handle("PUT /v1/sync/blobs/{blobId}", s.Auth.Authed(s.putBlob))
+	mux.HandleBulk("GET /v1/sync/blobs/{blobId}", s.Auth.Authed(s.getBlob))
+	mux.HandleBulk("PUT /v1/sync/blobs/{blobId}", s.Auth.Authed(s.putBlob))
 	mux.Handle("GET /v1/sync/wraps", s.Auth.Authed(s.listWraps))
 	mux.Handle("GET /v1/sync/wraps/{slot}", s.Auth.Authed(s.getWrap))
 	mux.Handle("PUT /v1/sync/wraps/{slot}", s.Auth.Authed(s.putWrap))
@@ -120,6 +120,9 @@ func (s *Service) manifestLimit() int64 { return s.Cfg.MaxManifestBytes*4/3 + js
 func (s *Service) putManifest(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
 	expected, err := ifMatch(r)
 	if err != nil {
+		return err
+	}
+	if err := s.Auth.RequireSignedTimestamp(r, p, auth.ManifestPutContext); err != nil {
 		return err
 	}
 	var in struct {
@@ -261,6 +264,11 @@ func (s *Service) listWraps(w http.ResponseWriter, r *http.Request, p auth.Princ
 
 func (s *Service) getWrap(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
 	slot := r.PathValue("slot")
+	if slot == slotPassphrase || slot == slotRecovery {
+		if err := s.Auth.RequireSignedTimestamp(r, p, auth.WrapReadContext); err != nil {
+			return err
+		}
+	}
 	wrap, err := s.DB.Wrap(r.Context(), p.AccountID, slot)
 	if errors.Is(err, store.ErrNotFound) {
 		return httpx.ErrNotFound

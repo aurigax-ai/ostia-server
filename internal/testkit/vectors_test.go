@@ -7,10 +7,13 @@ import (
 	"crypto/rand"
 	"encoding/json/v2"
 	"errors"
+	"fmt"
 	"os"
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/aurigax-ai/ostia-server/internal/auth"
 )
 
 type syncVectors struct {
@@ -69,6 +72,11 @@ type authVectors struct {
 	Nonce             string `json:"nonce"`
 	ChallengeMsg      string `json:"challengeMessage"`
 	ChallengeSig      string `json:"challengeSignature"`
+	Timestamp         int64  `json:"timestamp"`
+	WrapReadMsg       string `json:"wrapReadMessage"`
+	WrapReadSig       string `json:"wrapReadSignature"`
+	ManifestPutMsg    string `json:"manifestPutMessage"`
+	ManifestPutSig    string `json:"manifestPutSignature"`
 }
 
 func buildSyncVectors(t *testing.T) syncVectors {
@@ -169,6 +177,11 @@ func buildAuthVectors() authVectors {
 	v.Nonce = b64.EncodeToString(fixedBytes(32, 111))
 	v.ChallengeMsg = challengeContext + "\n" + v.DeviceID + "\n" + v.Nonce
 	v.ChallengeSig = b64.EncodeToString(ed25519.Sign(priv, []byte(v.ChallengeMsg)))
+	v.Timestamp = 1767225600000
+	v.WrapReadMsg = fmt.Sprintf("%s\n%s\n%d", wrapReadContext, v.DeviceID, v.Timestamp)
+	v.WrapReadSig = b64.EncodeToString(ed25519.Sign(priv, []byte(v.WrapReadMsg)))
+	v.ManifestPutMsg = fmt.Sprintf("%s\n%s\n%d", manifestPutContext, v.DeviceID, v.Timestamp)
+	v.ManifestPutSig = b64.EncodeToString(ed25519.Sign(priv, []byte(v.ManifestPutMsg)))
 	return v
 }
 
@@ -244,6 +257,16 @@ func TestSyncVectorsAreStableAndOpen(t *testing.T) {
 func TestAuthVectorsAreStable(t *testing.T) {
 	v := buildAuthVectors()
 	checkVectorFile(t, "../../testdata/vectors/auth.json", v)
+
+	if v.WrapReadMsg != string(auth.WrapReadMessage(v.DeviceID, v.Timestamp)) {
+		t.Fatalf("wrap read message differs from the server's: %q", v.WrapReadMsg)
+	}
+	if v.ManifestPutMsg != string(auth.ManifestPutMessage(v.DeviceID, v.Timestamp)) {
+		t.Fatalf("manifest put message differs from the server's: %q", v.ManifestPutMsg)
+	}
+	if v.WrapReadSig == v.ManifestPutSig {
+		t.Fatal("the wrap read and manifest put signatures must not be interchangeable")
+	}
 }
 
 func TestLinkCodeVectorsAreStableAndBindTheBoxKey(t *testing.T) {
