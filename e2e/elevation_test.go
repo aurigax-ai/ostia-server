@@ -97,7 +97,10 @@ func TestApprovalsCannotBeSelfGrantedOrCrossAccounts(t *testing.T) {
 	if len(list.Approvals) != 0 {
 		t.Fatal("another account sees the request")
 	}
-	phone.Must(t, http.StatusNoContent, "DELETE", "/v1/auth/approvals/"+id, nil)
+	if res := phone.Do(t, "DELETE", "/v1/auth/approvals/"+id, nil); res.Status != http.StatusNotFound {
+		t.Fatalf("only the requesting device may cancel its request: %s", res)
+	}
+	laptop.Must(t, http.StatusNoContent, "DELETE", "/v1/auth/approvals/"+id, nil)
 	if res := phone.Do(t, "POST", "/v1/auth/approvals/"+id+"/approve", nil); res.Status != http.StatusNotFound {
 		t.Fatalf("approving a cancelled request: %s", res)
 	}
@@ -198,7 +201,7 @@ func TestSessionTokenAloneCannotAddRemoveOrApproveDevices(t *testing.T) {
 func TestStolenTokenCannotElevateItselfThroughADeviceItAdded(t *testing.T) {
 	e := newEnv(t, "[auth]\nsession_ttl = \"1s\"\napprover_min_age = \"2s\"\n")
 	owner := e.user(t, "laptop")
-	time.Sleep(2300 * time.Millisecond)
+	e.waitUntilOlderThan(t, owner, 2*time.Second)
 	owner.SignIn(t)
 
 	code := owner.Must(t, http.StatusCreated, "POST", "/v1/devices/invite", nil).Map(t)["code"].(string)
@@ -212,7 +215,7 @@ func TestStolenTokenCannotElevateItselfThroughADeviceItAdded(t *testing.T) {
 	}
 	requireElevation(t, attacker, "deleting the account with the new device", "DELETE", "/v1/account", nil)
 
-	time.Sleep(2300 * time.Millisecond)
+	e.waitUntilOlderThan(t, attacker, 2*time.Second)
 	attacker.SignIn(t)
 	owner.SignIn(t)
 	approval = attacker.Must(t, http.StatusCreated, "POST", "/v1/auth/elevation/approval", nil).Map(t)["approvalId"].(string)
@@ -260,7 +263,7 @@ func TestAnOlderDeviceRemovesAYoungerOneOnProbationEvenWhenItIsNotEstablished(t 
 func TestOwnerCanRemoveAnIntruderDuringItsProbation(t *testing.T) {
 	e := newEnv(t, "[auth]\nsession_ttl = \"1s\"\napprover_min_age = \"2s\"\n")
 	owner := e.user(t, "laptop")
-	time.Sleep(2300 * time.Millisecond)
+	e.waitUntilOlderThan(t, owner, 2*time.Second)
 	owner.SignIn(t)
 	code := owner.Must(t, http.StatusCreated, "POST", "/v1/devices/invite", nil).Map(t)["code"].(string)
 	intruder := testkit.NewAPI(e.net, testkit.NewIdentity("intruder"))
@@ -276,7 +279,7 @@ func TestOwnerCanRemoveAnIntruderDuringItsProbation(t *testing.T) {
 func TestStolenTokenCannotRevokeTheOwnersLastEstablishedDevice(t *testing.T) {
 	e := newEnv(t, "[auth]\nsession_ttl = \"1s\"\napprover_min_age = \"2s\"\n")
 	owner := e.user(t, "laptop")
-	time.Sleep(2300 * time.Millisecond)
+	e.waitUntilOlderThan(t, owner, 2*time.Second)
 	owner.SignIn(t)
 	requireElevation(t, owner, "revoking the only established device", "DELETE", "/v1/devices/"+owner.ID.DeviceID, nil)
 	owner.Must(t, http.StatusNoContent, "DELETE", "/v1/auth/session", nil)
@@ -342,4 +345,29 @@ func TestDeviceAddedIsReplayedToEveryNewListenerUntilAcknowledged(t *testing.T) 
 		added := again.AddedDevices()
 		return len(added) == 1 && added[0] == "quiet phone"
 	})
+}
+
+func TestSessionTokenAloneCannotRequestAnElevation(t *testing.T) {
+	e := newEnv(t, "")
+	owner := e.user(t, "laptop")
+	e.device(t, owner, "phone")
+	stolen := stolenCopy(e, owner)
+	requireSignature(t, stolen, "asking the owner's other devices to approve", "POST", "/v1/auth/elevation/approval", nil)
+	wrong := testkit.NewAPI(e.net, testkit.NewIdentity("wrong key"))
+	wrong.ID.DeviceID, wrong.ID.AccountID = owner.ID.DeviceID, owner.ID.AccountID
+	wrong.Token = owner.Token
+	for name, call := range map[string][2]string{
+		"an elevation request": {"POST", "/v1/auth/elevation/approval"},
+		"a revoke":             {"DELETE", "/v1/devices/" + owner.ID.DeviceID},
+	} {
+		res := wrong.Do(t, call[0], call[1], nil)
+		if res.Status != http.StatusForbidden || res.Map(t)["error"] != "bad-signature" {
+			t.Errorf("%s signed with another key: %s", name, res)
+		}
+	}
+	phoneApproval := owner.Must(t, http.StatusCreated, "POST", "/v1/auth/elevation/approval", nil).Map(t)["approvalId"].(string)
+	res := wrong.Do(t, "POST", "/v1/auth/approvals/"+phoneApproval+"/approve", nil)
+	if res.Status != http.StatusForbidden {
+		t.Errorf("an approval signed with another key: %s", res)
+	}
 }

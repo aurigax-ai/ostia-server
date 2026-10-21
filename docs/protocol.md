@@ -91,6 +91,7 @@ Some actions change who belongs to the account, so a bearer token alone is not e
 | Action | Message |
 |---|---|
 | `POST /v1/devices/invite` | `ostia-server/invite/v1\n<device id>\n<timestamp>`; also send `X-Device-Timestamp` (milliseconds, within two minutes of the server clock, and larger than the device's previous one, so a captured request cannot be replayed) |
+| `POST /v1/auth/elevation/approval` | `ostia-server/elevate/v1\n<device id>\n<timestamp>`, with `X-Device-Timestamp` as for invites |
 | `DELETE /v1/devices/{id}` | `ostia-server/revoke/v1\n<device id>\n<target id>` |
 | `POST /v1/auth/approvals/{id}/approve` | `ostia-server/approve/v1\n<approver id>\n<approval id>\n<requester id>` |
 | `POST /v1/devices/{id}/seen` | body `{sig}` over `ostia-server/seen/v1\n<viewer id>\n<target id>` |
@@ -108,11 +109,11 @@ A stolen bearer token must not be able to destroy an account. These actions need
 ```
 GET  /v1/auth/elevation                          {elevatedUntil}              0 when not elevated
 
-POST /v1/auth/elevation/approval                 201 {approvalId, expiresAt}  409 no-second-device with one device
+POST /v1/auth/elevation/approval                 201 {approvalId, expiresAt}  409 no-second-device with one device; signed with the device key
 GET  /v1/auth/approvals                          {approvals: [{id, deviceId, deviceName, deviceCreatedAt, createdAt, expiresAt}]}   requests from the account's other devices
 POST /v1/auth/approvals/{id}/approve             204   403 for the requesting device itself
 GET  /v1/auth/approvals/{id}                     {status: "pending"|"approved", elevatedUntil?}   the requester polls
-DELETE /v1/auth/approvals/{id}                   204   cancel or deny
+DELETE /v1/auth/approvals/{id}                   204   only the requesting device may cancel its own request; an approver who does not want to approve simply lets it expire
 
 POST /v1/auth/elevation/github                   like /v1/auth/github/device, for a GitHub account; 409 not-a-github-account
 POST /v1/auth/elevation/github/poll {flowId}     200 {elevatedUntil} | 202 pending | 403 wrong-account

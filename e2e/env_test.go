@@ -5,6 +5,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/aurigax-ai/ostia-server/internal/testkit"
 )
@@ -36,6 +37,7 @@ type env struct {
 	proc     *testkit.Process
 	net      testkit.Net
 	accounts map[string][]*testkit.API
+	joined   map[string]time.Time
 }
 
 func newEnv(t *testing.T, extra string) *env {
@@ -49,7 +51,7 @@ func newEnvModules(t *testing.T, modules, extra string) *env {
 		APIDomain: apiHost, ShareDomain: shareHost, RelayDomain: relayHost,
 		CertFile: pki.CertFile, KeyFile: pki.KeyFile, Modules: modules, Extra: extra,
 	})
-	return &env{proc: proc, net: testkit.Net{HTTPSAddr: proc.HTTPSAddr, Roots: pki.Roots, APIHost: apiHost}, accounts: map[string][]*testkit.API{}}
+	return &env{proc: proc, net: testkit.Net{HTTPSAddr: proc.HTTPSAddr, Roots: pki.Roots, APIHost: apiHost}, accounts: map[string][]*testkit.API{}, joined: map[string]time.Time{}}
 }
 
 func (e *env) invite(t *testing.T) string {
@@ -64,6 +66,7 @@ func (e *env) user(t *testing.T, name string) *testkit.API {
 	api := testkit.NewAPI(e.net, testkit.NewIdentity(name))
 	api.Onboard(t, e.invite(t))
 	e.accounts[api.ID.AccountID] = append(e.accounts[api.ID.AccountID], api)
+	e.joined[api.ID.DeviceID] = time.Now()
 	return api
 }
 
@@ -82,9 +85,19 @@ func (e *env) device(t *testing.T, owner *testkit.API, name string) *testkit.API
 	api := testkit.NewAPI(e.net, testkit.NewIdentity(name))
 	api.Onboard(t, code)
 	e.accounts[owner.ID.AccountID] = append(e.accounts[owner.ID.AccountID], api)
+	e.joined[api.ID.DeviceID] = time.Now()
 	return api
 }
 
 func (e *env) anonymous() *testkit.API {
 	return testkit.NewAPI(e.net, testkit.NewIdentity("anonymous"))
+}
+
+func (e *env) waitUntilOlderThan(t *testing.T, api *testkit.API, age time.Duration) {
+	t.Helper()
+	joined, ok := e.joined[api.ID.DeviceID]
+	if !ok {
+		joined = time.Now()
+	}
+	waitUntil(t, "the device is older than the approval age", func() bool { return time.Since(joined) > age+100*time.Millisecond })
 }

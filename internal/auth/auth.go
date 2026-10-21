@@ -27,6 +27,7 @@ const (
 	ChallengeContext = "ostia-server/auth/v1"
 	SeenContext      = "ostia-server/seen/v1"
 	InviteContext    = "ostia-server/invite/v1"
+	ElevateContext   = "ostia-server/elevate/v1"
 	RevokeContext    = "ostia-server/revoke/v1"
 	ApproveContext   = "ostia-server/approve/v1"
 	signatureHeader  = "X-Device-Signature"
@@ -391,20 +392,8 @@ func (s *Service) listDevices(w http.ResponseWriter, r *http.Request, p Principa
 }
 
 func (s *Service) deviceInvite(w http.ResponseWriter, r *http.Request, p Principal) error {
-	stamp, err := strconv.ParseInt(r.Header.Get(timestampHeader), 10, 64)
-	if err != nil {
-		return httpx.Errf(http.StatusForbidden, "device-signature-required", "send X-Device-Timestamp (milliseconds) and sign it with the device key")
-	}
-	if skew := s.Now().Sub(time.UnixMilli(stamp)); skew > signatureSkew || skew < -signatureSkew {
-		return httpx.Errf(http.StatusForbidden, "stale-signature", "the signed timestamp is too far from the server's clock")
-	}
-	if err := s.requireDeviceSignature(r, p, InviteMessage(p.DeviceID, stamp)); err != nil {
+	if err := s.requireSignedTimestamp(r, p, InviteContext); err != nil {
 		return err
-	}
-	if fresh, err := s.DB.AdvanceSigningCounter(r.Context(), p.DeviceID, stamp); err != nil {
-		return err
-	} else if !fresh {
-		return httpx.Errf(http.StatusForbidden, "stale-signature", "a signed request cannot be replayed")
 	}
 	active, err := s.DB.ActiveDeviceCount(r.Context(), p.AccountID)
 	if err != nil {
@@ -429,8 +418,37 @@ func (s *Service) deviceInvite(w http.ResponseWriter, r *http.Request, p Princip
 	return nil
 }
 
+func StampedMessage(context, deviceID string, ms int64) []byte {
+	return []byte(context + "\n" + deviceID + "\n" + strconv.FormatInt(ms, 10))
+}
+
 func InviteMessage(deviceID string, ms int64) []byte {
-	return []byte(InviteContext + "\n" + deviceID + "\n" + strconv.FormatInt(ms, 10))
+	return StampedMessage(InviteContext, deviceID, ms)
+}
+
+func ElevateMessage(deviceID string, ms int64) []byte {
+	return StampedMessage(ElevateContext, deviceID, ms)
+}
+
+func (s *Service) requireSignedTimestamp(r *http.Request, p Principal, context string) error {
+	stamp, err := strconv.ParseInt(r.Header.Get(timestampHeader), 10, 64)
+	if err != nil {
+		return httpx.Errf(http.StatusForbidden, "device-signature-required", "send X-Device-Timestamp (milliseconds) and sign it with the device key")
+	}
+	if skew := s.Now().Sub(time.UnixMilli(stamp)); skew > signatureSkew || skew < -signatureSkew {
+		return httpx.Errf(http.StatusForbidden, "stale-signature", "the signed timestamp is too far from the server's clock")
+	}
+	if err := s.requireDeviceSignature(r, p, StampedMessage(context, p.DeviceID, stamp)); err != nil {
+		return err
+	}
+	fresh, err := s.DB.AdvanceSigningCounter(r.Context(), p.DeviceID, stamp)
+	if err != nil {
+		return err
+	}
+	if !fresh {
+		return httpx.Errf(http.StatusForbidden, "stale-signature", "a signed request cannot be replayed")
+	}
+	return nil
 }
 
 func RevokeMessage(signerID, targetID string) []byte {

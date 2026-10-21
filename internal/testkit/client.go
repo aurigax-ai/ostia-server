@@ -141,6 +141,12 @@ func (a *API) deviceSignature(method, path string) map[string]string {
 			"X-Device-Timestamp": fmt.Sprint(stamp),
 			"X-Device-Signature": sign("ostia-server/invite/v1\n" + a.ID.DeviceID + "\n" + fmt.Sprint(stamp)),
 		}
+	case method == "POST" && path == "/v1/auth/elevation/approval":
+		stamp := a.nextStamp()
+		return map[string]string{
+			"X-Device-Timestamp": fmt.Sprint(stamp),
+			"X-Device-Signature": sign("ostia-server/elevate/v1\n" + a.ID.DeviceID + "\n" + fmt.Sprint(stamp)),
+		}
 	case method == "DELETE" && strings.HasPrefix(path, "/v1/devices/"):
 		target := strings.TrimPrefix(path, "/v1/devices/")
 		return map[string]string{"X-Device-Signature": sign("ostia-server/revoke/v1\n" + a.ID.DeviceID + "\n" + target)}

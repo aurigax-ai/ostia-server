@@ -39,6 +39,9 @@ func (s *Service) elevationStatus(w http.ResponseWriter, _ *http.Request, p Prin
 }
 
 func (s *Service) requestApproval(w http.ResponseWriter, r *http.Request, p Principal) error {
+	if err := s.requireSignedTimestamp(r, p, ElevateContext); err != nil {
+		return err
+	}
 	count, err := s.DB.ActiveDeviceCount(r.Context(), p.AccountID)
 	if err != nil {
 		return err
@@ -127,7 +130,7 @@ func (s *Service) approve(w http.ResponseWriter, r *http.Request, p Principal) e
 }
 
 func (s *Service) cancelApproval(w http.ResponseWriter, r *http.Request, p Principal) error {
-	if err := s.DB.DeleteApproval(r.Context(), r.PathValue("id"), p.AccountID); err != nil {
+	if err := s.DB.DeleteApproval(r.Context(), r.PathValue("id"), p.AccountID, p.DeviceID); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			return httpx.ErrNotFound
 		}

@@ -42,6 +42,9 @@ func (e *env) deviceHeaders(t *testing.T, method, path, token string) map[string
 	case method == "POST" && path == "/v1/devices/invite":
 		e.stamp = max(e.clock.UnixMilli(), e.stamp+1)
 		return map[string]string{timestampHeader: strconv.FormatInt(e.stamp, 10), signatureHeader: sign(InviteMessage(d.id, e.stamp))}
+	case method == "POST" && path == "/v1/auth/elevation/approval":
+		e.stamp = max(e.clock.UnixMilli(), e.stamp+1)
+		return map[string]string{timestampHeader: strconv.FormatInt(e.stamp, 10), signatureHeader: sign(ElevateMessage(d.id, e.stamp))}
 	case method == "DELETE" && strings.HasPrefix(path, "/v1/devices/"):
 		return map[string]string{signatureHeader: sign(RevokeMessage(d.id, strings.TrimPrefix(path, "/v1/devices/")))}
 	case method == "POST" && strings.HasPrefix(path, "/v1/auth/approvals/") && strings.HasSuffix(path, "/approve"):

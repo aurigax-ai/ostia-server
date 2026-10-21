@@ -1084,7 +1084,7 @@
     },
     "/v1/auth/elevation/approval": {
       "post": {
-        "summary": "Ask another signed-in device to approve destructive actions for this session",
+        "summary": "Ask another signed-in device to approve destructive actions for this session (signed with the device key)",
         "security": [
           {
             "bearer": []
@@ -1106,6 +1106,16 @@
                       "description": "Unix milliseconds"
                     }
                   }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "device-signature-required, bad-signature or stale-signature",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -1148,6 +1158,24 @@
             }
           }
         },
+        "parameters": [
+          {
+            "name": "X-Device-Signature",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Device-Timestamp",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
         "tags": [
           "Accounts"
         ]
@@ -1326,7 +1354,7 @@
         ]
       },
       "delete": {
-        "summary": "Cancel or deny an approval request",
+        "summary": "Cancel this device's own approval request",
         "security": [
           {
             "bearer": []

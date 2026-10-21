@@ -302,3 +302,15 @@ func TestPushModuleOffByDefault(t *testing.T) {
 		t.Fatalf("info: %v", info)
 	}
 }
+
+func TestTicketsAreRateLimitedPerAccount(t *testing.T) {
+	f := newPushFixture(t, "[push]\nticket_burst = 2\n")
+	f.desktop.Must(t, http.StatusCreated, "POST", "/v1/push/tickets", nil)
+	f.desktop.Must(t, http.StatusCreated, "POST", "/v1/push/tickets", nil)
+	res := f.desktop.Do(t, "POST", "/v1/push/tickets", nil)
+	if res.Status != http.StatusTooManyRequests || res.Header.Get("Retry-After") != "600" {
+		t.Fatalf("a token must not be able to cycle an account's handles: %s %v", res, res.Header)
+	}
+	other := f.env.user(t, "someone else")
+	other.Must(t, http.StatusCreated, "POST", "/v1/push/tickets", nil)
+}

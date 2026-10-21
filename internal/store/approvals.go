@@ -99,8 +99,8 @@ func (d *DB) Approve(ctx context.Context, id, accountID, approverDeviceID string
 	})
 }
 
-func (d *DB) DeleteApproval(ctx context.Context, id, accountID string) error {
-	res, err := d.sql.ExecContext(ctx, `DELETE FROM approvals WHERE id = ? AND account_id = ?`, id, accountID)
+func (d *DB) DeleteApproval(ctx context.Context, id, accountID, requesterDeviceID string) error {
+	res, err := d.sql.ExecContext(ctx, `DELETE FROM approvals WHERE id = ? AND account_id = ? AND requester_device_id = ?`, id, accountID, requesterDeviceID)
 	return affected(res, err)
 }
 
