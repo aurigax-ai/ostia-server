@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -343,7 +344,6 @@ func TestBlobsAreWriteOnceAndQuotaLimited(t *testing.T) {
 
 func TestGarbageCollectionKeepsOnlyReferencedBlobs(t *testing.T) {
 	f := newSyncFixture(t, "[sync]\ngc_grace = \"0s\"\n")
-	second := f.addDevice(t, "second laptop")
 	for _, theme := range []string{"dark", "light", "solarized"} {
 		if _, err := f.a.Sync(t, settings("theme", theme)); err != nil {
 			t.Fatal(err)
@@ -353,7 +353,7 @@ func TestGarbageCollectionKeepsOnlyReferencedBlobs(t *testing.T) {
 	if usage["blobs"].(float64) != 3 {
 		t.Fatalf("usage before gc: %v", usage)
 	}
-	if deleted := f.a.CollectGarbage(t, second.API); deleted != 2 {
+	if deleted := f.a.CollectGarbage(t); deleted != 2 {
 		t.Fatalf("deleted %d, want 2", deleted)
 	}
 	if got, err := f.a.Pull(t); err != nil || !testkit.Equal(got, settings("theme", "solarized")) {
@@ -446,7 +446,6 @@ func TestDestructiveSyncActionsNeedAnotherDevicesApproval(t *testing.T) {
 	refused("deleting a wrap", "DELETE", "/v1/sync/wraps/recovery", nil)
 	refused("replacing the passphrase wrap", "PUT", "/v1/sync/wraps/passphrase", wrap)
 	refused("replacing the recovery wrap", "PUT", "/v1/sync/wraps/recovery", wrap)
-	refused("garbage collection", "POST", "/v1/sync/gc", map[string]any{"keep": []string{}})
 	refused("rotation", "POST", "/v1/sync/rotate", map[string]any{"ifMatch": 1, "manifest": "AAAA"})
 	refused("replacing its own device wrap", "PUT", "/v1/sync/wraps/device:"+api.ID.DeviceID, wrap)
 
@@ -715,5 +714,125 @@ func TestRekeyRefusesASignerThatBackdatedItsOwnManifestEntry(t *testing.T) {
 	clock = clock.Add(24 * time.Hour)
 	if _, err := b.Pull(t); err != nil || !bytes.Equal(b.Key, f.a.Key) {
 		t.Fatalf("a signer first seen more than a day ago is accepted: %v", err)
+	}
+}
+
+func TestGarbageCollectionNeedsNoApprovalButACurrentDevice(t *testing.T) {
+	f := newSyncFixture(t, "[sync]\ngc_grace = \"0s\"\n")
+	for _, theme := range []string{"dark", "light"} {
+		if _, err := f.a.Sync(t, settings("theme", theme)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if res := f.env.anonymous().Do(t, "POST", "/v1/sync/gc", map[string]any{"keep": []string{}}); res.Status != http.StatusUnauthorized {
+		t.Fatalf("garbage collection without a session: %s", res)
+	}
+	if f.a.API.Elevated(t) {
+		t.Fatal("the device must not be elevated for this test to mean anything")
+	}
+	if deleted := f.a.CollectGarbage(t); deleted != 1 {
+		t.Fatalf("an unelevated current device must be able to collect garbage: deleted %d", deleted)
+	}
+	if got, err := f.a.Pull(t); err != nil || !testkit.Equal(got, settings("theme", "light")) {
+		t.Fatalf("referenced blob lost: %v %v", got, err)
+	}
+}
+
+func TestADeviceThatLeftCannotCollectGarbage(t *testing.T) {
+	f := newSyncFixture(t, "")
+	second := f.addDevice(t, "second laptop")
+	second.API.Must(t, http.StatusNoContent, "DELETE", "/v1/devices/"+second.API.ID.DeviceID, nil)
+	if res := second.API.Do(t, "POST", "/v1/sync/gc", map[string]any{"keep": []string{}}); res.Status != http.StatusUnauthorized {
+		t.Fatalf("a device that left must not reach the account: %s", res)
+	}
+}
+
+func TestGarbageCollectionIsBoundToTheManifestVersion(t *testing.T) {
+	f := newSyncFixture(t, "[sync]\ngc_grace = \"0s\"\n")
+	for _, theme := range []string{"dark", "light"} {
+		if _, err := f.a.Sync(t, settings("theme", theme)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	empty := map[string]any{"keep": []string{}}
+	if res := f.a.API.Do(t, "POST", "/v1/sync/gc", empty); res.Status != http.StatusPreconditionRequired {
+		t.Fatalf("gc without If-Match: %s", res)
+	}
+	stale := f.a.API.Do(t, "POST", "/v1/sync/gc", empty, "If-Match", "1")
+	if stale.Status != http.StatusPreconditionFailed || stale.Map(t)["error"] != "version-mismatch" || stale.Map(t)["current"].(float64) != 2 {
+		t.Fatalf("gc against a manifest that moved: %s", stale)
+	}
+	usage := f.a.API.Must(t, http.StatusOK, "GET", "/v1/sync/usage", nil).Map(t)
+	if usage["blobs"].(float64) != 2 {
+		t.Fatalf("a refused gc deleted blobs: %v", usage)
+	}
+	info := f.env.anonymous().Must(t, http.StatusOK, "GET", "/v1/info", nil).Map(t)
+	if info["syncGCBound"] != true {
+		t.Fatalf("/v1/info must advertise the bound gc: %v", info)
+	}
+}
+
+func TestGarbageCollectionNeedsTheDevicesSignatureAndAnEstablishedDevice(t *testing.T) {
+	f := newSyncFixture(t, "[sync]\ngc_grace = \"0s\"\n")
+	if _, err := f.a.Sync(t, settings("theme", "dark")); err != nil {
+		t.Fatal(err)
+	}
+	stolen := stolenCopy(f.env, f.a.API)
+	bare := stolen.Do(t, "POST", "/v1/sync/gc", map[string]any{"keep": []string{}}, "If-Match", "1")
+	if bare.Status != http.StatusForbidden || bare.Map(t)["error"] != "device-signature-required" {
+		t.Fatalf("garbage collection with a bare token: %s", bare)
+	}
+	if usage := f.a.API.Must(t, http.StatusOK, "GET", "/v1/sync/usage", nil).Map(t); usage["blobs"].(float64) != 1 {
+		t.Fatalf("a bare token deleted blobs: %v", usage)
+	}
+	young := newSyncFixture(t, "[auth]\napprover_min_age = \"24h\"\n[sync]\ngc_grace = \"0s\"\n")
+	res := young.a.API.Do(t, "POST", "/v1/sync/gc", map[string]any{"keep": []string{}}, "If-Match", "0")
+	if res.Status != http.StatusForbidden || res.Map(t)["error"] != "device-too-new" {
+		t.Fatalf("a device still on probation must not collect garbage: %s", res)
+	}
+}
+
+func TestGarbageCollectionAndBlobUploadsNeverLeaveARowWithoutItsFile(t *testing.T) {
+	f := newSyncFixture(t, "[sync]\ngc_grace = \"0s\"\n")
+	if _, err := f.a.Sync(t, settings("theme", "dark")); err != nil {
+		t.Fatal(err)
+	}
+	put := func(id string, content []byte) int {
+		res, err := f.a.API.Raw("PUT", "/v1/sync/blobs/"+id, map[string]string{"Content-Type": "application/octet-stream"}, bytes.NewReader(content))
+		if err != nil {
+			t.Error(err)
+			return 0
+		}
+		return res.Status
+	}
+	for round := range 12 {
+		content := []byte(fmt.Sprintf("sealed blob %d", round))
+		id := testkit.BlobID(f.a.Key, fmt.Sprintf("race-%d.json", round), content)
+		if status := put(id, content); status != http.StatusCreated {
+			t.Fatalf("round %d first upload: %d", round, status)
+		}
+		var wg sync.WaitGroup
+		var status int
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			status = put(id, content)
+		}()
+		go func() {
+			defer wg.Done()
+			f.a.API.Do(t, "POST", "/v1/sync/gc", map[string]any{"keep": []string{}}, "If-Match", "1")
+		}()
+		wg.Wait()
+		if status != http.StatusOK && status != http.StatusCreated {
+			t.Fatalf("round %d: upload answered %d", round, status)
+		}
+		res := f.a.API.Do(t, "GET", "/v1/sync/blobs/"+id, nil)
+		rows := f.a.API.Must(t, http.StatusOK, "GET", "/v1/sync/usage", nil).Map(t)["blobs"].(float64)
+		switch {
+		case res.Status == http.StatusOK && bytes.Equal(res.Body, content) && rows == 1:
+		case res.Status == http.StatusNotFound && rows == 0:
+		default:
+			t.Fatalf("round %d: the row and the file disagree after a concurrent upload and gc: GET %d, %v rows", round, res.Status, rows)
+		}
 	}
 }

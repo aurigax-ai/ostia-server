@@ -2,9 +2,12 @@ package store
 
 import (
 	"bytes"
+	"database/sql"
 	"errors"
 	"fmt"
 	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -236,13 +239,40 @@ func TestSyncBlobQuotaAndUnreferenced(t *testing.T) {
 	}
 	c.t = c.t.Add(2 * time.Hour)
 	_ = d.AddSyncBlob(t.Context(), a.ID, blob("cccccccccccccccc", 10), 100)
-	stale, _ := d.UnreferencedSyncBlobs(t.Context(), a.ID, map[string]bool{}, time.Hour)
-	if len(stale) != 1 || stale[0] != "aaaaaaaaaaaaaaaa" {
-		t.Fatalf("grace period ignored: %v", stale)
+	stale, err := d.CollectSyncBlobs(t.Context(), a.ID, 0, map[string]bool{"aaaaaaaaaaaaaaaa": true}, time.Hour)
+	if err != nil || len(stale) != 0 {
+		t.Fatalf("kept blob collected: %v %v", stale, err)
 	}
-	stale, _ = d.UnreferencedSyncBlobs(t.Context(), a.ID, map[string]bool{"aaaaaaaaaaaaaaaa": true}, time.Hour)
-	if len(stale) != 0 {
-		t.Fatalf("kept blob listed: %v", stale)
+	if _, err := d.CollectSyncBlobs(t.Context(), a.ID, 7, map[string]bool{}, time.Hour); !errors.Is(err, ErrVersionMismatch) {
+		t.Fatalf("a moved manifest must stop the collection: %v", err)
+	}
+	if touched, err := d.TouchSyncBlob(t.Context(), a.ID, "nosuchblobid0000"); err != nil || touched {
+		t.Fatalf("touching a blob that is gone must say so: %v %v", touched, err)
+	}
+	if touched, err := d.TouchSyncBlob(t.Context(), a.ID, "aaaaaaaaaaaaaaaa"); err != nil || !touched {
+		t.Fatalf("%v %v", touched, err)
+	}
+	if stale, _ := d.CollectSyncBlobs(t.Context(), a.ID, 0, map[string]bool{}, time.Hour); len(stale) != 0 {
+		t.Fatalf("a re-uploaded blob is fresh again and must survive the grace period: %v", stale)
+	}
+	c.t = c.t.Add(2 * time.Hour)
+	stale, err = d.CollectSyncBlobs(t.Context(), a.ID, 0, map[string]bool{}, time.Hour)
+	if err != nil || len(stale) != 2 {
+		t.Fatalf("grace period ignored: %v %v", stale, err)
+	}
+	if _, err := d.SyncBlob(t.Context(), a.ID, "aaaaaaaaaaaaaaaa"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("collected rows must be gone: %v", err)
+	}
+}
+
+func TestTheDeployedSchemaIsKeptAndTheSeenTableIsDroppedByALaterMigration(t *testing.T) {
+	if !strings.Contains(schemaV1, "CREATE TABLE device_seen") || !strings.Contains(schemaV2, "DROP TABLE device_seen") {
+		t.Fatal("schemaV1 is deployed and must not change; schemaV2 drops the seen table")
+	}
+	d, _ := open(t)
+	var n int
+	if err := d.sql.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM sqlite_master WHERE name = 'device_seen'`).Scan(&n); err != nil || n != 0 {
+		t.Fatalf("device_seen after migrating: %d %v", n, err)
 	}
 }
 
@@ -554,27 +584,40 @@ func TestUnelevatedInviteIsRefusedOnceTheAccountHasTwoDevices(t *testing.T) {
 	}
 }
 
-func TestUnseenDevicesAndEstablishedCounts(t *testing.T) {
-	d, c := open(t)
-	a, first := register(t, d, "github", "h")
-	c.t = c.t.Add(time.Hour)
-	second, _ := d.AddDevice(t.Context(), a.ID, newDevice("phone"), 10)
-	unseen, err := d.UnseenDevices(t.Context(), first)
-	if err != nil || !unseen[second.ID] || unseen[first.ID] {
-		t.Fatalf("%v %v", unseen, err)
-	}
-	if got, _ := d.UnseenDevices(t.Context(), second); len(got) != 0 {
-		t.Fatalf("a device is not told about devices that were there before it: %v", got)
-	}
-	_ = d.MarkSeen(t.Context(), first.ID, second.ID)
-	if got, _ := d.UnseenDevices(t.Context(), first); len(got) != 0 {
-		t.Fatalf("seen devices stay flagged: %v", got)
-	}
-	if n, _ := d.OlderActiveDevices(t.Context(), second); n != 1 {
-		t.Fatalf("older devices %d", n)
-	}
-	if n, _ := d.OlderActiveDevices(t.Context(), first); n != 0 {
-		t.Fatalf("the oldest device has nothing older: %d", n)
+func TestPurgeDepartedDeletesSyncDataAndTheAccountUnlessSharesRemain(t *testing.T) {
+	for _, withShare := range []bool{false, true} {
+		d, _ := open(t)
+		a, dev := register(t, d, "github", "h")
+		if err := d.PutWrap(t.Context(), a.ID, "passphrase", []byte("w")); err != nil {
+			t.Fatal(err)
+		}
+		if err := d.AddSyncBlob(t.Context(), a.ID, SyncBlob{ID: "blob1", Size: 3, Sum: make([]byte, 32)}, 100); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := d.PutManifest(t.Context(), a.ID, 0, []byte("m"), Retention{Versions: 3}); err != nil {
+			t.Fatal(err)
+		}
+		if withShare {
+			if err := d.CreateShare(t.Context(), Share{ID: ids.New(), AccountID: a.ID, Mode: "link", Size: 1, DeleteTokenHash: []byte("h")}, ShareQuota{MaxShares: 5, MaxBytes: 100}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, err := d.RevokeDevice(t.Context(), a.ID, dev.ID); err != nil {
+			t.Fatal(err)
+		}
+		keys, deleted, err := d.PurgeDeparted(t.Context(), a.ID)
+		if err != nil || len(keys) != 1 || keys[0] != SyncBlobKey(a.ID, "blob1") {
+			t.Fatalf("share %v: keys %v err %v", withShare, keys, err)
+		}
+		if deleted == withShare {
+			t.Fatalf("share %v: account deleted %v", withShare, deleted)
+		}
+		if _, err := d.Wrap(t.Context(), a.ID, "passphrase"); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("wraps must be gone: %v", err)
+		}
+		if _, err := d.CurrentManifest(t.Context(), a.ID); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("manifests must be gone: %v", err)
+		}
 	}
 }
 
@@ -832,5 +875,137 @@ func TestDeleteAdminSessionsEndsEveryOne(t *testing.T) {
 	}
 	if _, err := d.AdminSession(t.Context(), ids.Hash("a")); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("%v", err)
+	}
+}
+
+func TestPurgeDepartedDoesNothingWhileADeviceIsActive(t *testing.T) {
+	d, _ := open(t)
+	a, first := register(t, d, "github", "h")
+	if err := d.PutWrap(t.Context(), a.ID, "passphrase", []byte("w")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.RevokeDevice(t.Context(), a.ID, first.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.AddDevice(t.Context(), a.ID, newDevice("joined while the last one left"), 10); err != nil {
+		t.Fatal(err)
+	}
+	keys, deleted, err := d.PurgeDeparted(t.Context(), a.ID)
+	if err != nil || len(keys) != 0 || deleted {
+		t.Fatalf("the account has a device again: %v %v %v", keys, deleted, err)
+	}
+	if _, err := d.Wrap(t.Context(), a.ID, "passphrase"); err != nil {
+		t.Fatalf("a joined device lost the wrap: %v", err)
+	}
+}
+
+func TestAbandonedAccountsAreFoundAndOnlyLiveSharesKeepThemAlive(t *testing.T) {
+	d, c := open(t)
+	share := func(a Account, expiresIn time.Duration) string {
+		id := ids.New()
+		expires := int64(0)
+		if expiresIn != 0 {
+			expires = c.t.Add(expiresIn).UnixMilli()
+		}
+		if err := d.CreateShare(t.Context(), Share{ID: id, AccountID: a.ID, Mode: "link", Size: 1, ExpiresAt: expires, DeleteTokenHash: []byte("h")}, ShareQuota{MaxShares: 5, MaxBytes: 100}); err != nil {
+			t.Fatal(err)
+		}
+		if err := d.MarkUploaded(t.Context(), id); err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+	active, _ := register(t, d, "github", "active")
+	removedOnly, rd := register(t, d, "github", "removed")
+	expiredOnly, ed := register(t, d, "github", "expired")
+	live, ld := register(t, d, "github", "live")
+	if err := d.TakeDown(t.Context(), share(removedOnly, 0)); err != nil {
+		t.Fatal(err)
+	}
+	expiredID := share(expiredOnly, time.Minute)
+	share(live, 0)
+	for acct, dev := range map[string]Device{removedOnly.ID: rd, expiredOnly.ID: ed, live.ID: ld} {
+		if _, err := d.RevokeDevice(t.Context(), acct, dev.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	c.t = c.t.Add(time.Hour)
+	abandoned, err := d.AbandonedAccounts(t.Context())
+	if err != nil || len(abandoned) != 3 || slices.Contains(abandoned, active.ID) {
+		t.Fatalf("abandoned: %v %v", abandoned, err)
+	}
+	if _, gone, err := d.PurgeDeparted(t.Context(), removedOnly.ID); err != nil || !gone {
+		t.Fatalf("an account whose shares are all removed goes: %v %v", gone, err)
+	}
+	keys, gone, err := d.PurgeDeparted(t.Context(), expiredOnly.ID)
+	if err != nil || !gone || !slices.Contains(keys, ShareBlobKey(expiredID)) {
+		t.Fatalf("expired shares are not live, and their blobs are returned: %v %v %v", gone, keys, err)
+	}
+	if _, gone, err := d.PurgeDeparted(t.Context(), live.ID); err != nil || gone {
+		t.Fatalf("a live share keeps its account: %v %v", gone, err)
+	}
+}
+
+func TestADatabaseAtSchemaV1UpgradesToV2(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "db.sqlite")
+	raw, err := sql.Open("sqlite", "file:"+path+"?_pragma=foreign_keys(1)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, stmt := range []string{
+		schemaV1,
+		`PRAGMA user_version = 1`,
+		`INSERT INTO accounts (id, provider, provider_id_hash, created_at) VALUES ('acct', 'github', 'h', 1)`,
+		`INSERT INTO devices (id, account_id, name, sign_pub, box_pub, created_at, last_seen) VALUES ('d1', 'acct', 'a', x'00', x'00', 1, 1), ('d2', 'acct', 'b', x'00', x'00', 1, 1)`,
+		`INSERT INTO device_seen (viewer_device_id, device_id) VALUES ('d1', 'd2')`,
+	} {
+		if _, err := raw.Exec(stmt); err != nil {
+			t.Fatalf("%v\n%s", err, stmt)
+		}
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	c := &clock{t: time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC)}
+	d, err := Open(path, JournalWAL, c.now)
+	if err != nil {
+		t.Fatalf("a deployed V1 database must open: %v", err)
+	}
+	defer d.Close()
+	var version, seen, devices, backfilled int
+	_ = d.sql.QueryRowContext(t.Context(), `PRAGMA user_version`).Scan(&version)
+	_ = d.sql.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM sqlite_master WHERE name = 'device_seen'`).Scan(&seen)
+	_ = d.sql.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM devices`).Scan(&devices)
+	_ = d.sql.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM devices WHERE last_seen_at = ?`, c.t.UnixMilli()).Scan(&backfilled)
+	if version != 2 || seen != 0 || devices != 2 {
+		t.Fatalf("version %d, device_seen tables %d, devices %d", version, seen, devices)
+	}
+	if backfilled != 2 {
+		t.Fatalf("existing devices must start their inactivity clock at the upgrade, not at their old last seen: %d of 2", backfilled)
+	}
+}
+
+func TestAHeartbeatBetweenTheListAndTheRevokeSavesTheDevice(t *testing.T) {
+	d, c := open(t)
+	_, dev := register(t, d, "github", "h")
+	limit := 90 * 24 * time.Hour
+	c.t = c.t.Add(limit + 24*time.Hour)
+	silent, err := d.InactiveDevices(t.Context(), limit)
+	if err != nil || len(silent) != 1 {
+		t.Fatalf("%v %v", silent, err)
+	}
+	cutoff := c.t.Add(-limit).UnixMilli()
+	if err := d.TouchDevice(t.Context(), dev.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.RevokeInactiveDevice(t.Context(), silent[0].AccountID, silent[0].ID, cutoff); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("a device that checked in after the list must be skipped: %v", err)
+	}
+	if got, _ := d.Device(t.Context(), dev.ID); got.RevokedAt != 0 {
+		t.Fatal("the device was revoked after it checked in")
+	}
+	c.t = c.t.Add(limit + 24*time.Hour)
+	if err := d.RevokeInactiveDevice(t.Context(), dev.AccountID, dev.ID, c.t.Add(-limit).UnixMilli()); err != nil {
+		t.Fatalf("a device that stayed silent is revoked: %v", err)
 	}
 }

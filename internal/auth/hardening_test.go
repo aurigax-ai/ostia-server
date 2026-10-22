@@ -9,45 +9,55 @@ import (
 	"github.com/aurigax-ai/ostia-server/internal/store"
 )
 
-func TestLastSeenMovesOncePerDayAndHasNoTimeOfDay(t *testing.T) {
+func TestAnyRequestOrAHeartbeatMovesLastSeenOncePerHour(t *testing.T) {
 	e := newEnv(t)
 	e.svc.Cfg.SessionTTL = config.Duration(72 * time.Hour)
+	e.svc.InactiveAfter = 90 * 24 * time.Hour
 	d := newDevice("desktop")
 	e.signIn(t, d, e.invite(t, ""))
 	token := e.session(t, d)
-	first := time.Date(2026, 10, 21, 0, 0, 0, 0, time.UTC).UnixMilli()
-
 	lastSeen := func() int64 {
 		t.Helper()
 		dev, err := e.svc.DB.Device(t.Context(), d.id)
 		if err != nil {
 			t.Fatal(err)
 		}
-		return dev.LastSeen
+		return dev.LastSeenAt
 	}
+	first := lastSeen()
+	if first != e.clock.UnixMilli() {
+		t.Fatalf("after signing in: %d, want %d", first, e.clock.UnixMilli())
+	}
+	*e.clock = e.clock.Add(30 * time.Minute)
+	e.call(t, "GET", "/v1/devices", token, nil)
 	if got := lastSeen(); got != first {
-		t.Fatalf("after signing in: %d, want the start of the day %d", got, first)
+		t.Fatalf("activity within the hour moved last seen to %d", got)
 	}
-
-	*e.clock = e.clock.Add(11 * time.Hour)
-	if status, _ := e.call(t, "GET", "/v1/devices", token, nil); status != 200 {
-		t.Fatalf("%d", status)
-	}
-	if got := lastSeen(); got != first {
-		t.Fatalf("activity later the same day moved last seen to %d", got)
-	}
-
-	*e.clock = e.clock.Add(2 * time.Hour)
-	next := time.Date(2026, 10, 22, 0, 0, 0, 0, time.UTC).UnixMilli()
+	*e.clock = e.clock.Add(31 * time.Minute)
 	status, out := e.call(t, "GET", "/v1/devices", token, nil)
 	if status != 200 {
 		t.Fatalf("%d %v", status, out)
 	}
-	if listed := int64(out["devices"].([]any)[0].(map[string]any)["lastSeen"].(float64)); listed != next {
-		t.Fatalf("the listing shows %d, want the start of the new day %d", listed, next)
+	second := lastSeen()
+	if second != e.clock.UnixMilli() {
+		t.Fatalf("a request after an hour left last seen at %d, want %d", second, e.clock.UnixMilli())
 	}
-	if got := lastSeen(); got != next {
-		t.Fatalf("activity on the next day left last seen at %d, want %d", got, next)
+	row := out["devices"].([]any)[0].(map[string]any)
+	if int64(row["lastSeenAt"].(float64)) != second || int64(row["removeAt"].(float64)) != second+e.svc.InactiveAfter.Milliseconds() {
+		t.Fatalf("the listing shows lastSeenAt/removeAt %v", row)
+	}
+	if _, old := row["lastSeen"]; old {
+		t.Fatalf("lastSeen is replaced by lastSeenAt: %v", row)
+	}
+	*e.clock = e.clock.Add(2 * time.Hour)
+	if status, _ := e.call(t, "POST", "/v1/devices/heartbeat", token, nil); status != 204 {
+		t.Fatalf("heartbeat %d", status)
+	}
+	if got := lastSeen(); got != e.clock.UnixMilli() {
+		t.Fatalf("a heartbeat must check the device in: %d", got)
+	}
+	if status, _ := e.call(t, "POST", "/v1/devices/heartbeat", "", nil); status != 401 {
+		t.Fatalf("a heartbeat needs a session: %d", status)
 	}
 }
 

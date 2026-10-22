@@ -207,6 +207,9 @@ func TestSweepDeletesRevokedDevicesPastTheirRetention(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err := srv.DB.AddDevice(t.Context(), acct.ID, store.NewDevice{Name: "b", SignPub: make([]byte, 32), BoxPub: make([]byte, 32)}, 10); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := srv.DB.RevokeDevice(t.Context(), acct.ID, gone.ID); err != nil {
 		t.Fatal(err)
 	}
@@ -275,5 +278,111 @@ func TestStartupSweepRemovesOnlyScratchDirectoriesAndNeverOperatorFiles(t *testi
 	}
 	if kept, err := os.ReadFile(precious); err != nil || string(kept) != "keep" {
 		t.Errorf("a symlink was followed into %s: %v", target, err)
+	}
+}
+
+func TestSweepPurgesAccountsWithNoActiveDevice(t *testing.T) {
+	now := time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC)
+	cfg := config.Default()
+	cfg.DataDir = t.TempDir()
+	cfg.Domains.API = "api.test"
+	cfg.Listen.HTTPS, cfg.Listen.HTTP = "", "127.0.0.1:0"
+	cfg.Modules = config.Modules{Sync: true}
+	srv, err := New(cfg, Options{Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = srv.DB.Close() })
+	device := store.NewDevice{Name: "a", SignPub: make([]byte, 32), BoxPub: make([]byte, 32)}
+	acct, dev, err := srv.DB.RegisterProvider(t.Context(), "github", "h", device, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keep, _, err := srv.DB.RegisterProvider(t.Context(), "github", "other", device, 10)
+	_ = keep
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := srv.DB.RevokeDevice(t.Context(), acct.ID, dev.ID); err != nil {
+		t.Fatal(err)
+	}
+	srv.sweep(t.Context())
+	if abandoned, err := srv.DB.AbandonedAccounts(t.Context()); err != nil || len(abandoned) != 0 {
+		t.Fatalf("the sweep must retry the purge of a departed account: %v %v", abandoned, err)
+	}
+}
+
+func TestSweepRemovesSilentDevicesThenPurgesAccountsLeftEmpty(t *testing.T) {
+	now := time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC)
+	cfg := config.Default()
+	cfg.DataDir = t.TempDir()
+	cfg.Domains.API = "api.test"
+	cfg.Listen.HTTPS, cfg.Listen.HTTP = "", "127.0.0.1:0"
+	cfg.Modules = config.Modules{Sync: true}
+	cfg.Devices.InactiveAfter = config.Duration(90 * 24 * time.Hour)
+	srv, err := New(cfg, Options{Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = srv.DB.Close() })
+	device := store.NewDevice{Name: "a", SignPub: make([]byte, 32), BoxPub: make([]byte, 32)}
+	lone, loneDev, err := srv.DB.RegisterProvider(t.Context(), "github", "lone", device, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pair, silent, err := srv.DB.RegisterProvider(t.Context(), "github", "pair", device, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var revoked []string
+	srv.Auth.Hooks.DeviceRevoked = func(id string) { revoked = append(revoked, id) }
+	now = now.Add(60 * 24 * time.Hour)
+	awake, err := srv.DB.AddDevice(t.Context(), pair.ID, device, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(31 * 24 * time.Hour)
+	srv.sweep(t.Context())
+	if got, err := srv.DB.Device(t.Context(), silent.ID); err != nil || got.RevokedAt == 0 {
+		t.Fatalf("a device silent past the limit must be revoked: %+v %v", got, err)
+	}
+	if got, err := srv.DB.Device(t.Context(), awake.ID); err != nil || got.RevokedAt != 0 {
+		t.Fatalf("a recent device must stay: %+v %v", got, err)
+	}
+	if _, err := srv.DB.Device(t.Context(), loneDev.ID); err == nil {
+		t.Fatal("an account left with no device must be purged in the same sweep")
+	}
+	if n, _ := srv.DB.ActiveDeviceCount(t.Context(), pair.ID); n != 1 {
+		t.Fatalf("the account that still has a device keeps it: %d", n)
+	}
+	if len(revoked) != 2 {
+		t.Fatalf("the revoke hook must run for each removed device: %v", revoked)
+	}
+	_ = lone
+}
+
+func TestSweepDoesNothingWhenTheInactivityLimitIsNotPositive(t *testing.T) {
+	now := time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC)
+	cfg := config.Default()
+	cfg.DataDir = t.TempDir()
+	cfg.Domains.API = "api.test"
+	cfg.Listen.HTTPS, cfg.Listen.HTTP = "", "127.0.0.1:0"
+	cfg.Modules = config.Modules{Sync: true}
+	srv, err := New(cfg, Options{Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = srv.DB.Close() })
+	_, dev, err := srv.DB.RegisterProvider(t.Context(), "github", "h", store.NewDevice{Name: "a", SignPub: make([]byte, 32), BoxPub: make([]byte, 32)}, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.Auth.InactiveAfter = 0
+	now = now.Add(1000 * 24 * time.Hour)
+	if err := srv.Auth.RevokeInactive(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := srv.DB.Device(t.Context(), dev.ID); got.RevokedAt != 0 {
+		t.Fatal("with no limit configured the sweep must remove nothing")
 	}
 }

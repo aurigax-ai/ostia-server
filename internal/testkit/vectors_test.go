@@ -82,6 +82,13 @@ type authVectors struct {
 	ManifestBodyHash  string `json:"manifestBodyHash"`
 	ManifestPutMsg    string `json:"manifestPutMessage"`
 	ManifestPutSig    string `json:"manifestPutSignature"`
+	RevokeTarget      string `json:"revokeTarget"`
+	RevokeMsg         string `json:"revokeMessage"`
+	RevokeSig         string `json:"revokeSignature"`
+	GCBody            string `json:"syncGcBody"`
+	GCBodyHash        string `json:"syncGcBodyHash"`
+	SyncGCMsg         string `json:"syncGcMessage"`
+	SyncGCSig         string `json:"syncGcSignature"`
 }
 
 func buildSyncVectors(t *testing.T) syncVectors {
@@ -192,6 +199,14 @@ func buildAuthVectors() authVectors {
 	v.ManifestBodyHash = b64.EncodeToString(bodySum[:])
 	v.ManifestPutMsg = fmt.Sprintf("%s\n%s\n%d\n%d\n%s", manifestPutContext, v.DeviceID, v.Timestamp, v.IfMatch, v.ManifestBodyHash)
 	v.ManifestPutSig = b64.EncodeToString(ed25519.Sign(priv, []byte(v.ManifestPutMsg)))
+	v.RevokeTarget = "zyxwvutsrqponmlkjihgfedcba"
+	v.RevokeMsg = fmt.Sprintf("%s\n%s\n%d\n%s", revokeContext, v.DeviceID, v.Timestamp, v.RevokeTarget)
+	v.RevokeSig = b64.EncodeToString(ed25519.Sign(priv, []byte(v.RevokeMsg)))
+	v.GCBody = `{"keep":["AAAAAAAAAAAAAAAA","BBBBBBBBBBBBBBBB"]}`
+	gcSum := sha256.Sum256([]byte(v.GCBody))
+	v.GCBodyHash = b64.EncodeToString(gcSum[:])
+	v.SyncGCMsg = fmt.Sprintf("%s\n%s\n%d\n%d\n%s", syncGCContext, v.DeviceID, v.Timestamp, v.IfMatch, v.GCBodyHash)
+	v.SyncGCSig = b64.EncodeToString(ed25519.Sign(priv, []byte(v.SyncGCMsg)))
 	return v
 }
 
@@ -273,6 +288,15 @@ func TestAuthVectorsAreStable(t *testing.T) {
 	}
 	if v.ManifestPutMsg != string(auth.ManifestPutMessage(v.DeviceID, v.Timestamp, v.IfMatch, []byte(v.ManifestBody))) {
 		t.Fatalf("manifest put message differs from the server's: %q", v.ManifestPutMsg)
+	}
+	if v.RevokeMsg != string(auth.RevokeMessage(v.DeviceID, v.Timestamp, v.RevokeTarget)) {
+		t.Fatalf("revoke message differs from the server's: %q", v.RevokeMsg)
+	}
+	if v.SyncGCMsg != string(auth.SyncGCMessage(v.DeviceID, v.Timestamp, v.IfMatch, []byte(v.GCBody))) {
+		t.Fatalf("gc message differs from the server's: %q", v.SyncGCMsg)
+	}
+	if v.RevokeSig == v.SyncGCSig || v.SyncGCSig == v.ManifestPutSig {
+		t.Fatal("the revoke, gc and manifest put signatures must not be interchangeable")
 	}
 	if v.WrapReadSig == v.ManifestPutSig {
 		t.Fatal("the wrap read and manifest put signatures must not be interchangeable")

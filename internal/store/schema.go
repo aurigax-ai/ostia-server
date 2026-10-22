@@ -149,3 +149,9 @@ CREATE TABLE admin_audit (
 	count INTEGER NOT NULL DEFAULT 1
 );
 `
+
+const schemaV2 = `
+DROP TABLE device_seen;
+ALTER TABLE devices RENAME COLUMN last_seen TO last_seen_at;
+UPDATE devices SET last_seen_at = {now};
+`

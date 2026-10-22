@@ -790,104 +790,9 @@
         ]
       }
     },
-    "/v1/devices/{id}/seen": {
-      "post": {
-        "summary": "Acknowledge a device the person has seen on this device (signed with the device key)",
-        "security": [
-          {
-            "bearer": []
-          }
-        ],
-        "responses": {
-          "204": {
-            "description": "Recorded"
-          },
-          "403": {
-            "description": "bad-signature",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "not-found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Missing, expired or invalid bearer token",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "429": {
-            "description": "Rate limited",
-            "headers": {
-              "Retry-After": {
-                "schema": {
-                  "type": "integer"
-                }
-              }
-            },
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          }
-        },
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "properties": {
-                  "sig": {
-                    "type": "string",
-                    "description": "unpadded base64url"
-                  }
-                },
-                "required": [
-                  "sig"
-                ]
-              }
-            }
-          }
-        },
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            },
-            "description": ""
-          }
-        ],
-        "tags": [
-          "Accounts"
-        ]
-      }
-    },
     "/v1/devices/{id}": {
       "delete": {
-        "summary": "Revoke a device (needs an elevated session, except an established device revoking one still on probation, a device revoking itself while an established one remains, and logout)",
+        "summary": "Revoke a device (needs an elevated session, except an established device revoking one still on probation, a device revoking itself, and logout). When the last device of an account leaves, the account's sync data is deleted, and the account too if it has no shares",
         "security": [
           {
             "bearer": []
@@ -961,6 +866,15 @@
             "required": true,
             "schema": {
               "type": "string"
+            }
+          },
+          {
+            "name": "X-Device-Timestamp",
+            "in": "header",
+            "required": true,
+            "description": "Unix milliseconds, within two minutes of the server clock and larger than this device's previous signed timestamp",
+            "schema": {
+              "type": "integer"
             }
           }
         ],
@@ -3336,7 +3250,7 @@
     },
     "/v1/sync/gc": {
       "post": {
-        "summary": "Delete blobs that are not listed and are older than the grace period (needs an elevated session)",
+        "summary": "Delete blobs that are not listed and are older than the grace period (an established current device, no elevation; signed with the device key and bound to the manifest version with If-Match)",
         "security": [
           {
             "bearer": []
@@ -3385,8 +3299,28 @@
               }
             }
           },
+          "412": {
+            "description": "version-mismatch: the manifest moved; the body carries current",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "428": {
+            "description": "precondition-required: send If-Match",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
           "403": {
-            "description": "elevation-required: approve from another device or re-authenticate with GitHub (see /v1/auth/elevation)",
+            "description": "device-signature-required, bad-signature, stale-signature or device-too-new",
             "content": {
               "application/json": {
                 "schema": {
@@ -3420,7 +3354,36 @@
         "tags": [
           "Sync"
         ],
-        "x-module": "sync"
+        "x-module": "sync",
+        "parameters": [
+          {
+            "name": "If-Match",
+            "in": "header",
+            "required": true,
+            "description": "The manifest version the caller pushed; 412 version-mismatch when the manifest has moved",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Device-Signature",
+            "in": "header",
+            "required": true,
+            "description": "Base64url Ed25519 signature over \"ostia-server/manifest-put/v1\\n<device id>\\n<timestamp>\\n<If-Match as a decimal number>\\n<unpadded base64url SHA-256 of the exact request body>\"",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Device-Timestamp",
+            "in": "header",
+            "required": true,
+            "description": "Unix milliseconds, within two minutes of the server clock and larger than this device's previous signed timestamp",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ]
       }
     },
     "/v1/sync/usage": {
@@ -4075,6 +4038,34 @@
           "Shares"
         ]
       }
+    },
+    "/v1/devices/heartbeat": {
+      "post": {
+        "summary": "Check in so the device is not removed for inactivity (no body)",
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Checked in"
+          },
+          "401": {
+            "description": "unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "Accounts"
+        ]
+      }
     }
   },
   "components": {
@@ -4140,16 +4131,16 @@
             "type": "integer",
             "description": "Unix milliseconds"
           },
-          "lastSeen": {
+          "lastSeenAt": {
             "type": "integer",
-            "description": "Unix milliseconds, the start of the UTC day of the device's last activity"
+            "description": "Unix milliseconds of the device's last activity, updated at most once an hour"
+          },
+          "removeAt": {
+            "type": "integer",
+            "description": "Unix milliseconds when the server removes the device if it stays silent: lastSeenAt plus the inactivity limit"
           },
           "current": {
             "type": "boolean"
-          },
-          "new": {
-            "type": "boolean",
-            "description": "added after this device and not yet acknowledged with POST /v1/devices/{id}/seen"
           }
         }
       },
@@ -4246,6 +4237,14 @@
           "approverMinAgeSeconds": {
             "type": "integer",
             "description": "How long a device must belong to the account before its approvals and signed wraps count (auth.approver_min_age, in seconds). Informational: clients enforce max(24 h, this value) and never act on a lower one"
+          },
+          "syncGCBound": {
+            "type": "boolean",
+            "description": "POST /v1/sync/gc is bound to the manifest version; run GC only when this is true"
+          },
+          "deviceInactiveAfterSeconds": {
+            "type": "integer",
+            "description": "devices.inactive_after: a device silent this long is removed"
           }
         }
       }

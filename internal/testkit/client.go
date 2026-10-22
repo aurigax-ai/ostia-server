@@ -30,6 +30,8 @@ const (
 	elevateContext     = "ostia-server/elevate/v1"
 	wrapReadContext    = "ostia-server/wrap-read/v1"
 	manifestPutContext = "ostia-server/manifest-put/v1"
+	revokeContext      = "ostia-server/revoke/v2"
+	syncGCContext      = "ostia-server/sync-gc/v1"
 )
 
 type Net struct {
@@ -161,16 +163,20 @@ func (a *API) deviceSignature(method, path string, headers map[string]string, bo
 		return stamped(elevateContext)
 	case method == "GET" && (path == "/v1/sync/wraps/passphrase" || path == "/v1/sync/wraps/recovery"):
 		return stamped(wrapReadContext, strings.TrimPrefix(path, "/v1/sync/wraps/"))
-	case method == "PUT" && path == "/v1/sync/manifest":
+	case (method == "PUT" && path == "/v1/sync/manifest") || (method == "POST" && path == "/v1/sync/gc"):
+		context := manifestPutContext
+		if path == "/v1/sync/gc" {
+			context = syncGCContext
+		}
 		ifMatch, err := strconv.ParseInt(strings.Trim(headers["If-Match"], `" `), 10, 64)
 		if err != nil {
 			return nil
 		}
 		sum := sha256.Sum256(body)
-		return stamped(manifestPutContext, fmt.Sprint(ifMatch), b64.EncodeToString(sum[:]))
+		return stamped(context, fmt.Sprint(ifMatch), b64.EncodeToString(sum[:]))
 	case method == "DELETE" && strings.HasPrefix(path, "/v1/devices/"):
 		target := strings.TrimPrefix(path, "/v1/devices/")
-		return map[string]string{"X-Device-Signature": sign("ostia-server/revoke/v1\n" + a.ID.DeviceID + "\n" + target)}
+		return stamped(revokeContext, target)
 	case method == "POST" && strings.HasPrefix(path, "/v1/auth/approvals/") && strings.HasSuffix(path, "/approve"):
 		id := strings.TrimSuffix(strings.TrimPrefix(path, "/v1/auth/approvals/"), "/approve")
 		res, err := a.rawUnsigned("GET", "/v1/auth/approvals", nil, nil)
@@ -323,16 +329,4 @@ func (a *API) ElevateByApproval(t testing.TB, approver *API) {
 func (a *API) Elevated(t testing.TB) bool {
 	t.Helper()
 	return a.Must(t, http.StatusOK, "GET", "/v1/auth/elevation", nil).Map(t)["elevatedUntil"].(float64) > 0
-}
-
-func (a *API) MarkSeen(t testing.TB, deviceID string) {
-	t.Helper()
-	sig := ed25519.Sign(a.ID.Sign, []byte("ostia-server/seen/v1\n"+a.ID.DeviceID+"\n"+deviceID))
-	a.Must(t, http.StatusNoContent, "POST", "/v1/devices/"+deviceID+"/seen", map[string]string{"sig": b64.EncodeToString(sig)})
-}
-
-func (a *API) MarkSeenExpecting(t testing.TB, deviceID string, want int) {
-	t.Helper()
-	sig := ed25519.Sign(a.ID.Sign, []byte("ostia-server/seen/v1\n"+a.ID.DeviceID+"\n"+deviceID))
-	a.Must(t, want, "POST", "/v1/devices/"+deviceID+"/seen", map[string]string{"sig": b64.EncodeToString(sig)})
 }

@@ -29,6 +29,9 @@ publish = true
 sync = true
 push = false
 
+[devices]
+inactive_after = "2160h0m0s"
+
 [auth]
 github_client_id = ""
 github_base_url = "https://github.com"

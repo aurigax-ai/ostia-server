@@ -10,14 +10,14 @@ import (
 )
 
 type Device struct {
-	ID        string
-	AccountID string
-	Name      string
-	SignPub   []byte
-	BoxPub    []byte
-	CreatedAt int64
-	LastSeen  int64
-	RevokedAt int64
+	ID         string
+	AccountID  string
+	Name       string
+	SignPub    []byte
+	BoxPub     []byte
+	CreatedAt  int64
+	LastSeenAt int64
+	RevokedAt  int64
 }
 
 type NewDevice struct {
@@ -26,11 +26,11 @@ type NewDevice struct {
 	BoxPub  []byte
 }
 
-const deviceColumns = `id, account_id, name, sign_pub, box_pub, created_at, last_seen, revoked_at`
+const deviceColumns = `id, account_id, name, sign_pub, box_pub, created_at, last_seen_at, revoked_at`
 
 func scanDevice(row interface{ Scan(...any) error }) (Device, error) {
 	var v Device
-	err := row.Scan(&v.ID, &v.AccountID, &v.Name, &v.SignPub, &v.BoxPub, &v.CreatedAt, &v.LastSeen, &v.RevokedAt)
+	err := row.Scan(&v.ID, &v.AccountID, &v.Name, &v.SignPub, &v.BoxPub, &v.CreatedAt, &v.LastSeenAt, &v.RevokedAt)
 	return v, notFound(err)
 }
 
@@ -55,11 +55,28 @@ func (d *DB) DevicesOf(ctx context.Context, accountID string) ([]Device, error) 
 	return out, rows.Err()
 }
 
-func startOfDay(ms int64) int64 { return ms - ms%dayMillis }
+const touchEvery = time.Hour
 
 func (d *DB) TouchDevice(ctx context.Context, id string) error {
-	_, err := d.sql.ExecContext(ctx, `UPDATE devices SET last_seen = ? WHERE id = ? AND last_seen < ?`, startOfDay(d.ms()), id, startOfDay(d.ms()))
+	_, err := d.sql.ExecContext(ctx, `UPDATE devices SET last_seen_at = ? WHERE id = ? AND last_seen_at <= ?`, d.ms(), id, d.now().Add(-touchEvery).UnixMilli())
 	return err
+}
+
+func (d *DB) InactiveDevices(ctx context.Context, inactiveAfter time.Duration) ([]Device, error) {
+	rows, err := d.sql.QueryContext(ctx, `SELECT `+deviceColumns+` FROM devices WHERE revoked_at = 0 AND last_seen_at < ?`, d.now().Add(-inactiveAfter).UnixMilli())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Device
+	for rows.Next() {
+		v, err := scanDevice(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, v)
+	}
+	return out, rows.Err()
 }
 
 func (d *DB) SweepRevokedDevices(ctx context.Context, retention time.Duration) error {
@@ -75,9 +92,9 @@ func addDevice(ctx context.Context, tx *sql.Tx, now int64, accountID string, nd 
 	if maxDevices > 0 && count >= maxDevices {
 		return Device{}, ErrLimit
 	}
-	dev := Device{ID: ids.New(), AccountID: accountID, Name: nd.Name, SignPub: nd.SignPub, BoxPub: nd.BoxPub, CreatedAt: now, LastSeen: startOfDay(now)}
+	dev := Device{ID: ids.New(), AccountID: accountID, Name: nd.Name, SignPub: nd.SignPub, BoxPub: nd.BoxPub, CreatedAt: now, LastSeenAt: now}
 	_, err := tx.ExecContext(ctx, `INSERT INTO devices (`+deviceColumns+`) VALUES (?, ?, ?, ?, ?, ?, ?, 0)`,
-		dev.ID, dev.AccountID, dev.Name, dev.SignPub, dev.BoxPub, dev.CreatedAt, dev.LastSeen)
+		dev.ID, dev.AccountID, dev.Name, dev.SignPub, dev.BoxPub, dev.CreatedAt, dev.LastSeenAt)
 	return dev, err
 }
 
@@ -113,8 +130,23 @@ func (d *DB) RegisterProvider(ctx context.Context, provider, idHash string, nd N
 }
 
 func (d *DB) RevokeDevice(ctx context.Context, accountID, id string) (label string, err error) {
+	return d.revoke(ctx, accountID, id, 0)
+}
+
+func (d *DB) RevokeInactiveDevice(ctx context.Context, accountID, id string, silentSince int64) error {
+	_, err := d.revoke(ctx, accountID, id, silentSince)
+	return err
+}
+
+func (d *DB) revoke(ctx context.Context, accountID, id string, silentSince int64) (label string, err error) {
 	err = d.tx(ctx, func(tx *sql.Tx) error {
-		res, err := tx.ExecContext(ctx, `UPDATE devices SET revoked_at = ? WHERE id = ? AND account_id = ? AND revoked_at = 0`, d.ms(), id, accountID)
+		query := `UPDATE devices SET revoked_at = ? WHERE id = ? AND account_id = ? AND revoked_at = 0`
+		args := []any{d.ms(), id, accountID}
+		if silentSince > 0 {
+			query += ` AND last_seen_at < ?`
+			args = append(args, silentSince)
+		}
+		res, err := tx.ExecContext(ctx, query, args...)
 		if err := affected(res, err); err != nil {
 			return err
 		}
@@ -137,41 +169,6 @@ func (d *DB) RevokeDevice(ctx context.Context, accountID, id string) (label stri
 }
 
 func DeviceSlot(deviceID string) string { return "device:" + deviceID }
-
-func (d *DB) UnseenDevices(ctx context.Context, viewer Device) (map[string]bool, error) {
-	rows, err := d.sql.QueryContext(ctx, `
-		SELECT v.id FROM devices v
-		WHERE v.account_id = ? AND v.revoked_at = 0 AND v.id != ? AND v.created_at >= ?
-		  AND NOT EXISTS (SELECT 1 FROM device_seen s WHERE s.viewer_device_id = ? AND s.device_id = v.id)`,
-		viewer.AccountID, viewer.ID, viewer.CreatedAt, viewer.ID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	out := map[string]bool{}
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return nil, err
-		}
-		out[id] = true
-	}
-	return out, rows.Err()
-}
-
-func (d *DB) MarkSeen(ctx context.Context, viewerDeviceID, deviceID string) error {
-	_, err := d.sql.ExecContext(ctx, `INSERT OR IGNORE INTO device_seen (viewer_device_id, device_id) VALUES (?, ?)`, viewerDeviceID, deviceID)
-	return err
-}
-
-func (d *DB) OlderActiveDevices(ctx context.Context, device Device) (int, error) {
-	var n int
-	err := d.sql.QueryRowContext(ctx, `
-		SELECT COUNT(*) FROM devices
-		WHERE account_id = ? AND revoked_at = 0 AND id != ? AND (created_at < ? OR (created_at = ? AND id < ?))`,
-		device.AccountID, device.ID, device.CreatedAt, device.CreatedAt, device.ID).Scan(&n)
-	return n, err
-}
 
 func (d *DB) AdvanceSigningCounter(ctx context.Context, deviceID string, ms int64) (bool, error) {
 	res, err := d.sql.ExecContext(ctx, `UPDATE devices SET last_signed_ms = ? WHERE id = ? AND last_signed_ms < ?`, ms, deviceID, ms)

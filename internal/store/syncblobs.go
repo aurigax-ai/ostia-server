@@ -45,22 +45,50 @@ func (d *DB) DeleteSyncBlob(ctx context.Context, accountID, blobID string) error
 	return affected(res, err)
 }
 
-func (d *DB) UnreferencedSyncBlobs(ctx context.Context, accountID string, keep map[string]bool, grace time.Duration) ([]string, error) {
-	rows, err := d.sql.QueryContext(ctx, `SELECT blob_id FROM sync_blobs WHERE account_id = ? AND created_at < ?`,
-		accountID, d.now().Add(-grace).UnixMilli())
+func (d *DB) TouchSyncBlob(ctx context.Context, accountID, blobID string) (bool, error) {
+	res, err := d.sql.ExecContext(ctx, `UPDATE sync_blobs SET created_at = ? WHERE account_id = ? AND blob_id = ?`, d.ms(), accountID, blobID)
 	if err != nil {
-		return nil, err
+		return false, err
 	}
-	defer rows.Close()
-	var out []string
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return nil, err
+	n, err := res.RowsAffected()
+	return n == 1, err
+}
+
+func (d *DB) CollectSyncBlobs(ctx context.Context, accountID string, ifMatch int64, keep map[string]bool, grace time.Duration) ([]string, error) {
+	var stale []string
+	err := d.tx(ctx, func(tx *sql.Tx) error {
+		var current int64
+		err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(version), 0) FROM sync_manifests WHERE account_id = ?`, accountID).Scan(&current)
+		if err != nil {
+			return err
 		}
-		if !keep[id] {
-			out = append(out, id)
+		if current != ifMatch {
+			return VersionMismatchError{Current: current}
 		}
-	}
-	return out, rows.Err()
+		rows, err := tx.QueryContext(ctx, `SELECT blob_id FROM sync_blobs WHERE account_id = ? AND created_at < ?`,
+			accountID, d.now().Add(-grace).UnixMilli())
+		if err != nil {
+			return err
+		}
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				_ = rows.Close()
+				return err
+			}
+			if !keep[id] {
+				stale = append(stale, id)
+			}
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+		for _, id := range stale {
+			if _, err := tx.ExecContext(ctx, `DELETE FROM sync_blobs WHERE account_id = ? AND blob_id = ?`, accountID, id); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	return stale, err
 }

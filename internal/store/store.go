@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -31,7 +33,7 @@ const (
 
 func ValidJournal(mode string) bool { return mode == JournalWAL || mode == JournalDelete }
 
-var migrations = []string{schemaV1}
+var migrations = []string{schemaV1, schemaV2}
 
 type DB struct {
 	sql *sql.DB
@@ -96,7 +98,7 @@ func (d *DB) migrate(ctx context.Context) error {
 			return fmt.Errorf("database schema version %d is newer than this build supports (%d)", version, len(migrations))
 		}
 		for i := version; i < len(migrations); i++ {
-			if _, err := tx.ExecContext(ctx, migrations[i]); err != nil {
+			if _, err := tx.ExecContext(ctx, strings.ReplaceAll(migrations[i], "{now}", strconv.FormatInt(d.ms(), 10))); err != nil {
 				return fmt.Errorf("migration %d: %w", i+1, err)
 			}
 		}

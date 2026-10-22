@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"slices"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -454,9 +455,8 @@ func listedMatches(listed RemoteDevice, pinned ManifestDevice) bool {
 	return listed.ID == pinned.ID && b64.EncodeToString(listed.SignPub) == pinned.SignPub && b64.EncodeToString(listed.BoxPub) == pinned.BoxPub
 }
 
-func (d *SyncDevice) CollectGarbage(t testing.TB, approver *API) int {
+func (d *SyncDevice) CollectGarbage(t testing.TB) int {
 	t.Helper()
-	d.API.ElevateByApproval(t, approver)
 	remote, err := d.pull(t)
 	if err != nil {
 		t.Fatal(err)
@@ -466,6 +466,6 @@ func (d *SyncDevice) CollectGarbage(t testing.TB, approver *API) int {
 		keep = append(keep, entry.BlobID)
 	}
 	slices.Sort(keep)
-	m := d.API.Must(t, http.StatusOK, "POST", "/v1/sync/gc", map[string]any{"keep": keep}).Map(t)
+	m := d.API.Must(t, http.StatusOK, "POST", "/v1/sync/gc", map[string]any{"keep": keep}, "If-Match", strconv.FormatInt(remote.version, 10)).Map(t)
 	return int(m["deleted"].(float64))
 }

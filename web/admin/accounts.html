@@ -9,7 +9,7 @@
 <a class="row{{if and $.Selected (eq $.Selected.ID .ID)}} sel{{end}}" href="/admin/accounts/{{.ID}}">
 <span class="c1 mono" title="{{.ID}}">{{short .ID}}</span>
 <span class="c2">{{.Devices}} {{if eq .Devices 1}}device{{else}}devices{{end}}</span>
-<span class="c3">{{if .LastSeen}}seen {{ago .LastSeen}}{{else}}never seen{{end}}</span>
+<span class="c3">{{if .LastSeenAt}}seen {{ago .LastSeenAt}}{{else}}never seen{{end}}</span>
 </a>
 {{else}}
 <p class="empty">No accounts yet.</p>
@@ -37,7 +37,7 @@
 <div class="row">
 <span class="c1">{{.Name}}</span>
 <span class="c2">added {{day .CreatedAt}}</span>
-<span class="c3">seen {{ago .LastSeen}}</span>
+<span class="c3">seen {{ago .LastSeenAt}}</span>
 </div>
 {{else}}
 <p class="empty">No devices.</p>

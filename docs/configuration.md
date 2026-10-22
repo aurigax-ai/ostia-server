@@ -39,6 +39,12 @@
 | `relay`, `publish`, `sync` | `true` | Switch a module off to remove its routes. |
 | `push` | `false` | Needs `push.fcm` or `push.apns` credentials. |
 
+## `[devices]`
+
+| Key | Default | |
+|---|---|---|
+| `inactive_after` | `2160h` (90 days) | A device that has made no authenticated request and sent no `POST /v1/devices/heartbeat` for this long is revoked by the hourly sweep, with the same effects as a revoke; an account left with no active device is then purged. There is always a limit: zero or a negative value is refused. Existing devices start the clock when the server is upgraded to this version. |
+
 ## `[auth]`
 
 | Key | Default | |

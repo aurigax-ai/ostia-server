@@ -2,6 +2,7 @@ package syncsvc
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"io"
 	"maps"
@@ -9,6 +10,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/aurigax-ai/ostia-server/internal/auth"
 	"github.com/aurigax-ai/ostia-server/internal/blob"
@@ -32,6 +34,15 @@ type Service struct {
 	Blobs blob.Store
 	Auth  *auth.Service
 	Cfg   config.Sync
+
+	locks [64]sync.Mutex
+}
+
+func (s *Service) lockAccount(accountID string) func() {
+	sum := sha256.Sum256([]byte(accountID))
+	m := &s.locks[int(sum[0])%len(s.locks)]
+	m.Lock()
+	return m.Unlock
 }
 
 func (s *Service) Mount(mux *httpx.Mux) {
@@ -199,15 +210,24 @@ func (s *Service) putBlob(w http.ResponseWriter, r *http.Request, p auth.Princip
 		return httpx.Errf(http.StatusBadRequest, "bad-request", "empty blob")
 	}
 	sum := up.Sum()
+	defer s.lockAccount(p.AccountID)()
 	existing, err := s.DB.SyncBlob(r.Context(), p.AccountID, id)
 	switch {
 	case err == nil:
-		up.Abort()
 		if !ids.Equal(existing.Sum, sum[:]) {
+			up.Abort()
 			return httpx.Errf(http.StatusConflict, "blob-exists", "a blob id is write-once; derive a new id for new content")
 		}
-		httpx.WriteJSON(w, http.StatusOK, map[string]any{"id": id, "size": existing.Size})
-		return nil
+		touched, err := s.DB.TouchSyncBlob(r.Context(), p.AccountID, id)
+		if err != nil {
+			up.Abort()
+			return err
+		}
+		if touched {
+			up.Abort()
+			httpx.WriteJSON(w, http.StatusOK, map[string]any{"id": id, "size": existing.Size})
+			return nil
+		}
 	case !errors.Is(err, store.ErrNotFound):
 		up.Abort()
 		return err
@@ -373,13 +393,28 @@ func (s *Service) rotate(w http.ResponseWriter, r *http.Request, p auth.Principa
 }
 
 func (s *Service) gc(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
-	if err := s.Auth.NeedElevation(p); err != nil {
+	expected, err := ifMatch(r)
+	if err != nil {
+		return err
+	}
+	stamp, err := s.Auth.SignedTimestamp(r)
+	if err != nil {
+		return err
+	}
+	body, err := httpx.ReadBody(w, r, int64(maxKeepIDs)*140)
+	if err != nil {
+		return err
+	}
+	if err := s.Auth.RequireSignature(r, p, auth.SyncGCContext, stamp, auth.ManifestPutFields(expected, body)...); err != nil {
+		return err
+	}
+	if err := s.Auth.RequireEstablishedDevice(r.Context(), p); err != nil {
 		return err
 	}
 	var in struct {
 		Keep []string `json:"keep"`
 	}
-	if err := httpx.ReadJSON(w, r, &in, int64(maxKeepIDs)*140); err != nil {
+	if err := httpx.DecodeJSON(body, &in); err != nil {
 		return err
 	}
 	if len(in.Keep) > maxKeepIDs {
@@ -389,14 +424,15 @@ func (s *Service) gc(w http.ResponseWriter, r *http.Request, p auth.Principal) e
 	for _, id := range in.Keep {
 		keep[id] = true
 	}
-	stale, err := s.DB.UnreferencedSyncBlobs(r.Context(), p.AccountID, keep, s.Cfg.GCGrace.Std())
+	defer s.lockAccount(p.AccountID)()
+	stale, err := s.DB.CollectSyncBlobs(r.Context(), p.AccountID, expected, keep, s.Cfg.GCGrace.Std())
+	if versionMismatch(w, err) {
+		return nil
+	}
 	if err != nil {
 		return err
 	}
 	for _, id := range stale {
-		if err := s.DB.DeleteSyncBlob(r.Context(), p.AccountID, id); err != nil && !errors.Is(err, store.ErrNotFound) {
-			return err
-		}
 		if err := s.Blobs.Delete(r.Context(), store.SyncBlobKey(p.AccountID, id)); err != nil {
 			return err
 		}
