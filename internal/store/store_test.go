@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"math"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -42,6 +43,25 @@ func register(t *testing.T, d *DB, provider, id string) (Account, Device) {
 	return a, dev
 }
 
+func revoke(t *testing.T, d *DB, accountID, deviceID string) {
+	t.Helper()
+	if err := d.RevokeInactiveDevice(t.Context(), accountID, deviceID, math.MaxInt64); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func setKey(t *testing.T, d *DB, accountID string, ifMatch int64, label string) (version, keyVersion int64) {
+	t.Helper()
+	version, keyVersion, err := d.ReplaceKey(t.Context(), accountID, KeyReplacement{
+		IfMatch: ifMatch, Manifest: []byte("manifest " + label), Passphrase: []byte("passphrase " + label), Recovery: []byte("recovery " + label),
+		Retention: Retention{Versions: 10},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return version, keyVersion
+}
+
 func TestProviderSignInReusesTheAccount(t *testing.T) {
 	d, _ := open(t)
 	a1, d1 := register(t, d, "github", "hash1")
@@ -75,44 +95,21 @@ func TestDeviceLimit(t *testing.T) {
 func TestInviteIsSingleUseAndExpires(t *testing.T) {
 	d, c := open(t)
 	hash := ids.Hash("code-1")
-	if _, err := d.CreateInvite(t.Context(), hash, "", time.Hour, false, ""); err != nil {
+	if _, err := d.CreateInvite(t.Context(), hash, time.Hour, ""); err != nil {
 		t.Fatal(err)
 	}
-	acct, _, err := d.RegisterWithInvite(t.Context(), hash, newDevice("a"), 10)
-	if err != nil {
+	if _, _, err := d.RegisterWithInvite(t.Context(), hash, newDevice("a"), 10); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, err := d.RegisterWithInvite(t.Context(), hash, newDevice("b"), 10); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("invite reused: %v", err)
 	}
 
-	bound := ids.Hash("code-2")
-	if _, err := d.CreateInvite(t.Context(), bound, acct.ID, time.Minute, false, ""); err != nil {
-		t.Fatal(err)
-	}
-	a2, _, err := d.RegisterWithInvite(t.Context(), bound, newDevice("b"), 10)
-	if err != nil || a2.ID != acct.ID {
-		t.Fatalf("bound invite must join the account: %v %v", a2.ID, err)
-	}
-
 	late := ids.Hash("code-3")
-	_, _ = d.CreateInvite(t.Context(), late, "", time.Minute, false, "")
+	_, _ = d.CreateInvite(t.Context(), late, time.Minute, "")
 	c.t = c.t.Add(2 * time.Minute)
 	if _, _, err := d.RegisterWithInvite(t.Context(), late, newDevice("c"), 10); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("expired invite accepted: %v", err)
-	}
-}
-
-func TestInviteStaysUnusedWhenDeviceLimitHit(t *testing.T) {
-	d, _ := open(t)
-	a, _ := register(t, d, "github", "h")
-	code := ids.Hash("bound")
-	_, _ = d.CreateInvite(t.Context(), code, a.ID, time.Hour, false, "")
-	if _, _, err := d.RegisterWithInvite(t.Context(), code, newDevice("x"), 1); !errors.Is(err, ErrLimit) {
-		t.Fatalf("want ErrLimit, got %v", err)
-	}
-	if _, _, err := d.RegisterWithInvite(t.Context(), code, newDevice("x"), 5); err != nil {
-		t.Fatalf("invite was consumed by a failed registration: %v", err)
 	}
 }
 
@@ -133,36 +130,29 @@ func TestSessionLifecycle(t *testing.T) {
 	}
 }
 
-func TestRevokeDeviceRemovesSessionLabelAndWrap(t *testing.T) {
+func TestRevokeRemovesSessionAndLabelButKeepsTheSyncKey(t *testing.T) {
 	d, _ := open(t)
 	a, dev := register(t, d, "github", "h")
 	other, _ := d.AddDevice(t.Context(), a.ID, newDevice("phone"), 10)
 	hash := ids.Hash("tok")
 	_, _ = d.CreateSession(t.Context(), hash, other.ID, time.Hour)
 	label, _ := d.LabelFor(t.Context(), other.ID, a.ID)
-	_ = d.PutWrap(t.Context(), a.ID, DeviceSlot(other.ID), []byte("wrap"))
-	_ = d.PutWrap(t.Context(), a.ID, "passphrase", []byte("p"))
+	setKey(t, d, a.ID, 0, "one")
 
-	gotLabel, err := d.RevokeDevice(t.Context(), a.ID, other.ID)
-	if err != nil || gotLabel != label {
-		t.Fatalf("revoke: %q %v", gotLabel, err)
-	}
+	revoke(t, d, a.ID, other.ID)
 	if _, err := d.SessionDevice(t.Context(), hash); !errors.Is(err, ErrNotFound) {
 		t.Fatal("revoked device keeps its session")
 	}
 	if _, err := d.LabelOwner(t.Context(), label); !errors.Is(err, ErrNotFound) {
 		t.Fatal("revoked device keeps its relay label")
 	}
-	if _, err := d.Wrap(t.Context(), a.ID, DeviceSlot(other.ID)); !errors.Is(err, ErrNotFound) {
-		t.Fatal("revoked device keeps its wrap")
-	}
-	if _, err := d.Wrap(t.Context(), a.ID, "passphrase"); err != nil {
-		t.Fatalf("revoking a device removed another wrap: %v", err)
+	if _, err := d.SyncKey(t.Context(), a.ID); err != nil {
+		t.Fatalf("revoking a device removed the account's sync key: %v", err)
 	}
 	if devices, _ := d.DevicesOf(t.Context(), a.ID); len(devices) != 1 || devices[0].ID != dev.ID {
 		t.Fatalf("devices after revoke: %v", devices)
 	}
-	if _, err := d.RevokeDevice(t.Context(), a.ID, other.ID); !errors.Is(err, ErrNotFound) {
+	if err := d.RevokeInactiveDevice(t.Context(), a.ID, other.ID, math.MaxInt64); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("second revoke: %v", err)
 	}
 }
@@ -173,9 +163,11 @@ func TestManifestCompareAndSetAndHistory(t *testing.T) {
 	if _, err := d.CurrentManifest(t.Context(), a.ID); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("fresh account has a manifest: %v", err)
 	}
-	v, err := d.PutManifest(t.Context(), a.ID, 0, []byte("one"), Retention{Versions: 3})
-	if err != nil || v != 1 {
-		t.Fatalf("first put: %d %v", v, err)
+	if _, err := d.PutManifest(t.Context(), a.ID, 0, []byte("one"), Retention{Versions: 3}); !errors.Is(err, ErrNoKey) {
+		t.Fatalf("a manifest without a sync key was accepted: %v", err)
+	}
+	if v, _ := setKey(t, d, a.ID, 0, "one"); v != 1 {
+		t.Fatalf("first manifest version %d", v)
 	}
 	if _, err := d.PutManifest(t.Context(), a.ID, 0, []byte("stale"), Retention{Versions: 3}); !errors.Is(err, ErrVersionMismatch) {
 		t.Fatalf("stale put accepted: %v", err)
@@ -188,39 +180,50 @@ func TestManifestCompareAndSetAndHistory(t *testing.T) {
 		}
 	}
 	versions, _ := d.ManifestVersions(t.Context(), a.ID)
-	if len(versions) != 3 || versions[0].Version != 5 || versions[2].Version != 3 {
+	if len(versions) != 3 || versions[0].Version != 5 || versions[2].Version != 3 || versions[0].KeyVersion != 1 {
 		t.Fatalf("history not pruned to 3: %+v", versions)
 	}
 }
 
-func TestRotateIsAtomic(t *testing.T) {
+func TestReplaceKeyIsAtomicAndMovesTheKeyVersion(t *testing.T) {
 	d, _ := open(t)
-	a, dev := register(t, d, "github", "h")
-	_, _ = d.PutManifest(t.Context(), a.ID, 0, []byte("m1"), Retention{Versions: 10})
-	_ = d.PutWrap(t.Context(), a.ID, "passphrase", []byte("old"))
-	_ = d.PutWrap(t.Context(), a.ID, DeviceSlot(dev.ID), []byte("olddev"))
+	a, _ := register(t, d, "github", "h")
+	if _, err := d.SyncKey(t.Context(), a.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("fresh account has a sync key: %v", err)
+	}
+	if v, kv := setKey(t, d, a.ID, 0, "one"); v != 1 || kv != 1 {
+		t.Fatalf("set up: version %d key version %d", v, kv)
+	}
+	if _, err := d.PutManifest(t.Context(), a.ID, 1, []byte("two"), Retention{Versions: 10}); err != nil {
+		t.Fatal(err)
+	}
 
-	_, err := d.Rotate(t.Context(), a.ID, Rotation{IfMatch: 7, Manifest: []byte("m2"), Wraps: map[string][]byte{"passphrase": []byte("new")}})
+	_, _, err := d.ReplaceKey(t.Context(), a.ID, KeyReplacement{IfMatch: 1, Manifest: []byte("m"), Passphrase: []byte("p"), Recovery: []byte("r")})
 	if !errors.Is(err, ErrVersionMismatch) {
 		t.Fatalf("want mismatch, got %v", err)
 	}
-	if w, _ := d.Wrap(t.Context(), a.ID, "passphrase"); string(w.Blob) != "old" {
-		t.Fatal("wrap changed although the manifest swap failed")
+	if k, _ := d.SyncKey(t.Context(), a.ID); k.Version != 1 || string(k.Passphrase) != "passphrase one" || string(k.Recovery) != "recovery one" {
+		t.Fatalf("the key changed although the manifest swap failed: %+v", k)
 	}
 
-	v, err := d.Rotate(t.Context(), a.ID, Rotation{
-		IfMatch: 1, Manifest: []byte("m2"), Retention: Retention{Versions: 10},
-		Wraps:       map[string][]byte{"passphrase": []byte("new")},
-		DeleteSlots: []string{DeviceSlot(dev.ID)},
-	})
-	if err != nil || v != 2 {
-		t.Fatalf("rotate: %d %v", v, err)
+	if v, kv := setKey(t, d, a.ID, 2, "two"); v != 3 || kv != 2 {
+		t.Fatalf("replace: version %d key version %d", v, kv)
 	}
-	if w, _ := d.Wrap(t.Context(), a.ID, "passphrase"); string(w.Blob) != "new" {
-		t.Fatal("wrap not replaced")
+	k, _ := d.SyncKey(t.Context(), a.ID)
+	if k.Version != 2 || string(k.Passphrase) != "passphrase two" || string(k.Recovery) != "recovery two" {
+		t.Fatalf("key not replaced: %+v", k)
 	}
-	if _, err := d.Wrap(t.Context(), a.ID, DeviceSlot(dev.ID)); !errors.Is(err, ErrNotFound) {
-		t.Fatal("device wrap not removed")
+	if m, _ := d.CurrentManifest(t.Context(), a.ID); m.KeyVersion != 2 || string(m.Blob) != "manifest two" {
+		t.Fatalf("the new manifest must carry the new key version: %+v", m)
+	}
+	if m, _ := d.ManifestAt(t.Context(), a.ID, 2); m.KeyVersion != 1 {
+		t.Fatalf("an older manifest keeps the key version it was sealed under: %+v", m)
+	}
+	if _, err := d.PutManifest(t.Context(), a.ID, 3, []byte("four"), Retention{Versions: 10}); err != nil {
+		t.Fatal(err)
+	}
+	if m, _ := d.CurrentManifest(t.Context(), a.ID); m.KeyVersion != 2 {
+		t.Fatalf("a manifest push keeps the current key version: %+v", m)
 	}
 }
 
@@ -361,8 +364,7 @@ func TestReportsSummary(t *testing.T) {
 func TestDeleteAccountCascades(t *testing.T) {
 	d, _ := open(t)
 	a, dev := register(t, d, "github", "h")
-	_, _ = d.PutManifest(t.Context(), a.ID, 0, []byte("m"), Retention{Versions: 10})
-	_ = d.PutWrap(t.Context(), a.ID, "passphrase", []byte("w"))
+	setKey(t, d, a.ID, 0, "one")
 	_, _ = d.LabelFor(t.Context(), dev.ID, a.ID)
 	_ = d.CreateShare(t.Context(), Share{ID: "s1", AccountID: a.ID, Mode: "link", Size: 1, DeleteTokenHash: []byte("x")}, ShareQuota{})
 	_ = d.MarkUploaded(t.Context(), "s1")
@@ -378,7 +380,7 @@ func TestDeleteAccountCascades(t *testing.T) {
 	for name, probe := range map[string]func() error{
 		"device":   func() error { _, err := d.Device(t.Context(), dev.ID); return err },
 		"manifest": func() error { _, err := d.CurrentManifest(t.Context(), a.ID); return err },
-		"wrap":     func() error { _, err := d.Wrap(t.Context(), a.ID, "passphrase"); return err },
+		"key":      func() error { _, err := d.SyncKey(t.Context(), a.ID); return err },
 		"share":    func() error { _, err := d.Share(t.Context(), "s1"); return err },
 	} {
 		if err := probe(); !errors.Is(err, ErrNotFound) {
@@ -464,65 +466,11 @@ func TestOutstandingPushTicketsAreCapped(t *testing.T) {
 	}
 }
 
-func TestElevationLivesOnTheSessionAndApprovalNeedsAnotherDevice(t *testing.T) {
-	d, c := open(t)
-	a, first := register(t, d, "github", "h")
-	second, _ := d.AddDevice(t.Context(), a.ID, newDevice("phone"), 10)
-	token := ids.Hash("tok-1")
-	_, _ = d.CreateSession(t.Context(), token, first.ID, time.Hour)
-	sess, err := d.LookupSession(t.Context(), token)
-	if err != nil || sess.ElevatedUntil != 0 {
-		t.Fatalf("fresh session: %+v %v", sess, err)
-	}
-	approval, err := d.CreateApproval(t.Context(), a.ID, first.ID, token, time.Minute)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if pending, _ := d.PendingApprovals(t.Context(), a.ID, first.ID); len(pending) != 0 {
-		t.Fatal("the requester must not see its own request as something to approve")
-	}
-	pending, _ := d.PendingApprovals(t.Context(), a.ID, second.ID)
-	if len(pending) != 1 || pending[0].RequesterName != "laptop" {
-		t.Fatalf("pending: %+v", pending)
-	}
-	until := c.t.Add(5 * time.Minute).UnixMilli()
-	if err := d.Approve(t.Context(), approval.ID, a.ID, first.ID, until, 0); !errors.Is(err, ErrConflict) {
-		t.Fatalf("self approval: %v", err)
-	}
-	other, _ := register(t, d, "github", "stranger")
-	if err := d.Approve(t.Context(), approval.ID, other.ID, second.ID, until, 0); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("approval across accounts: %v", err)
-	}
-	if err := d.Approve(t.Context(), approval.ID, a.ID, second.ID, until, 0); err != nil {
-		t.Fatal(err)
-	}
-	if err := d.Approve(t.Context(), approval.ID, a.ID, second.ID, until, 0); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("approving twice: %v", err)
-	}
-	sess, _ = d.LookupSession(t.Context(), token)
-	if sess.ElevatedUntil != until {
-		t.Fatalf("elevation not applied: %d", sess.ElevatedUntil)
-	}
-	got, err := d.ApprovalOf(t.Context(), approval.ID, token)
-	if err != nil || got.ApprovedAt == 0 {
-		t.Fatalf("requester view: %+v %v", got, err)
-	}
-	if _, err := d.ApprovalOf(t.Context(), approval.ID, ids.Hash("other session")); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("another session read the approval: %v", err)
-	}
-
-	late, _ := d.CreateApproval(t.Context(), a.ID, first.ID, token, time.Minute)
-	c.t = c.t.Add(2 * time.Minute)
-	if err := d.Approve(t.Context(), late.ID, a.ID, second.ID, until, 0); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("expired approval: %v", err)
-	}
-}
-
 func TestManifestRetentionKeepsADailyCheckpointSoFloodingCannotEraseHistory(t *testing.T) {
 	d, c := open(t)
 	a, _ := register(t, d, "github", "h")
 	keep := Retention{Versions: 3, CheckpointDays: 3}
-	version := int64(0)
+	version, _ := setKey(t, d, a.ID, 0, "day1-setup")
 	put := func(label string) {
 		t.Helper()
 		next, err := d.PutManifest(t.Context(), a.ID, version, []byte(label), keep)
@@ -560,51 +508,20 @@ func TestManifestRetentionKeepsADailyCheckpointSoFloodingCannotEraseHistory(t *t
 	}
 }
 
-func TestUnelevatedInviteIsRefusedOnceTheAccountHasTwoDevices(t *testing.T) {
-	d, _ := open(t)
-	a, _ := register(t, d, "github", "h")
-	plain, elevated := ids.Hash("plain"), ids.Hash("elevated")
-	_, _ = d.CreateInvite(t.Context(), plain, a.ID, time.Hour, false, "")
-	_, _ = d.CreateInvite(t.Context(), elevated, a.ID, time.Hour, true, "")
-	if n, _ := d.LiveInvites(t.Context(), a.ID); n != 2 {
-		t.Fatalf("live invites %d", n)
-	}
-	if _, _, err := d.RegisterWithInvite(t.Context(), plain, newDevice("b"), 10); err != nil {
-		t.Fatalf("the second device of an account needs no elevation: %v", err)
-	}
-	other, _ := d.AddDevice(t.Context(), a.ID, newDevice("c"), 10)
-	_ = other
-	again := ids.Hash("again")
-	_, _ = d.CreateInvite(t.Context(), again, a.ID, time.Hour, false, "")
-	if _, _, err := d.RegisterWithInvite(t.Context(), again, newDevice("d"), 10); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("an invite minted without elevation must not work once there are two devices: %v", err)
-	}
-	if _, _, err := d.RegisterWithInvite(t.Context(), elevated, newDevice("e"), 10); err != nil {
-		t.Fatalf("an elevated invite keeps working: %v", err)
-	}
-}
-
 func TestPurgeDepartedDeletesSyncDataAndTheAccountUnlessSharesRemain(t *testing.T) {
 	for _, withShare := range []bool{false, true} {
 		d, _ := open(t)
 		a, dev := register(t, d, "github", "h")
-		if err := d.PutWrap(t.Context(), a.ID, "passphrase", []byte("w")); err != nil {
-			t.Fatal(err)
-		}
 		if err := d.AddSyncBlob(t.Context(), a.ID, SyncBlob{ID: "blob1", Size: 3, Sum: make([]byte, 32)}, 100); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := d.PutManifest(t.Context(), a.ID, 0, []byte("m"), Retention{Versions: 3}); err != nil {
-			t.Fatal(err)
-		}
+		setKey(t, d, a.ID, 0, "one")
 		if withShare {
 			if err := d.CreateShare(t.Context(), Share{ID: ids.New(), AccountID: a.ID, Mode: "link", Size: 1, DeleteTokenHash: []byte("h")}, ShareQuota{MaxShares: 5, MaxBytes: 100}); err != nil {
 				t.Fatal(err)
 			}
 		}
-		if _, err := d.RevokeDevice(t.Context(), a.ID, dev.ID); err != nil {
-			t.Fatal(err)
-		}
+		revoke(t, d, a.ID, dev.ID)
 		keys, deleted, err := d.PurgeDeparted(t.Context(), a.ID)
 		if err != nil || len(keys) != 1 || keys[0] != SyncBlobKey(a.ID, "blob1") {
 			t.Fatalf("share %v: keys %v err %v", withShare, keys, err)
@@ -612,8 +529,8 @@ func TestPurgeDepartedDeletesSyncDataAndTheAccountUnlessSharesRemain(t *testing.
 		if deleted == withShare {
 			t.Fatalf("share %v: account deleted %v", withShare, deleted)
 		}
-		if _, err := d.Wrap(t.Context(), a.ID, "passphrase"); !errors.Is(err, ErrNotFound) {
-			t.Fatalf("wraps must be gone: %v", err)
+		if _, err := d.SyncKey(t.Context(), a.ID); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("the sync key must be gone: %v", err)
 		}
 		if _, err := d.CurrentManifest(t.Context(), a.ID); !errors.Is(err, ErrNotFound) {
 			t.Fatalf("manifests must be gone: %v", err)
@@ -624,16 +541,14 @@ func TestPurgeDepartedDeletesSyncDataAndTheAccountUnlessSharesRemain(t *testing.
 func TestUsedAccountInvitesStayUntilTheAccountIsGone(t *testing.T) {
 	d, c := open(t)
 	hash := ids.Hash("code-keep")
-	if _, err := d.CreateInvite(t.Context(), hash, "", time.Hour, false, "KEEP-…-CODE"); err != nil {
+	if _, err := d.CreateInvite(t.Context(), hash, time.Hour, "KEEP-…-CODE"); err != nil {
 		t.Fatal(err)
 	}
 	acct, _, err := d.RegisterWithInvite(t.Context(), hash, newDevice("a"), 10)
 	if err != nil {
 		t.Fatal(err)
 	}
-	bound := ids.Hash("code-bound")
-	_, _ = d.CreateInvite(t.Context(), bound, acct.ID, time.Hour, false, "")
-	if _, _, err := d.RegisterWithInvite(t.Context(), bound, newDevice("b"), 10); err != nil {
+	if _, err := d.AddDevice(t.Context(), acct.ID, newDevice("b"), 10); err != nil {
 		t.Fatal(err)
 	}
 	c.t = c.t.Add(3 * 24 * time.Hour)
@@ -881,12 +796,8 @@ func TestDeleteAdminSessionsEndsEveryOne(t *testing.T) {
 func TestPurgeDepartedDoesNothingWhileADeviceIsActive(t *testing.T) {
 	d, _ := open(t)
 	a, first := register(t, d, "github", "h")
-	if err := d.PutWrap(t.Context(), a.ID, "passphrase", []byte("w")); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := d.RevokeDevice(t.Context(), a.ID, first.ID); err != nil {
-		t.Fatal(err)
-	}
+	setKey(t, d, a.ID, 0, "one")
+	revoke(t, d, a.ID, first.ID)
 	if _, err := d.AddDevice(t.Context(), a.ID, newDevice("joined while the last one left"), 10); err != nil {
 		t.Fatal(err)
 	}
@@ -894,8 +805,8 @@ func TestPurgeDepartedDoesNothingWhileADeviceIsActive(t *testing.T) {
 	if err != nil || len(keys) != 0 || deleted {
 		t.Fatalf("the account has a device again: %v %v %v", keys, deleted, err)
 	}
-	if _, err := d.Wrap(t.Context(), a.ID, "passphrase"); err != nil {
-		t.Fatalf("a joined device lost the wrap: %v", err)
+	if _, err := d.SyncKey(t.Context(), a.ID); err != nil {
+		t.Fatalf("a joined device lost the sync key: %v", err)
 	}
 }
 
@@ -925,9 +836,7 @@ func TestAbandonedAccountsAreFoundAndOnlyLiveSharesKeepThemAlive(t *testing.T) {
 	expiredID := share(expiredOnly, time.Minute)
 	share(live, 0)
 	for acct, dev := range map[string]Device{removedOnly.ID: rd, expiredOnly.ID: ed, live.ID: ld} {
-		if _, err := d.RevokeDevice(t.Context(), acct, dev.ID); err != nil {
-			t.Fatal(err)
-		}
+		revoke(t, d, acct, dev.ID)
 	}
 	c.t = c.t.Add(time.Hour)
 	abandoned, err := d.AbandonedAccounts(t.Context())
@@ -946,7 +855,7 @@ func TestAbandonedAccountsAreFoundAndOnlyLiveSharesKeepThemAlive(t *testing.T) {
 	}
 }
 
-func TestADatabaseAtSchemaV1UpgradesToV2(t *testing.T) {
+func TestADatabaseAtSchemaV1UpgradesToTheLatest(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "db.sqlite")
 	raw, err := sql.Open("sqlite", "file:"+path+"?_pragma=foreign_keys(1)")
 	if err != nil {
@@ -977,7 +886,7 @@ func TestADatabaseAtSchemaV1UpgradesToV2(t *testing.T) {
 	_ = d.sql.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM sqlite_master WHERE name = 'device_seen'`).Scan(&seen)
 	_ = d.sql.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM devices`).Scan(&devices)
 	_ = d.sql.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM devices WHERE last_seen_at = ?`, c.t.UnixMilli()).Scan(&backfilled)
-	if version != 2 || seen != 0 || devices != 2 {
+	if version != len(migrations) || seen != 0 || devices != 2 {
 		t.Fatalf("version %d, device_seen tables %d, devices %d", version, seen, devices)
 	}
 	if backfilled != 2 {
@@ -1007,5 +916,61 @@ func TestAHeartbeatBetweenTheListAndTheRevokeSavesTheDevice(t *testing.T) {
 	c.t = c.t.Add(limit + 24*time.Hour)
 	if err := d.RevokeInactiveDevice(t.Context(), dev.AccountID, dev.ID, c.t.Add(-limit).UnixMilli()); err != nil {
 		t.Fatalf("a device that stayed silent is revoked: %v", err)
+	}
+}
+
+func TestSchemaV3KeepsOneKeyPerAccountAndDropsDeviceTrust(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "db.sqlite")
+	raw, err := sql.Open("sqlite", "file:"+path+"?_pragma=foreign_keys(1)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, stmt := range []string{
+		schemaV1,
+		strings.ReplaceAll(schemaV2, "{now}", "1"),
+		`PRAGMA user_version = 2`,
+		`INSERT INTO accounts (id, provider, provider_id_hash, created_at) VALUES ('full', 'github', 'h1', 1), ('half', 'github', 'h2', 1)`,
+		`INSERT INTO devices (id, account_id, name, sign_pub, box_pub, created_at, last_seen_at) VALUES ('d1', 'full', 'a', x'00', x'00', 1, 1), ('d2', 'half', 'b', x'00', x'00', 1, 1)`,
+		`INSERT INTO sessions (token_hash, device_id, expires_at, elevated_until) VALUES (x'01', 'd1', 9999999999999, 5)`,
+		`INSERT INTO approvals (id, account_id, requester_device_id, requester_token_hash, created_at, expires_at) VALUES ('ap', 'full', 'd1', x'01', 1, 2)`,
+		`INSERT INTO invites (code_hash, account_id, created_at, expires_at, hint) VALUES (x'aa', NULL, 1, 9999999999999, 'ADMIN'), (x'bb', 'full', 1, 9999999999999, '')`,
+		`INSERT INTO key_wraps (account_id, slot, blob, updated_at) VALUES ('full', 'passphrase', x'70', 10), ('full', 'recovery', x'72', 20), ('full', 'device:d1', x'64', 30), ('half', 'passphrase', x'70', 10)`,
+		`INSERT INTO sync_manifests (account_id, version, blob, updated_at) VALUES ('full', 1, x'6d', 1), ('half', 1, x'6d', 1)`,
+	} {
+		if _, err := raw.Exec(stmt); err != nil {
+			t.Fatalf("%v\n%s", err, stmt)
+		}
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	c := &clock{t: time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC)}
+	d, err := Open(path, JournalWAL, c.now)
+	if err != nil {
+		t.Fatalf("a deployed V2 database must open: %v", err)
+	}
+	defer d.Close()
+	k, err := d.SyncKey(t.Context(), "full")
+	if err != nil || k.Version != 1 || string(k.Passphrase) != "p" || string(k.Recovery) != "r" || k.UpdatedAt != 20 {
+		t.Fatalf("the passphrase and recovery wraps must become key version 1: %+v %v", k, err)
+	}
+	if m, err := d.CurrentManifest(t.Context(), "full"); err != nil || m.KeyVersion != 1 {
+		t.Fatalf("an existing manifest belongs to key version 1: %+v %v", m, err)
+	}
+	if _, err := d.SyncKey(t.Context(), "half"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("an account without both wraps has no key: %v", err)
+	}
+	if _, err := d.CurrentManifest(t.Context(), "half"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("a manifest without a key must go so the account can be set up again: %v", err)
+	}
+	var tables, invites, adminInvites int
+	_ = d.sql.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM sqlite_master WHERE name IN ('approvals', 'key_wraps')`).Scan(&tables)
+	_ = d.sql.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM invites`).Scan(&invites)
+	_ = d.sql.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM invites WHERE hint = 'ADMIN'`).Scan(&adminInvites)
+	if tables != 0 || invites != 1 || adminInvites != 1 {
+		t.Fatalf("approvals and wrap tables %d, invites %d (admin %d)", tables, invites, adminInvites)
+	}
+	if dev, err := d.SessionDevice(t.Context(), []byte{1}); err != nil || dev.ID != "d1" {
+		t.Fatalf("sessions survive the migration: %+v %v", dev, err)
 	}
 }

@@ -279,10 +279,8 @@ func TestUnknownHandlesAreGone(t *testing.T) {
 func TestDeletingTheAccountDeletesItsHandles(t *testing.T) {
 	f := newPushFixture(t, "")
 	handle := registerPhone(t, f.env, f.desktop, "fcm", "tok")
-	second := f.env.device(t, f.desktop, "second desktop")
-	f.desktop.ElevateByApproval(t, second)
-	f.desktop.Must(t, http.StatusNoContent, "DELETE", "/v1/account", nil)
-	if res := second.Do(t, "POST", "/v1/push/"+handle, nil); res.Status != http.StatusUnauthorized {
+	f.env.proc.Admin(t, "delete-account", f.desktop.ID.AccountID)
+	if res := f.desktop.Do(t, "POST", "/v1/push/"+handle, nil); res.Status != http.StatusUnauthorized {
 		t.Fatalf("session of a deleted account: %s", res)
 	}
 	fresh := f.env.user(t, "fresh")

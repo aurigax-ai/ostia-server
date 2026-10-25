@@ -10,7 +10,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/aurigax-ai/ostia-server/internal/testkit"
 )
@@ -20,21 +19,23 @@ type syncFixture struct {
 	a   *testkit.SyncDevice
 }
 
+const (
+	passphrase  = "correct horse"
+	recoveryKey = "RECOVERYKEYRECOVERYKE"
+)
+
 func newSyncFixture(t *testing.T, extra string) *syncFixture {
 	t.Helper()
-	e := newEnv(t, extra)
-	owner := e.user(t, "laptop")
-	a := testkit.NewSyncDevice(owner)
-	a.InitAccount(t, "correct horse", "RECOVERYKEYRECOVERYKE")
+	e := newGitHubEnv(t, extra)
+	a := testkit.NewSyncDevice(e.githubUser(t, "laptop"))
+	a.Create(t, passphrase, recoveryKey)
 	return &syncFixture{env: e, a: a}
 }
 
 func (f *syncFixture) addDevice(t *testing.T, name string) *testkit.SyncDevice {
 	t.Helper()
-	api := f.env.device(t, f.a.API, name)
-	d := testkit.NewSyncDevice(api)
-	f.a.GrantDevice(t, api)
-	if err := d.JoinFromDeviceWrap(t, f.a.API.ID.SignPub()); err != nil {
+	d := testkit.NewSyncDevice(f.env.device(t, f.a.API, name))
+	if err := d.Unlock(t, "passphrase", passphrase); err != nil {
 		t.Fatal(err)
 	}
 	return d
@@ -54,7 +55,7 @@ func TestTwoDevicesConvergeWithPerKeyMerge(t *testing.T) {
 	b := f.addDevice(t, "desktop")
 
 	first, err := a.Sync(t, settings("theme", "dark", "font", "14"))
-	if err != nil || first.Counter != 1 {
+	if err != nil || first.Counter != 2 {
 		t.Fatalf("first sync: %+v %v", first, err)
 	}
 	got, err := b.Pull(t)
@@ -127,12 +128,35 @@ func TestStaleManifestWriteIsRefusedWithTheCurrentVersion(t *testing.T) {
 	if res := api.Do(t, "PUT", "/v1/sync/manifest", map[string]string{"blob": "AAAA"}, "If-Match", "banana"); res.Status != http.StatusBadRequest {
 		t.Fatalf("junk If-Match: %s", res)
 	}
-	api.Must(t, http.StatusOK, "PUT", "/v1/sync/manifest", map[string]string{"blob": "AAAA"}, "If-Match", "0")
-	res := api.Do(t, "PUT", "/v1/sync/manifest", map[string]string{"blob": "BBBB"}, "If-Match", "0")
-	if res.Status != http.StatusPreconditionFailed || res.Map(t)["current"].(float64) != 1 {
+	api.Must(t, http.StatusOK, "PUT", "/v1/sync/manifest", map[string]string{"blob": "AAAA"}, "If-Match", "1")
+	res := api.Do(t, "PUT", "/v1/sync/manifest", map[string]string{"blob": "BBBB"}, "If-Match", "1")
+	if res.Status != http.StatusPreconditionFailed || res.Map(t)["current"].(float64) != 2 {
 		t.Fatalf("stale write: %s", res)
 	}
-	api.Must(t, http.StatusOK, "PUT", "/v1/sync/manifest", map[string]string{"blob": "CCCC"}, "If-Match", "1")
+	api.Must(t, http.StatusOK, "PUT", "/v1/sync/manifest", map[string]string{"blob": "CCCC"}, "If-Match", "2")
+}
+
+func TestAManifestNeedsTheKeySetUpFirst(t *testing.T) {
+	e := newEnv(t, "")
+	api := e.user(t, "laptop")
+	res := api.Do(t, "PUT", "/v1/sync/manifest", map[string]string{"blob": "AAAA"}, "If-Match", "0")
+	if res.Status != http.StatusConflict || errorCode(t, res) != "no-key" {
+		t.Fatalf("a manifest before the key: %s", res)
+	}
+	for _, slot := range []string{"passphrase", "recovery"} {
+		if res := api.Do(t, "GET", "/v1/sync/wraps/"+slot, nil); res.Status != http.StatusNotFound {
+			t.Fatalf("the %s wrap of an account that is not set up: %s", slot, res)
+		}
+	}
+	a := testkit.NewSyncDevice(api)
+	a.Create(t, passphrase, recoveryKey)
+	if a.KeyVersion != 1 || a.Version != 1 {
+		t.Fatalf("set up: key version %d, manifest version %d", a.KeyVersion, a.Version)
+	}
+	view := api.Must(t, http.StatusOK, "GET", "/v1/sync/manifest", nil).Map(t)
+	if view["keyVersion"].(float64) != 1 || view["version"].(float64) != 1 {
+		t.Fatalf("manifest after set up: %v", view)
+	}
 }
 
 func TestServerStoresNoNamesOrValues(t *testing.T) {
@@ -168,7 +192,7 @@ func TestDeviceRefusesAManifestOlderThanOneItHasSeen(t *testing.T) {
 	replay := testkit.NewReplayTransport(owner.Client.Transport)
 	owner.Client.Transport = replay
 	a := testkit.NewSyncDevice(owner)
-	a.InitAccount(t, "pw", "")
+	a.Create(t, "pw", recoveryKey)
 
 	for _, theme := range []string{"dark", "light", "solarized"} {
 		if _, err := a.Sync(t, settings("theme", theme)); err != nil {
@@ -190,7 +214,7 @@ func TestDeviceRefusesAManifestOlderThanOneItHasSeen(t *testing.T) {
 	}
 
 	fresh := testkit.NewSyncDevice(owner)
-	fresh.Key = a.Key
+	fresh.Key, fresh.KeyVersion = a.Key, a.KeyVersion
 	if _, err := fresh.Pull(t); err != nil {
 		t.Fatalf("a device that has seen nothing newer cannot tell, and accepts: %v", err)
 	}
@@ -207,17 +231,17 @@ func TestNewDeviceCanUnlockWithPassphraseOrRecoveryKey(t *testing.T) {
 	}
 	api := f.env.device(t, f.a.API, "second laptop")
 	c := testkit.NewSyncDevice(api)
-	if err := c.UnlockWithSecret(t, "passphrase", "wrong"); err == nil {
+	if err := c.Unlock(t, "passphrase", "wrong"); err == nil {
 		t.Fatal("wrong passphrase unlocked the profile key")
 	}
-	if err := c.UnlockWithSecret(t, "passphrase", "correct horse"); err != nil {
+	if err := c.Unlock(t, "passphrase", passphrase); err != nil {
 		t.Fatal(err)
 	}
 	if got, err := c.Pull(t); err != nil || !testkit.Equal(got, settings("theme", "dark")) {
 		t.Fatalf("%v %v", got, err)
 	}
 	d := testkit.NewSyncDevice(f.env.device(t, f.a.API, "another"))
-	if err := d.UnlockWithSecret(t, "recovery", "RECOVERYKEYRECOVERYKE"); err != nil {
+	if err := d.Unlock(t, "recovery", recoveryKey); err != nil {
 		t.Fatalf("recovery key: %v", err)
 	}
 	if !bytes.Equal(c.Key, d.Key) || !bytes.Equal(c.Key, f.a.Key) {
@@ -225,78 +249,139 @@ func TestNewDeviceCanUnlockWithPassphraseOrRecoveryKey(t *testing.T) {
 	}
 }
 
-func TestRemovingADeviceRotatesTheKeyForTheRest(t *testing.T) {
+func TestChangingThePassphraseMovesTheKeyVersionAndOtherComputersEnterItOnce(t *testing.T) {
 	f := newSyncFixture(t, "")
-	b := f.addDevice(t, "stolen laptop")
-	c := f.addDevice(t, "desktop")
+	b := f.addDevice(t, "desktop")
 	if _, err := f.a.Sync(t, settings("theme", "dark", "font", "14")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.Pull(t); err != nil {
 		t.Fatal(err)
 	}
 	oldKey := bytes.Clone(f.a.Key)
 
-	f.a.RemoveDeviceAndRotate(t, c.API, b.API.ID.DeviceID, "correct horse", "")
-	if bytes.Equal(oldKey, f.a.Key) {
-		t.Fatal("the profile key was not rotated")
+	if err := f.a.ChangePassphrase(t, "battery staple", "NEWRECOVERYNEWRECOVER"); err != nil {
+		t.Fatal(err)
 	}
-	if res := b.API.Do(t, "GET", "/v1/sync/manifest", nil); res.Status != http.StatusUnauthorized {
-		t.Fatalf("the removed device still reads the manifest: %s", res)
+	if bytes.Equal(oldKey, f.a.Key) || f.a.KeyVersion != 2 {
+		t.Fatalf("the key was not replaced: key version %d", f.a.KeyVersion)
 	}
-	if res := b.API.Do(t, "GET", "/v1/sync/wraps/passphrase", nil); res.Status != http.StatusUnauthorized {
-		t.Fatalf("the removed device still reads wraps: %s", res)
+	if _, err := b.Pull(t); !errors.Is(err, testkit.ErrKeyChanged) {
+		t.Fatalf("the other computer must notice the key version moved: %v", err)
 	}
-	d := testkit.NewSyncDevice(f.env.device(t, f.a.API, "late joiner"))
-	if err := d.UnlockWithSecret(t, "recovery", "RECOVERYKEYRECOVERYKE"); err == nil {
-		t.Fatal("the old recovery key must stop working when it is not re-entered")
+	if _, err := b.Sync(t, settings("theme", "light", "font", "14")); !errors.Is(err, testkit.ErrKeyChanged) {
+		t.Fatalf("the other computer must not push under the old key: %v", err)
 	}
-
-	got, err := c.Pull(t)
+	if err := b.Unlock(t, "passphrase", passphrase); err == nil {
+		t.Fatal("the old passphrase still opens the new key")
+	}
+	if err := b.Unlock(t, "recovery", recoveryKey); err == nil {
+		t.Fatal("the old recovery key still opens the new key")
+	}
+	if err := b.Unlock(t, "passphrase", "battery staple"); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(b.Key, f.a.Key) || b.KeyVersion != 2 {
+		t.Fatalf("the other computer did not get the new key: key version %d", b.KeyVersion)
+	}
+	got, err := b.Pull(t)
 	if err != nil || !testkit.Equal(got, settings("theme", "dark", "font", "14")) {
-		t.Fatalf("C must pick up the rotated key from its device wrap: %v %v", got, err)
+		t.Fatalf("the data must survive the key change: %v %v", got, err)
 	}
-	if !bytes.Equal(c.Key, f.a.Key) {
-		t.Fatal("C did not adopt the new key")
-	}
-	if _, err := c.Sync(t, settings("theme", "light", "font", "14")); err != nil {
+	if _, err := b.Sync(t, settings("theme", "light", "font", "14")); err != nil {
 		t.Fatal(err)
 	}
 	if got, err := f.a.Pull(t); err != nil || !testkit.Equal(got, settings("theme", "light", "font", "14")) {
-		t.Fatalf("A after C's sync: %v %v", got, err)
+		t.Fatalf("the first computer after the other's sync: %v %v", got, err)
 	}
-	var wraps struct {
-		Wraps []struct {
-			Slot string `json:"slot"`
-		} `json:"wraps"`
-	}
-	f.a.API.Must(t, http.StatusOK, "GET", "/v1/sync/wraps", nil).JSON(t, &wraps)
-	for _, w := range wraps.Wraps {
-		if w.Slot == "device:"+b.API.ID.DeviceID || w.Slot == "recovery" {
-			t.Errorf("wrap %s survived the rotation", w.Slot)
+	for _, slot := range []string{"passphrase", "recovery"} {
+		if v := f.a.API.Must(t, http.StatusOK, "GET", "/v1/sync/wraps/"+slot, nil).Map(t)["keyVersion"]; v != float64(2) {
+			t.Fatalf("the %s wrap holds key version %v", slot, v)
 		}
 	}
 }
 
-func TestRotationIsAtomicAndChecksTheVersion(t *testing.T) {
+func TestTheRecoveryKeyUnlocksAndAnyComputerMaySetANewPassphrase(t *testing.T) {
 	f := newSyncFixture(t, "")
-	b := f.addDevice(t, "second laptop")
 	if _, err := f.a.Sync(t, settings("theme", "dark")); err != nil {
 		t.Fatal(err)
 	}
-	f.a.API.ElevateByApproval(t, b.API)
-	before := f.a.API.Must(t, http.StatusOK, "GET", "/v1/sync/wraps/passphrase", nil).Map(t)["blob"]
-	res := f.a.API.Do(t, "POST", "/v1/sync/rotate", map[string]any{
-		"ifMatch":  99,
-		"manifest": "AAAA",
-		"wraps":    map[string]string{"passphrase": "BBBB"},
-	})
-	if res.Status != http.StatusPreconditionFailed {
-		t.Fatalf("stale rotation: %s", res)
+	c := testkit.NewSyncDevice(f.env.device(t, f.a.API, "new laptop"))
+	if err := c.Unlock(t, "recovery", recoveryKey); err != nil {
+		t.Fatal(err)
 	}
-	after := f.a.API.Must(t, http.StatusOK, "GET", "/v1/sync/wraps/passphrase", nil).Map(t)["blob"]
-	if before != after {
-		t.Fatal("a refused rotation still replaced a wrap")
+	if err := c.ChangePassphrase(t, "a new passphrase", "NEWRECOVERYNEWRECOVER"); err != nil {
+		t.Fatalf("a computer that unlocked with the recovery key replaces the key without approval: %v", err)
 	}
-	if res := f.a.API.Do(t, "POST", "/v1/sync/rotate", map[string]any{"ifMatch": 1, "manifest": "AAAA", "wraps": map[string]string{"device:" + strings.Repeat("a", 26): "BBBB"}}); res.Status != http.StatusNotFound {
-		t.Fatalf("wrap for a device outside the account: %s", res)
+	if _, err := f.a.Pull(t); !errors.Is(err, testkit.ErrKeyChanged) {
+		t.Fatalf("the first computer must notice: %v", err)
+	}
+	if err := f.a.Unlock(t, "passphrase", "a new passphrase"); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := f.a.Pull(t); err != nil || !testkit.Equal(got, settings("theme", "dark")) {
+		t.Fatalf("%v %v", got, err)
+	}
+}
+
+func TestKeyReplacementIsAtomicAndChecksTheVersion(t *testing.T) {
+	f := newSyncFixture(t, "")
+	if _, err := f.a.Sync(t, settings("theme", "dark")); err != nil {
+		t.Fatal(err)
+	}
+	api := f.a.API
+	before := api.Must(t, http.StatusOK, "GET", "/v1/sync/wraps/passphrase", nil).Map(t)
+	full := map[string]string{"manifest": "AAAA", "passphrase": "BBBB", "recovery": "CCCC"}
+	if res := api.Do(t, "POST", "/v1/sync/rotate", full); res.Status != http.StatusPreconditionRequired {
+		t.Fatalf("a replacement without If-Match: %s", res)
+	}
+	res := api.Do(t, "POST", "/v1/sync/rotate", full, "If-Match", "99")
+	if res.Status != http.StatusPreconditionFailed || res.Map(t)["current"].(float64) != 2 {
+		t.Fatalf("a stale replacement: %s", res)
+	}
+	for name, body := range map[string]map[string]string{
+		"no recovery wrap":   {"manifest": "AAAA", "passphrase": "BBBB"},
+		"no passphrase wrap": {"manifest": "AAAA", "recovery": "CCCC"},
+		"no manifest":        {"passphrase": "BBBB", "recovery": "CCCC"},
+	} {
+		if res := api.Do(t, "POST", "/v1/sync/rotate", body, "If-Match", "2"); res.Status != http.StatusBadRequest {
+			t.Errorf("%s: %s", name, res)
+		}
+	}
+	after := api.Must(t, http.StatusOK, "GET", "/v1/sync/wraps/passphrase", nil).Map(t)
+	if before["blob"] != after["blob"] || after["keyVersion"] != float64(1) {
+		t.Fatalf("a refused replacement changed the key: %v", after)
+	}
+	if versions := api.Must(t, http.StatusOK, "GET", "/v1/sync/manifest/versions", nil).Map(t)["versions"].([]any); len(versions) != 2 {
+		t.Fatalf("a refused replacement wrote a manifest: %v", versions)
+	}
+	out := api.Must(t, http.StatusOK, "POST", "/v1/sync/rotate", full, "If-Match", "2").Map(t)
+	if out["version"] != float64(3) || out["keyVersion"] != float64(2) {
+		t.Fatalf("replacement: %v", out)
+	}
+}
+
+func TestDeviceTrustRoutesAreGone(t *testing.T) {
+	f := newSyncFixture(t, "")
+	api := f.a.API
+	for _, route := range [][2]string{
+		{"GET", "/v1/sync/wraps"}, {"PUT", "/v1/sync/wraps/passphrase"}, {"DELETE", "/v1/sync/wraps/recovery"},
+		{"GET", "/v1/devices"}, {"POST", "/v1/devices/invite"}, {"DELETE", "/v1/devices/" + api.ID.DeviceID}, {"DELETE", "/v1/account"},
+		{"GET", "/v1/auth/elevation"}, {"POST", "/v1/auth/elevation/approval"}, {"POST", "/v1/auth/elevation/github"},
+		{"GET", "/v1/auth/approvals"}, {"POST", "/v1/auth/approvals/x/approve"},
+	} {
+		if res := api.Do(t, route[0], route[1], map[string]string{"blob": "AAAA"}); res.Status != http.StatusNotFound && res.Status != http.StatusMethodNotAllowed {
+			t.Errorf("%s %s: %s", route[0], route[1], res)
+		}
+	}
+	if res := api.Do(t, "GET", "/v1/sync/wraps/device:"+api.ID.DeviceID, nil); res.Status != http.StatusBadRequest || errorCode(t, res) != "bad-slot" {
+		t.Errorf("a device wrap slot: %s", res)
+	}
+	info := f.env.anonymous().Must(t, http.StatusOK, "GET", "/v1/info", nil).Map(t)
+	for _, gone := range []string{"approverMinAgeSeconds", "syncGCBound", "deviceInactiveAfterSeconds"} {
+		if _, ok := info[gone]; ok {
+			t.Errorf("/v1/info still has %s", gone)
+		}
 	}
 }
 
@@ -374,11 +459,11 @@ func TestManifestHistoryIsKeptForRecovery(t *testing.T) {
 		} `json:"versions"`
 	}
 	f.a.API.Must(t, http.StatusOK, "GET", "/v1/sync/manifest/versions", nil).JSON(t, &list)
-	if len(list.Versions) != 3 || list.Versions[0].Version != 5 || list.Versions[2].Version != 3 {
+	if len(list.Versions) != 3 || list.Versions[0].Version != 6 || list.Versions[2].Version != 4 {
 		t.Fatalf("versions: %+v", list.Versions)
 	}
-	f.a.API.Must(t, http.StatusOK, "GET", "/v1/sync/manifest?version=3", nil)
-	if res := f.a.API.Do(t, "GET", "/v1/sync/manifest?version=1", nil); res.Status != http.StatusNotFound {
+	f.a.API.Must(t, http.StatusOK, "GET", "/v1/sync/manifest?version=4", nil)
+	if res := f.a.API.Do(t, "GET", "/v1/sync/manifest?version=2", nil); res.Status != http.StatusNotFound {
 		t.Fatalf("pruned version: %s", res)
 	}
 }
@@ -401,8 +486,9 @@ func TestSyncDataIsIsolatedBetweenAccounts(t *testing.T) {
 	if res := stranger.Do(t, "GET", "/v1/sync/blobs/"+blobID, nil); res.Status != http.StatusNotFound {
 		t.Fatalf("another account's blob: %s", res)
 	}
-	if res := stranger.Do(t, "PUT", "/v1/sync/wraps/device:"+f.a.API.ID.DeviceID, map[string]string{"blob": "AAAA"}); res.Status != http.StatusNotFound {
-		t.Fatalf("a wrap for another account's device: %s", res)
+	testkit.NewSyncDevice(stranger).Create(t, "stranger", "STRANGERSTRANGERSTRAN")
+	if err := f.a.Unlock(t, "passphrase", passphrase); err != nil || f.a.KeyVersion != 1 {
+		t.Fatalf("another account's key replacement touched this account: %v %d", err, f.a.KeyVersion)
 	}
 }
 
@@ -412,7 +498,7 @@ func TestSyncRoutesRequireASession(t *testing.T) {
 	for _, route := range [][2]string{
 		{"GET", "/v1/sync/manifest"}, {"PUT", "/v1/sync/manifest"}, {"GET", "/v1/sync/manifest/versions"},
 		{"GET", "/v1/sync/blobs/" + strings.Repeat("A", 43)}, {"PUT", "/v1/sync/blobs/" + strings.Repeat("A", 43)},
-		{"GET", "/v1/sync/wraps"}, {"GET", "/v1/sync/wraps/passphrase"}, {"PUT", "/v1/sync/wraps/passphrase"}, {"DELETE", "/v1/sync/wraps/passphrase"},
+		{"GET", "/v1/sync/wraps/passphrase"}, {"GET", "/v1/sync/wraps/recovery"},
 		{"POST", "/v1/sync/rotate"}, {"POST", "/v1/sync/gc"}, {"GET", "/v1/sync/usage"},
 	} {
 		if res := anon.Do(t, route[0], route[1], nil); res.Status != http.StatusUnauthorized {
@@ -429,55 +515,10 @@ func TestSyncModuleCanBeSwitchedOff(t *testing.T) {
 	}
 }
 
-func TestDestructiveSyncActionsNeedAnotherDevicesApproval(t *testing.T) {
-	f := newSyncFixture(t, "")
-	api := f.a.API
-	if _, err := f.a.Sync(t, settings("theme", "dark")); err != nil {
-		t.Fatal(err)
-	}
-	refused := func(what, method, path string, body any) {
-		t.Helper()
-		res := api.Do(t, method, path, body)
-		if res.Status != http.StatusForbidden || res.Map(t)["error"] != "elevation-required" {
-			t.Errorf("%s was not refused: %s", what, res)
-		}
-	}
-	wrap := map[string]string{"blob": "AAAA"}
-	refused("deleting a wrap", "DELETE", "/v1/sync/wraps/recovery", nil)
-	refused("replacing the passphrase wrap", "PUT", "/v1/sync/wraps/passphrase", wrap)
-	refused("replacing the recovery wrap", "PUT", "/v1/sync/wraps/recovery", wrap)
-	refused("rotation", "POST", "/v1/sync/rotate", map[string]any{"ifMatch": 1, "manifest": "AAAA"})
-	refused("replacing its own device wrap", "PUT", "/v1/sync/wraps/device:"+api.ID.DeviceID, wrap)
-
-	other := f.addDevice(t, "second laptop")
-	if res := other.API.Do(t, "DELETE", "/v1/sync/wraps/recovery", nil); res.Status != http.StatusForbidden {
-		t.Fatalf("the approver is not elevated by approving: %s", res)
-	}
-	api.ElevateByApproval(t, other.API)
-	api.Must(t, http.StatusNoContent, "DELETE", "/v1/sync/wraps/recovery", nil)
-	api.Must(t, http.StatusNoContent, "PUT", "/v1/sync/wraps/passphrase", wrap)
-}
-
-func TestWrapsOfOtherDevicesCannotBeReplacedWithoutApproval(t *testing.T) {
-	f := newSyncFixture(t, "")
-	b := f.addDevice(t, "second laptop")
-	wrap := map[string]string{"blob": "AAAA"}
-	own := "/v1/sync/wraps/device:" + f.a.API.ID.DeviceID
-	other := "/v1/sync/wraps/device:" + b.API.ID.DeviceID
-	for name, path := range map[string]string{"another device's wrap": other, "its own existing wrap": own} {
-		res := f.a.API.Do(t, "PUT", path, wrap)
-		if res.Status != http.StatusForbidden || res.Map(t)["error"] != "elevation-required" {
-			t.Errorf("overwriting %s: %s", name, res)
-		}
-	}
-	f.a.API.ElevateByApproval(t, b.API)
-	f.a.GrantDevice(t, f.a.API)
-}
-
 func TestFloodingManifestsCannotEraseEarlierHistory(t *testing.T) {
 	f := newSyncFixture(t, "[sync]\nmanifest_history = 3\n")
 	api := f.a.API
-	version := 0
+	version := int(f.a.Version)
 	put := func(blob string) {
 		t.Helper()
 		res := api.Must(t, http.StatusOK, "PUT", "/v1/sync/manifest", map[string]string{"blob": blob}, "If-Match", fmt.Sprint(version))
@@ -498,226 +539,12 @@ func TestFloodingManifestsCannotEraseEarlierHistory(t *testing.T) {
 	}
 }
 
-func wrapBlob(t *testing.T, signer testkit.WrapSigner, key []byte, counter uint64, target *testkit.API) string {
-	t.Helper()
-	wrap, err := testkit.WrapForDevice(key, signer, counter, "device:"+target.ID.DeviceID, target.ID.BoxPub())
-	if err != nil {
-		t.Fatal(err)
-	}
-	return testkit.EncodeB64(wrap)
-}
-
 func errorCode(t *testing.T, res testkit.Response) any {
 	t.Helper()
 	return res.Map(t)["error"]
 }
 
-func TestHonestLinkStoresASignedWrapTheJoinerOpens(t *testing.T) {
-	f := newSyncFixture(t, "")
-	api := f.env.device(t, f.a.API, "phone")
-	f.a.GrantDevice(t, api)
-	slot := "/v1/sync/wraps/device:" + api.ID.DeviceID
-	stored := f.a.API.Must(t, http.StatusOK, "GET", slot, nil).Map(t)["blob"].(string)
-	raw, err := testkit.DecodeB64(stored)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if signer, ok := testkit.ParseWrapSigner(raw); !ok || signer != f.a.API.ID.DeviceID {
-		t.Fatalf("stored wrap signer %q", signer)
-	}
-	joiner := testkit.NewSyncDevice(api)
-	if err := joiner.JoinFromDeviceWrap(t, f.a.API.ID.SignPub()); err != nil || !bytes.Equal(joiner.Key, f.a.Key) {
-		t.Fatalf("the joiner must open the approver's signed wrap: %v", err)
-	}
-}
-
-func TestJoinerTrustsOnlyTheApproverKeyItWasGiven(t *testing.T) {
-	f := newSyncFixture(t, "")
-	api := f.env.device(t, f.a.API, "phone")
-	f.a.GrantDevice(t, api)
-	attacker := testkit.NewIdentity("attacker")
-	for name, pub := range map[string][]byte{"swapped key": attacker.SignPub(), "unknown key": nil, "short key": {1, 2, 3}} {
-		joiner := testkit.NewSyncDevice(api)
-		if err := joiner.JoinFromDeviceWrap(t, pub); !errors.Is(err, testkit.ErrBadWrapSignature) || joiner.Key != nil {
-			t.Errorf("%s: %v", name, err)
-		}
-	}
-}
-
-func TestJoinerRefusesAWrapWithAnOldCounter(t *testing.T) {
-	f := newSyncFixture(t, "")
-	b := f.addDevice(t, "second laptop")
-	api := f.env.device(t, f.a.API, "phone")
-	slot := "/v1/sync/wraps/device:" + api.ID.DeviceID
-	asA := testkit.WrapSigner{ID: f.a.API.ID.DeviceID, Sign: f.a.API.ID.Sign}
-	f.a.API.Must(t, http.StatusNoContent, "PUT", slot, map[string]string{"blob": wrapBlob(t, asA, f.a.Key, 0, api)})
-	if err := testkit.NewSyncDevice(api).JoinFromDeviceWrap(t, f.a.API.ID.SignPub()); !errors.Is(err, testkit.ErrBadWrapCounter) {
-		t.Fatalf("counter 0: %v", err)
-	}
-	if _, err := f.a.Sync(t, settings("theme", "dark")); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := f.a.Sync(t, settings("theme", "light")); err != nil {
-		t.Fatal(err)
-	}
-	f.a.API.ElevateByApproval(t, b.API)
-	f.a.API.Must(t, http.StatusNoContent, "PUT", slot, map[string]string{"blob": wrapBlob(t, asA, f.a.Key, 1, api)})
-	if err := testkit.NewSyncDevice(api).JoinFromDeviceWrap(t, f.a.API.ID.SignPub()); !errors.Is(err, testkit.ErrBadWrapCounter) {
-		t.Fatalf("a counter below the manifest it opens: %v", err)
-	}
-}
-
-func TestRekeyOnlyFollowsASignerPinnedInTheLastManifest(t *testing.T) {
-	f := newSyncFixture(t, "")
-	b := f.addDevice(t, "second laptop")
-	c := f.addDevice(t, "third laptop")
-	if _, err := f.a.Sync(t, settings("theme", "dark")); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := b.Pull(t); err != nil {
-		t.Fatal(err)
-	}
-	b.Approved = nil
-	f.a.RemoveDeviceAndRotate(t, b.API, c.API.ID.DeviceID, "correct horse", "")
-	if _, err := b.Pull(t); !errors.Is(err, testkit.ErrKeyUnknown) {
-		t.Fatalf("a wrap from a signer that is not pinned must not be adopted: %v", err)
-	}
-}
-
-func TestWrapsThatAreNotSignedByTheUploaderAreRefused(t *testing.T) {
-	f := newSyncFixture(t, "")
-	b := f.addDevice(t, "second laptop")
-	attacker := testkit.NewIdentity("attacker")
-	key := testkit.NewProfileKey()
-	ownSlot := "/v1/sync/wraps/device:" + b.API.ID.DeviceID
-	fresh := f.env.device(t, f.a.API, "fresh")
-	freshSlot := "/v1/sync/wraps/device:" + fresh.ID.DeviceID
-	asA := testkit.WrapSigner{ID: f.a.API.ID.DeviceID, Sign: f.a.API.ID.Sign}
-
-	unsigned, _ := testkit.DecodeB64(wrapBlob(t, asA, key, 1, fresh))
-	unsigned = unsigned[:len(unsigned)-64]
-	forgedSig := wrapBlob(t, testkit.WrapSigner{ID: f.a.API.ID.DeviceID, Sign: attacker.Sign}, key, 1, fresh)
-	for name, blob := range map[string]string{
-		"garbage":           "AAAA",
-		"unsigned":          testkit.EncodeB64(unsigned),
-		"signed by a thief": forgedSig,
-	} {
-		res := f.a.API.Do(t, "PUT", freshSlot, map[string]string{"blob": blob})
-		if res.Status != http.StatusBadRequest || errorCode(t, res) != "bad-wrap" {
-			t.Errorf("%s: %s", name, res)
-		}
-	}
-	if res := f.a.API.Do(t, "GET", freshSlot, nil); res.Status != http.StatusNotFound {
-		t.Fatalf("a refused wrap was stored: %s", res)
-	}
-
-	asB := testkit.WrapSigner{ID: b.API.ID.DeviceID, Sign: b.API.ID.Sign}
-	res := f.a.API.Do(t, "PUT", freshSlot, map[string]string{"blob": wrapBlob(t, asB, key, 1, fresh)})
-	if res.Status != http.StatusForbidden || errorCode(t, res) != "wrong-signer" {
-		t.Fatalf("a wrap signed by another device of the account: %s", res)
-	}
-	impersonation := wrapBlob(t, asA, key, 1, fresh)
-	res = b.API.Do(t, "PUT", freshSlot, map[string]string{"blob": impersonation})
-	if res.Status != http.StatusForbidden || errorCode(t, res) != "wrong-signer" {
-		t.Fatalf("a device naming another as signer: %s", res)
-	}
-
-	moved := wrapBlob(t, asA, key, 1, b.API)
-	res = f.a.API.Do(t, "PUT", freshSlot, map[string]string{"blob": moved})
-	if res.Status != http.StatusBadRequest || errorCode(t, res) != "bad-wrap" {
-		t.Fatalf("a wrap signed for another slot: %s", res)
-	}
-	if res := f.a.API.Do(t, "GET", ownSlot, nil); res.Status != http.StatusOK {
-		t.Fatalf("%s", res)
-	}
-}
-
-func TestRotationWithABadWrapSignatureChangesNothing(t *testing.T) {
-	f := newSyncFixture(t, "")
-	b := f.addDevice(t, "second laptop")
-	if _, err := f.a.Sync(t, settings("theme", "dark")); err != nil {
-		t.Fatal(err)
-	}
-	f.a.API.ElevateByApproval(t, b.API)
-	before := f.a.API.Must(t, http.StatusOK, "GET", "/v1/sync/wraps/device:"+b.API.ID.DeviceID, nil).Map(t)["blob"]
-	attacker := testkit.NewIdentity("attacker")
-	newKey := testkit.NewProfileKey()
-	bad := wrapBlob(t, testkit.WrapSigner{ID: f.a.API.ID.DeviceID, Sign: attacker.Sign}, newKey, 2, b.API)
-	res := f.a.API.Do(t, "POST", "/v1/sync/rotate", map[string]any{
-		"ifMatch":  1,
-		"manifest": testkit.EncodeB64(testkit.SealManifest(newKey, testkit.Manifest{Counter: 2})),
-		"wraps":    map[string]string{"device:" + b.API.ID.DeviceID: bad},
-	})
-	if res.Status != http.StatusBadRequest || errorCode(t, res) != "bad-wrap" {
-		t.Fatalf("rotation with a forged wrap: %s", res)
-	}
-	good := wrapBlob(t, testkit.WrapSigner{ID: f.a.API.ID.DeviceID, Sign: f.a.API.ID.Sign}, newKey, 2, b.API)
-	c := f.env.device(t, f.a.API, "third")
-	res = f.a.API.Do(t, "POST", "/v1/sync/rotate", map[string]any{
-		"ifMatch":  1,
-		"manifest": testkit.EncodeB64(testkit.SealManifest(newKey, testkit.Manifest{Counter: 2})),
-		"wraps": map[string]string{
-			"device:" + b.API.ID.DeviceID: good,
-			"device:" + c.ID.DeviceID:     wrapBlob(t, testkit.WrapSigner{ID: f.a.API.ID.DeviceID, Sign: attacker.Sign}, newKey, 2, c),
-		},
-	})
-	if res.Status != http.StatusBadRequest || errorCode(t, res) != "bad-wrap" {
-		t.Fatalf("rotation with one valid and one forged wrap: %s", res)
-	}
-	asB := testkit.WrapSigner{ID: b.API.ID.DeviceID, Sign: b.API.ID.Sign}
-	res = f.a.API.Do(t, "POST", "/v1/sync/rotate", map[string]any{
-		"ifMatch":  1,
-		"manifest": testkit.EncodeB64(testkit.SealManifest(newKey, testkit.Manifest{Counter: 2})),
-		"wraps":    map[string]string{"device:" + b.API.ID.DeviceID: wrapBlob(t, asB, newKey, 2, b.API)},
-	})
-	if res.Status != http.StatusForbidden || errorCode(t, res) != "wrong-signer" {
-		t.Fatalf("rotation with a wrap signed by another device: %s", res)
-	}
-	after := f.a.API.Must(t, http.StatusOK, "GET", "/v1/sync/wraps/device:"+b.API.ID.DeviceID, nil).Map(t)["blob"]
-	if before != after {
-		t.Fatal("a refused rotation replaced a wrap")
-	}
-	versions := f.a.API.Must(t, http.StatusOK, "GET", "/v1/sync/manifest/versions", nil).Map(t)["versions"].([]any)
-	if len(versions) != 1 {
-		t.Fatalf("a refused rotation wrote a manifest: %v", versions)
-	}
-}
-
-func TestInfoExposesTheApproverMinimumAge(t *testing.T) {
-	e := newEnv(t, "[auth]\napprover_min_age = \"36h\"\n")
-	info := e.anonymous().Must(t, http.StatusOK, "GET", "/v1/info", nil).Map(t)
-	if got := info["approverMinAgeSeconds"]; got != float64(int64(36*time.Hour/time.Second)) {
-		t.Fatalf("approverMinAgeSeconds: %v", got)
-	}
-}
-
-func TestRekeyRefusesASignerThatBackdatedItsOwnManifestEntry(t *testing.T) {
-	f := newSyncFixture(t, "")
-	b := f.addDevice(t, "second laptop")
-	c := f.addDevice(t, "third laptop")
-	clock := time.Now()
-	b.Now = func() time.Time { return clock }
-	b.MinSignerAge = 24 * time.Hour
-	f.a.Approved[0].CreatedAt = time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC).UnixMilli()
-	if _, err := f.a.Sync(t, settings("theme", "dark")); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := b.Pull(t); err != nil {
-		t.Fatal(err)
-	}
-	f.a.RemoveDeviceAndRotate(t, b.API, c.API.ID.DeviceID, "correct horse", "")
-
-	clock = clock.Add(time.Hour)
-	if _, err := b.Pull(t); !errors.Is(err, testkit.ErrSignerTooYoung) {
-		t.Fatalf("a signer first seen an hour ago with a backdated entry must be refused: %v", err)
-	}
-	clock = clock.Add(24 * time.Hour)
-	if _, err := b.Pull(t); err != nil || !bytes.Equal(b.Key, f.a.Key) {
-		t.Fatalf("a signer first seen more than a day ago is accepted: %v", err)
-	}
-}
-
-func TestGarbageCollectionNeedsNoApprovalButACurrentDevice(t *testing.T) {
+func TestGarbageCollectionNeedsNoApproval(t *testing.T) {
 	f := newSyncFixture(t, "[sync]\ngc_grace = \"0s\"\n")
 	for _, theme := range []string{"dark", "light"} {
 		if _, err := f.a.Sync(t, settings("theme", theme)); err != nil {
@@ -727,23 +554,11 @@ func TestGarbageCollectionNeedsNoApprovalButACurrentDevice(t *testing.T) {
 	if res := f.env.anonymous().Do(t, "POST", "/v1/sync/gc", map[string]any{"keep": []string{}}); res.Status != http.StatusUnauthorized {
 		t.Fatalf("garbage collection without a session: %s", res)
 	}
-	if f.a.API.Elevated(t) {
-		t.Fatal("the device must not be elevated for this test to mean anything")
-	}
 	if deleted := f.a.CollectGarbage(t); deleted != 1 {
-		t.Fatalf("an unelevated current device must be able to collect garbage: deleted %d", deleted)
+		t.Fatalf("a signed-in device must be able to collect garbage: deleted %d", deleted)
 	}
 	if got, err := f.a.Pull(t); err != nil || !testkit.Equal(got, settings("theme", "light")) {
 		t.Fatalf("referenced blob lost: %v %v", got, err)
-	}
-}
-
-func TestADeviceThatLeftCannotCollectGarbage(t *testing.T) {
-	f := newSyncFixture(t, "")
-	second := f.addDevice(t, "second laptop")
-	second.API.Must(t, http.StatusNoContent, "DELETE", "/v1/devices/"+second.API.ID.DeviceID, nil)
-	if res := second.API.Do(t, "POST", "/v1/sync/gc", map[string]any{"keep": []string{}}); res.Status != http.StatusUnauthorized {
-		t.Fatalf("a device that left must not reach the account: %s", res)
 	}
 }
 
@@ -758,37 +573,28 @@ func TestGarbageCollectionIsBoundToTheManifestVersion(t *testing.T) {
 	if res := f.a.API.Do(t, "POST", "/v1/sync/gc", empty); res.Status != http.StatusPreconditionRequired {
 		t.Fatalf("gc without If-Match: %s", res)
 	}
-	stale := f.a.API.Do(t, "POST", "/v1/sync/gc", empty, "If-Match", "1")
-	if stale.Status != http.StatusPreconditionFailed || stale.Map(t)["error"] != "version-mismatch" || stale.Map(t)["current"].(float64) != 2 {
+	stale := f.a.API.Do(t, "POST", "/v1/sync/gc", empty, "If-Match", "2")
+	if stale.Status != http.StatusPreconditionFailed || stale.Map(t)["error"] != "version-mismatch" || stale.Map(t)["current"].(float64) != 3 {
 		t.Fatalf("gc against a manifest that moved: %s", stale)
 	}
 	usage := f.a.API.Must(t, http.StatusOK, "GET", "/v1/sync/usage", nil).Map(t)
 	if usage["blobs"].(float64) != 2 {
 		t.Fatalf("a refused gc deleted blobs: %v", usage)
 	}
-	info := f.env.anonymous().Must(t, http.StatusOK, "GET", "/v1/info", nil).Map(t)
-	if info["syncGCBound"] != true {
-		t.Fatalf("/v1/info must advertise the bound gc: %v", info)
-	}
 }
 
-func TestGarbageCollectionNeedsTheDevicesSignatureAndAnEstablishedDevice(t *testing.T) {
+func TestGarbageCollectionNeedsTheDevicesSignature(t *testing.T) {
 	f := newSyncFixture(t, "[sync]\ngc_grace = \"0s\"\n")
 	if _, err := f.a.Sync(t, settings("theme", "dark")); err != nil {
 		t.Fatal(err)
 	}
 	stolen := stolenCopy(f.env, f.a.API)
-	bare := stolen.Do(t, "POST", "/v1/sync/gc", map[string]any{"keep": []string{}}, "If-Match", "1")
+	bare := stolen.Do(t, "POST", "/v1/sync/gc", map[string]any{"keep": []string{}}, "If-Match", "2")
 	if bare.Status != http.StatusForbidden || bare.Map(t)["error"] != "device-signature-required" {
 		t.Fatalf("garbage collection with a bare token: %s", bare)
 	}
 	if usage := f.a.API.Must(t, http.StatusOK, "GET", "/v1/sync/usage", nil).Map(t); usage["blobs"].(float64) != 1 {
 		t.Fatalf("a bare token deleted blobs: %v", usage)
-	}
-	young := newSyncFixture(t, "[auth]\napprover_min_age = \"24h\"\n[sync]\ngc_grace = \"0s\"\n")
-	res := young.a.API.Do(t, "POST", "/v1/sync/gc", map[string]any{"keep": []string{}}, "If-Match", "0")
-	if res.Status != http.StatusForbidden || res.Map(t)["error"] != "device-too-new" {
-		t.Fatalf("a device still on probation must not collect garbage: %s", res)
 	}
 }
 
@@ -820,7 +626,7 @@ func TestGarbageCollectionAndBlobUploadsNeverLeaveARowWithoutItsFile(t *testing.
 		}()
 		go func() {
 			defer wg.Done()
-			f.a.API.Do(t, "POST", "/v1/sync/gc", map[string]any{"keep": []string{}}, "If-Match", "1")
+			f.a.API.Do(t, "POST", "/v1/sync/gc", map[string]any{"keep": []string{}}, "If-Match", "2")
 		}()
 		wg.Wait()
 		if status != http.StatusOK && status != http.StatusCreated {

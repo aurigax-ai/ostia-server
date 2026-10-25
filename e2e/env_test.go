@@ -1,11 +1,9 @@
 package e2e
 
 import (
-	"net/http"
 	"os"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/aurigax-ai/ostia-server/internal/testkit"
 )
@@ -33,10 +31,10 @@ func TestMain(m *testing.M) {
 }
 
 type env struct {
-	proc     *testkit.Process
-	net      testkit.Net
-	accounts map[string][]*testkit.API
-	joined   map[string]time.Time
+	proc        *testkit.Process
+	net         testkit.Net
+	gh          *testkit.FakeGitHub
+	githubUsers map[string]int64
 }
 
 func newEnv(t *testing.T, extra string) *env {
@@ -50,7 +48,21 @@ func newEnvModules(t *testing.T, modules, extra string) *env {
 		APIDomain: apiHost, RelayDomain: relayHost,
 		CertFile: pki.CertFile, KeyFile: pki.KeyFile, Modules: modules, Extra: extra,
 	})
-	return &env{proc: proc, net: testkit.Net{HTTPSAddr: proc.HTTPSAddr, Roots: pki.Roots, APIHost: apiHost}, accounts: map[string][]*testkit.API{}, joined: map[string]time.Time{}}
+	return &env{proc: proc, net: testkit.Net{HTTPSAddr: proc.HTTPSAddr, Roots: pki.Roots, APIHost: apiHost}, githubUsers: map[string]int64{}}
+}
+
+func githubConfig(gh *testkit.FakeGitHub, extra string) string {
+	extra = testkit.WithKey(extra, "[auth]", "github_client_id", `"test-client"`)
+	extra = testkit.WithKey(extra, "[auth]", "github_base_url", `"`+gh.Server.URL+`"`)
+	return testkit.WithKey(extra, "[auth]", "github_api_url", `"`+gh.Server.URL+`"`)
+}
+
+func newGitHubEnv(t *testing.T, extra string) *env {
+	t.Helper()
+	gh := testkit.NewFakeGitHub(t, 1)
+	e := newEnv(t, githubConfig(gh, extra))
+	e.gh = gh
+	return e
 }
 
 func (e *env) invite(t *testing.T) string {
@@ -64,39 +76,32 @@ func (e *env) user(t *testing.T, name string) *testkit.API {
 	t.Helper()
 	api := testkit.NewAPI(e.net, testkit.NewIdentity(name))
 	api.Onboard(t, e.invite(t))
-	e.accounts[api.ID.AccountID] = append(e.accounts[api.ID.AccountID], api)
-	e.joined[api.ID.DeviceID] = time.Now()
+	return api
+}
+
+func (e *env) githubUser(t *testing.T, name string) *testkit.API {
+	t.Helper()
+	user := int64(len(e.githubUsers) + 1000)
+	e.gh.SetUser(user)
+	api, account := githubSignIn(t, e, e.gh, name)
+	e.githubUsers[account] = user
 	return api
 }
 
 func (e *env) device(t *testing.T, owner *testkit.API, name string) *testkit.API {
 	t.Helper()
-	known := e.accounts[owner.ID.AccountID]
-	if len(known) >= 2 {
-		for _, other := range known {
-			if other != owner && other.Do(t, "GET", "/v1/devices", nil).Status == http.StatusOK {
-				owner.ElevateByApproval(t, other)
-				break
-			}
-		}
+	user, ok := e.githubUsers[owner.ID.AccountID]
+	if !ok {
+		t.Fatal("a second device of an account signs in with the account's GitHub user; create the owner with githubUser")
 	}
-	code := owner.Must(t, http.StatusCreated, "POST", "/v1/devices/invite", nil).Map(t)["code"].(string)
-	api := testkit.NewAPI(e.net, testkit.NewIdentity(name))
-	api.Onboard(t, code)
-	e.accounts[owner.ID.AccountID] = append(e.accounts[owner.ID.AccountID], api)
-	e.joined[api.ID.DeviceID] = time.Now()
+	e.gh.SetUser(user)
+	api, account := githubSignIn(t, e, e.gh, name)
+	if account != owner.ID.AccountID {
+		t.Fatalf("the second device landed in account %s, want %s", account, owner.ID.AccountID)
+	}
 	return api
 }
 
 func (e *env) anonymous() *testkit.API {
 	return testkit.NewAPI(e.net, testkit.NewIdentity("anonymous"))
-}
-
-func (e *env) waitUntilOlderThan(t *testing.T, api *testkit.API, age time.Duration) {
-	t.Helper()
-	joined, ok := e.joined[api.ID.DeviceID]
-	if !ok {
-		joined = time.Now()
-	}
-	waitUntil(t, "the device is older than the approval age", func() bool { return time.Since(joined) > age+100*time.Millisecond })
 }

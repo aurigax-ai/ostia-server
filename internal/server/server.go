@@ -112,7 +112,7 @@ func New(cfg config.Config, opts Options) (*Server, error) {
 	s.Auth.Mount(mux)
 	if cfg.RelayEnabled() {
 		s.Relay = relay.New(db, s.Auth, cfg.Relay, cfg.Domains.Relay, cfg.Domains.Port, now)
-		s.Auth.Hooks = auth.Hooks{DeviceAdded: s.Relay.NotifyDeviceAdded, SessionEnded: s.Relay.KickSession, DeviceRevoked: s.Relay.KickDevice, AccountDeleted: s.Relay.KickDevices}
+		s.Auth.Hooks = auth.Hooks{SessionEnded: s.Relay.KickSession, DeviceRevoked: s.Relay.KickDevice, AccountDeleted: s.Relay.KickDevices}
 		s.Relay.Mount(mux)
 	}
 	if cfg.PublishEnabled() {
@@ -187,11 +187,8 @@ func (s *Server) info(w http.ResponseWriter, r *http.Request) error {
 			"sync":    s.Cfg.SyncEnabled(),
 			"push":    s.Cfg.PushEnabled(),
 		},
-		"auth":                       map[string]bool{"invite": true, "github": s.Auth.GitHub != nil},
-		"approverMinAgeSeconds":      int64(s.Cfg.Auth.ApproverMinAge.Std() / time.Second),
-		"relayDomain":                s.Cfg.Domains.Relay,
-		"syncGCBound":                true,
-		"deviceInactiveAfterSeconds": int64(s.Cfg.Devices.InactiveAfter.Std() / time.Second),
+		"auth":        map[string]bool{"invite": true, "github": s.Auth.GitHub != nil},
+		"relayDomain": s.Cfg.Domains.Relay,
 		"limits": map[string]any{
 			"shareMaxBytes":  s.Cfg.Publish.MaxFileBytes,
 			"allowPublic":    s.Cfg.Publish.AllowPublic,
@@ -430,7 +427,6 @@ func (s *Server) sweep(ctx context.Context) {
 	for name, task := range map[string]func(context.Context) error{
 		"sessions":     s.DB.SweepSessions,
 		"invites":      s.DB.SweepInvites,
-		"approvals":    s.DB.SweepApprovals,
 		"push tickets": s.DB.SweepPushTickets,
 		"wal":          s.DB.CheckpointWAL,
 		"revoked devices": func(ctx context.Context) error {

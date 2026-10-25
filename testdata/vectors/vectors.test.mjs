@@ -1,23 +1,11 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
-import {
-  argon2Sync,
-  createCipheriv,
-  createDecipheriv,
-  createHash,
-  createHmac,
-  createPrivateKey,
-  createPublicKey,
-  diffieHellman,
-  hkdfSync,
-  verify,
-} from 'node:crypto'
+import { argon2Sync, createCipheriv, createDecipheriv, createHash, createHmac, createPublicKey, hkdfSync, verify } from 'node:crypto'
 
 const read = (name) => JSON.parse(readFileSync(new URL(name, import.meta.url), 'utf8'))
 const sync = read('sync.json')
 const auth = read('auth.json')
-const link = read('link.json')
 
 const b64 = (text) => Buffer.from(text, 'base64url')
 const toB64 = (bytes) => Buffer.from(bytes).toString('base64url')
@@ -89,74 +77,7 @@ test('passphrase wrap matches and opens', () => {
   assert.equal(toB64(sealWithNonce(key, profileKey, aad, b64(sync.wrapNonce))), toB64(wrap.subarray(23)))
 })
 
-const x25519Private = (raw) => createPrivateKey({ key: Buffer.concat([Buffer.from('302e020100300506032b656e04220420', 'hex'), raw]), format: 'der', type: 'pkcs8' })
-const x25519Public = (raw) => createPublicKey({ key: Buffer.concat([Buffer.from('302a300506032b656e032100', 'hex'), raw]), format: 'der', type: 'spki' })
-
 const ed25519Public = (raw) => createPublicKey({ key: Buffer.concat([Buffer.from('302a300506032b6570032100', 'hex'), raw]), format: 'der', type: 'spki' })
-
-function splitDeviceWrap(wrap) {
-  assert.equal(wrap[0], 2)
-  const idLen = wrap[1]
-  const counterAt = 2 + idLen
-  const headerLen = counterAt + 8 + 32 + 12
-  const sigAt = wrap.length - 64
-  return {
-    signerId: wrap.subarray(2, counterAt).toString(),
-    counter: wrap.readBigUInt64BE(counterAt),
-    ephemeral: wrap.subarray(counterAt + 8, counterAt + 40),
-    header: wrap.subarray(0, headerLen),
-    sealed: wrap.subarray(headerLen - 12, sigAt),
-    signed: wrap.subarray(0, sigAt),
-    signature: wrap.subarray(sigAt),
-  }
-}
-
-const wrapSignatureMessage = (slot, signed) => Buffer.concat([Buffer.from(sync.wrapSignatureContext), Buffer.from(`${slot}\n`), signed])
-const signerPub = ed25519Public(b64(sync.wrapSignerSignPub))
-
-test('device wrap v2 opens with the device key, matches with the fixed ephemeral key and verifies', () => {
-  const parts = splitDeviceWrap(b64(sync.deviceWrap))
-  assert.equal(parts.signerId, sync.wrapSignerId)
-  assert.equal(parts.counter, BigInt(sync.wrapCounter))
-  const devicePub = b64(sync.deviceBoxPublicKey)
-  const deriveKey = (shared) =>
-    Buffer.from(hkdfSync('sha256', shared, Buffer.alloc(0), Buffer.concat([Buffer.from('ostia-sync/wrap/device'), parts.ephemeral, devicePub]), 32))
-  const aad = Buffer.concat([parts.header, Buffer.from(sync.wrapSlot)])
-  const shared = diffieHellman({ privateKey: x25519Private(b64(sync.deviceBoxPrivateKey)), publicKey: x25519Public(parts.ephemeral) })
-  assert.deepEqual(open(deriveKey(shared), parts.sealed, aad), profileKey)
-
-  const ephemeralShared = diffieHellman({ privateKey: x25519Private(b64(sync.ephemeralPrivateKey)), publicKey: x25519Public(devicePub) })
-  assert.equal(toB64(sealWithNonce(deriveKey(ephemeralShared), profileKey, aad, b64(sync.deviceWrapNonce))), toB64(parts.sealed))
-
-  assert.ok(verify(null, wrapSignatureMessage(sync.wrapSlot, parts.signed), signerPub, parts.signature))
-  assert.ok(!verify(null, wrapSignatureMessage('device:other', parts.signed), signerPub, parts.signature))
-})
-
-test('forged and tampered device wraps fail the signature', () => {
-  for (const blob of [sync.wrongKeySignedWrap, sync.tamperedWrap]) {
-    const parts = splitDeviceWrap(b64(blob))
-    assert.ok(!verify(null, wrapSignatureMessage(sync.wrapSlot, parts.signed), signerPub, parts.signature))
-  }
-})
-
-const base32 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567'
-
-function linkCode(joinerSignPub, joinerBoxPub, approverSignPub) {
-  const digest = createHash('sha256')
-    .update(Buffer.concat([Buffer.from(link.tag), b64(joinerSignPub), b64(joinerBoxPub), b64(approverSignPub)]))
-    .digest()
-  const bits = [...digest.subarray(0, 16)].map((byte) => byte.toString(2).padStart(8, '0')).join('')
-  const chars = Array.from({ length: 25 }, (_, i) => base32[parseInt(bits.slice(i * 5, i * 5 + 5), 2)])
-  return Array.from({ length: 5 }, (_, i) => chars.slice(i * 5, i * 5 + 5).join('')).join('-')
-}
-
-test('link code matches and binds the joiner box key', () => {
-  assert.equal(link.tag, 'ostia-sync/link-code/v1\n')
-  assert.match(link.linkCode, /^([A-Z2-7]{5}-){4}[A-Z2-7]{5}$/)
-  assert.equal(linkCode(link.joinerSignPub, link.joinerBoxPub, link.approverSignPub), link.linkCode)
-  assert.equal(linkCode(link.joinerSignPub, link.swappedJoinerBoxPub, link.approverSignPub), link.swappedBoxLinkCode)
-  assert.notEqual(link.linkCode, link.swappedBoxLinkCode)
-})
 
 test('registration proof and challenge signature verify', () => {
   const pub = ed25519Public(b64(auth.signPub))
@@ -184,13 +105,9 @@ test('signed wrap read and manifest push bind slot, version and body', () => {
   assert.ok(!ok(auth.wrapReadMessage, auth.manifestPutSignature))
 })
 
-test('signed revoke and garbage collection bind the target, version and body', () => {
+test('signed garbage collection and key replacement bind the version and body', () => {
   const pub = ed25519Public(b64(auth.signPub))
   const ok = (message, signature) => verify(null, Buffer.from(message), pub, b64(signature))
-  assert.equal(auth.revokeMessage, `ostia-server/revoke/v2\n${auth.deviceId}\n${auth.timestamp}\n${auth.revokeTarget}`)
-  assert.ok(ok(auth.revokeMessage, auth.revokeSignature))
-  assert.ok(!ok(auth.revokeMessage.replace(auth.revokeTarget, auth.deviceId), auth.revokeSignature))
-  assert.ok(!ok(auth.revokeMessage.replace(String(auth.timestamp), String(auth.timestamp + 1)), auth.revokeSignature))
   const gcHash = createHash('sha256').update(auth.syncGcBody).digest('base64url')
   assert.equal(auth.syncGcBodyHash, gcHash)
   assert.equal(auth.syncGcMessage, `ostia-server/sync-gc/v1\n${auth.deviceId}\n${auth.timestamp}\n${auth.ifMatch}\n${gcHash}`)
@@ -198,6 +115,19 @@ test('signed revoke and garbage collection bind the target, version and body', (
   const otherBody = createHash('sha256').update('{"keep":[]}').digest('base64url')
   assert.ok(!ok(auth.syncGcMessage.replace(gcHash, otherBody), auth.syncGcSignature))
   assert.ok(!ok(auth.syncGcMessage.replace(`\n${auth.ifMatch}\n`, `\n${auth.ifMatch + 1}\n`), auth.syncGcSignature))
-  assert.ok(!ok(auth.syncGcMessage, auth.manifestPutSignature))
-  assert.ok(!ok(auth.manifestPutMessage, auth.syncGcSignature))
+  const rotateHash = createHash('sha256').update(auth.syncRotateBody).digest('base64url')
+  assert.equal(auth.syncRotateBodyHash, rotateHash)
+  assert.equal(auth.syncRotateMessage, `ostia-server/sync-rotate/v1\n${auth.deviceId}\n${auth.timestamp}\n${auth.ifMatch}\n${rotateHash}`)
+  assert.ok(ok(auth.syncRotateMessage, auth.syncRotateSignature))
+  assert.ok(!ok(auth.syncRotateMessage.replace(rotateHash, otherBody), auth.syncRotateSignature))
+  assert.ok(!ok(auth.syncRotateMessage.replace(`\n${auth.ifMatch}\n`, `\n${auth.ifMatch + 1}\n`), auth.syncRotateSignature))
+  for (const [message, signature] of [
+    [auth.syncGcMessage, auth.manifestPutSignature],
+    [auth.manifestPutMessage, auth.syncGcSignature],
+    [auth.syncRotateMessage, auth.manifestPutSignature],
+    [auth.manifestPutMessage, auth.syncRotateSignature],
+    [auth.syncRotateMessage, auth.syncGcSignature],
+  ]) {
+    assert.ok(!ok(message, signature))
+  }
 })

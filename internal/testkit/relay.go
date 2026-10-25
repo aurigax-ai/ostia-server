@@ -106,7 +106,6 @@ type RelayDesktop struct {
 	Pings   int
 	control *websocket.Conn
 	streams map[string]string
-	Added   []string
 }
 
 func (d *RelayDesktop) Prepare(t testing.TB) {
@@ -150,7 +149,6 @@ func (d *RelayDesktop) Listen(t testing.TB) {
 				Stream string `json:"stream"`
 				Peer   string `json:"peer"`
 				Family int    `json:"family"`
-				Name   string `json:"name"`
 			}
 			if json.Unmarshal(data, &msg) != nil {
 				continue
@@ -161,10 +159,6 @@ func (d *RelayDesktop) Listen(t testing.TB) {
 				d.Pings++
 				d.mu.Unlock()
 				_ = control.Write(ctx, websocket.MessageText, []byte(`{"t":"pong"}`))
-			case "device-added":
-				d.mu.Lock()
-				d.Added = append(d.Added, msg.Name)
-				d.mu.Unlock()
 			case "incoming":
 				d.mu.Lock()
 				d.streams[msg.Peer] = msg.Stream
@@ -221,12 +215,6 @@ func (d *RelayDesktop) Stop() {
 		d.cancel()
 	}
 	d.wg.Wait()
-}
-
-func (d *RelayDesktop) AddedDevices() []string {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	return append([]string(nil), d.Added...)
 }
 
 func (d *RelayDesktop) PingCount() int {

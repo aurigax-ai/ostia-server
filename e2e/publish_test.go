@@ -425,9 +425,7 @@ func TestDeleteAccountRemovesItsShares(t *testing.T) {
 	e := newEnv(t, "")
 	owner := e.user(t, "desktop")
 	sh := owner.PublishHTML(t, testkit.ShareOptions{Mode: "link", HTML: artifactHTML})
-	second := e.device(t, owner, "phone")
-	owner.ElevateByApproval(t, second)
-	owner.Must(t, http.StatusNoContent, "DELETE", "/v1/account", nil)
+	e.proc.Admin(t, "delete-account", owner.ID.AccountID)
 	if meta := e.net.ShareGet(t, sh.ID, "/meta"); meta.Status != http.StatusNotFound {
 		t.Fatalf("share of a deleted account: %s", meta)
 	}

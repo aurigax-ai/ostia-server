@@ -31,36 +31,22 @@ type env struct {
 	stamp    int64
 }
 
-func (e *env) deviceHeaders(t *testing.T, method, path, token string) map[string]string {
-	t.Helper()
+func (e *env) deviceHeaders(method, path, token string) map[string]string {
 	d := e.owners[token]
-	if d == nil || e.unsigned[token] {
+	if d == nil || e.unsigned[token] || method != "POST" || path != signedPath {
 		return nil
 	}
-	sign := func(message []byte) string { return httpx.EncodeB64(ed25519.Sign(d.sign, message)) }
-	switch {
-	case method == "POST" && path == "/v1/devices/invite":
-		e.stamp = max(e.clock.UnixMilli(), e.stamp+1)
-		return map[string]string{timestampHeader: strconv.FormatInt(e.stamp, 10), signatureHeader: sign(InviteMessage(d.id, e.stamp))}
-	case method == "POST" && path == "/v1/auth/elevation/approval":
-		e.stamp = max(e.clock.UnixMilli(), e.stamp+1)
-		return map[string]string{timestampHeader: strconv.FormatInt(e.stamp, 10), signatureHeader: sign(ElevateMessage(d.id, e.stamp))}
-	case method == "DELETE" && strings.HasPrefix(path, "/v1/devices/"):
-		e.stamp = max(e.clock.UnixMilli(), e.stamp+1)
-		return map[string]string{timestampHeader: strconv.FormatInt(e.stamp, 10), signatureHeader: sign(RevokeMessage(d.id, e.stamp, strings.TrimPrefix(path, "/v1/devices/")))}
-	case method == "POST" && strings.HasPrefix(path, "/v1/auth/approvals/") && strings.HasSuffix(path, "/approve"):
-		id := strings.TrimSuffix(strings.TrimPrefix(path, "/v1/auth/approvals/"), "/approve")
-		dev, err := e.svc.DB.Device(t.Context(), d.id)
-		if err != nil {
-			return nil
-		}
-		pending, err := e.svc.DB.PendingApproval(t.Context(), id, dev.AccountID)
-		if err != nil {
-			return nil
-		}
-		return map[string]string{signatureHeader: sign(ApproveMessage(d.id, id, pending.RequesterDeviceID))}
-	}
-	return nil
+	e.stamp = max(e.clock.UnixMilli(), e.stamp+1)
+	return map[string]string{timestampHeader: strconv.FormatInt(e.stamp, 10), signatureHeader: httpx.EncodeB64(ed25519.Sign(d.sign, signedMessage(d.id, e.stamp)))}
+}
+
+const (
+	signedPath    = "/test/signed"
+	signedContext = "ostia-server/test/v1"
+)
+
+func signedMessage(deviceID string, stamp int64) []byte {
+	return StampedMessage(signedContext, deviceID, stamp)
 }
 
 type fakeGitHub struct {
@@ -124,7 +110,6 @@ func newEnv(t *testing.T) *env {
 	t.Cleanup(func() { _ = db.Close() })
 	blobs, _ := blob.NewDisk(t.TempDir())
 	cfg := config.Default().Auth
-	cfg.ApproverMinAge = 0
 	e.svc = &Service{
 		DB: db, Blobs: blobs, Key: serverkey.New(make([]byte, 32)), Cfg: cfg, Now: clock,
 		GitHub: &GitHub{ClientID: "client-1", BaseURL: e.gh.srv.URL, APIURL: e.gh.srv.URL, Client: http.DefaultClient},
@@ -132,6 +117,13 @@ func newEnv(t *testing.T) *env {
 	}
 	mux := httpx.NewMux()
 	e.svc.Mount(mux)
+	mux.Handle("POST "+signedPath, e.svc.Authed(func(w http.ResponseWriter, r *http.Request, p Principal) error {
+		if err := e.svc.RequireSignedTimestamp(r, p, signedContext); err != nil {
+			return err
+		}
+		w.WriteHeader(http.StatusNoContent)
+		return nil
+	}))
 	e.srv = httptest.NewServer(mux)
 	t.Cleanup(e.srv.Close)
 	return e
@@ -179,7 +171,7 @@ func (e *env) call(t *testing.T, method, path, token string, body any) (int, map
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
-	for k, v := range e.deviceHeaders(t, method, path, token) {
+	for k, v := range e.deviceHeaders(method, path, token) {
 		req.Header.Set(k, v)
 	}
 	res, err := http.DefaultClient.Do(req)
@@ -192,25 +184,19 @@ func (e *env) call(t *testing.T, method, path, token string, body any) (int, map
 	return res.StatusCode, out
 }
 
-func (e *env) elevate(t *testing.T, requesterToken, approverToken string) {
+func (e *env) invite(t *testing.T) string {
 	t.Helper()
-	status, out := e.post(t, "/v1/auth/elevation/approval", requesterToken, nil)
-	if status != 201 {
-		t.Fatalf("request approval %d %v", status, out)
-	}
-	id := out["approvalId"].(string)
-	if status, _ := e.call(t, "POST", "/v1/auth/approvals/"+id+"/approve", approverToken, nil); status != 204 {
-		t.Fatalf("approve %d", status)
-	}
-}
-
-func (e *env) invite(t *testing.T, accountID string) string {
-	t.Helper()
-	code, _, err := e.svc.CreateInvite(t.Context(), accountID, time.Hour, false)
+	code, _, err := e.svc.CreateInvite(t.Context(), time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return code
+}
+
+func (e *env) alive(t *testing.T, token string) int {
+	t.Helper()
+	status, _ := e.call(t, "POST", "/v1/devices/heartbeat", token, nil)
+	return status
 }
 
 func (e *env) signIn(t *testing.T, d *device, code string) {
@@ -244,12 +230,37 @@ func (e *env) session(t *testing.T, d *device) string {
 func TestInviteRegistrationThenKeySession(t *testing.T) {
 	e := newEnv(t)
 	d := newDevice("desktop")
-	e.signIn(t, d, e.invite(t, ""))
+	e.signIn(t, d, e.invite(t))
+	if status := e.alive(t, e.session(t, d)); status != 204 {
+		t.Fatalf("a fresh session must work: %d", status)
+	}
+}
+
+func TestDeviceTrustRoutesAreGone(t *testing.T) {
+	e := newEnv(t)
+	d := newDevice("desktop")
+	e.signIn(t, d, e.invite(t))
 	token := e.session(t, d)
-	status, out := e.call(t, "GET", "/v1/devices", token, nil)
-	list, _ := out["devices"].([]any)
-	if status != 200 || len(list) != 1 || list[0].(map[string]any)["current"] != true {
-		t.Fatalf("devices %d %v", status, out)
+	for _, route := range [][2]string{
+		{"GET", "/v1/devices"},
+		{"POST", "/v1/devices/invite"},
+		{"DELETE", "/v1/devices/" + d.id},
+		{"DELETE", "/v1/account"},
+		{"GET", "/v1/auth/elevation"},
+		{"POST", "/v1/auth/elevation/approval"},
+		{"POST", "/v1/auth/elevation/github"},
+		{"POST", "/v1/auth/elevation/github/poll"},
+		{"GET", "/v1/auth/approvals"},
+		{"GET", "/v1/auth/approvals/x"},
+		{"POST", "/v1/auth/approvals/x/approve"},
+		{"DELETE", "/v1/auth/approvals/x"},
+	} {
+		if status, _ := e.call(t, route[0], route[1], token, nil); status != http.StatusNotFound && status != http.StatusMethodNotAllowed {
+			t.Errorf("%s %s answers %d", route[0], route[1], status)
+		}
+	}
+	if status := e.alive(t, token); status != 204 {
+		t.Fatalf("the device must still be signed in: %d", status)
 	}
 }
 
@@ -261,7 +272,7 @@ func TestRegistrationRefusals(t *testing.T) {
 	if status, out := e.post(t, "/v1/auth/invite", "", body); status != 403 || out["error"] != "invalid-invite" {
 		t.Fatalf("unknown code: %d %v", status, out)
 	}
-	code := e.invite(t, "")
+	code := e.invite(t)
 	body = d.registration()
 	body["code"] = code
 	body["proof"] = httpx.EncodeB64(make([]byte, 64))
@@ -287,9 +298,9 @@ func TestRegistrationRefusals(t *testing.T) {
 func TestChallengeIsSingleUseAndBoundToTheDevice(t *testing.T) {
 	e := newEnv(t)
 	d := newDevice("desktop")
-	e.signIn(t, d, e.invite(t, ""))
+	e.signIn(t, d, e.invite(t))
 	other := newDevice("other")
-	e.signIn(t, other, e.invite(t, ""))
+	e.signIn(t, other, e.invite(t))
 
 	_, out := e.post(t, "/v1/auth/challenge", "", map[string]string{"deviceId": d.id})
 	nonce := out["nonce"].(string)
@@ -329,9 +340,9 @@ func TestUnknownDeviceGetsAChallengeButNeverASession(t *testing.T) {
 func TestSessionExpiresAndRoutesNeedBearer(t *testing.T) {
 	e := newEnv(t)
 	d := newDevice("desktop")
-	e.signIn(t, d, e.invite(t, ""))
+	e.signIn(t, d, e.invite(t))
 	token := e.session(t, d)
-	for _, route := range [][2]string{{"GET", "/v1/devices"}, {"POST", "/v1/devices/invite"}, {"DELETE", "/v1/devices/x"}, {"DELETE", "/v1/account"}, {"DELETE", "/v1/auth/session"}} {
+	for _, route := range [][2]string{{"POST", "/v1/devices/heartbeat"}, {"DELETE", "/v1/auth/session"}} {
 		if status, _ := e.call(t, route[0], route[1], "", nil); status != 401 {
 			t.Errorf("%s %s without a bearer: %d", route[0], route[1], status)
 		}
@@ -340,7 +351,7 @@ func TestSessionExpiresAndRoutesNeedBearer(t *testing.T) {
 		}
 	}
 	*e.clock = e.clock.Add(2 * time.Hour)
-	if status, _ := e.call(t, "GET", "/v1/devices", token, nil); status != 401 {
+	if status := e.alive(t, token); status != 401 {
 		t.Fatalf("expired session: %d", status)
 	}
 }
@@ -348,111 +359,31 @@ func TestSessionExpiresAndRoutesNeedBearer(t *testing.T) {
 func TestLogoutEndsTheSession(t *testing.T) {
 	e := newEnv(t)
 	d := newDevice("desktop")
-	e.signIn(t, d, e.invite(t, ""))
+	e.signIn(t, d, e.invite(t))
 	token := e.session(t, d)
 	if status, _ := e.call(t, "DELETE", "/v1/auth/session", token, nil); status != 204 {
 		t.Fatalf("logout %d", status)
 	}
-	if status, _ := e.call(t, "GET", "/v1/devices", token, nil); status != 401 {
+	if status := e.alive(t, token); status != 401 {
 		t.Fatalf("session survived logout: %d", status)
-	}
-}
-
-func TestDeviceInviteJoinsTheSameAccountAndRevokeKicksIt(t *testing.T) {
-	e := newEnv(t)
-	laptop := newDevice("laptop")
-	e.signIn(t, laptop, e.invite(t, ""))
-	token := e.session(t, laptop)
-
-	status, out := e.post(t, "/v1/devices/invite", token, nil)
-	if status != 201 {
-		t.Fatalf("device invite %d %v", status, out)
-	}
-	phone := newDevice("desktop-2")
-	e.signIn(t, phone, out["code"].(string))
-	phoneToken := e.session(t, phone)
-
-	_, list := e.call(t, "GET", "/v1/devices", token, nil)
-	if len(list["devices"].([]any)) != 2 {
-		t.Fatalf("both devices must share an account: %v", list)
-	}
-
-	var revoked []string
-	e.svc.Hooks.DeviceRevoked = func(id string) { revoked = append(revoked, id) }
-	if status, out := e.call(t, "DELETE", "/v1/devices/"+phone.id, token, nil); status != 403 || out["error"] != "elevation-required" {
-		t.Fatalf("revoking another device needs a second device's approval: %d %v", status, out)
-	}
-	e.elevate(t, token, phoneToken)
-	if status, _ := e.call(t, "DELETE", "/v1/devices/"+phone.id, token, nil); status != 204 {
-		t.Fatalf("revoke %d", status)
-	}
-	if len(revoked) != 1 || revoked[0] != phone.id {
-		t.Fatalf("hook: %v", revoked)
-	}
-	if status, _ := e.call(t, "GET", "/v1/devices", phoneToken, nil); status != 401 {
-		t.Fatalf("revoked device keeps its session: %d", status)
-	}
-	_, out = e.post(t, "/v1/auth/challenge", "", map[string]string{"deviceId": phone.id})
-	sig := httpx.EncodeB64(ed25519.Sign(phone.sign, ChallengeMessage(phone.id, out["nonce"].(string))))
-	if status, _ := e.post(t, "/v1/auth/verify", "", map[string]string{"deviceId": phone.id, "nonce": out["nonce"].(string), "sig": sig}); status != 401 {
-		t.Fatalf("revoked device signs in again: %d", status)
-	}
-	if status, _ := e.call(t, "DELETE", "/v1/devices/"+phone.id, token, nil); status != 404 {
-		t.Fatalf("second revoke %d", status)
-	}
-}
-
-func TestDeviceCannotRevokeAnotherAccountsDevice(t *testing.T) {
-	e := newEnv(t)
-	a, b := newDevice("a"), newDevice("b")
-	e.signIn(t, a, e.invite(t, ""))
-	e.signIn(t, b, e.invite(t, ""))
-	tokenA := e.session(t, a)
-	if status, _ := e.call(t, "DELETE", "/v1/devices/"+b.id, tokenA, nil); status != 403 {
-		t.Fatalf("cross-account revoke: %d", status)
-	}
-	if status, _ := e.call(t, "GET", "/v1/devices", e.session(t, b), nil); status != 200 {
-		t.Fatal("victim device lost access")
-	}
-}
-
-func TestDeleteAccountRemovesEverythingAndNotifies(t *testing.T) {
-	e := newEnv(t)
-	d := newDevice("desktop")
-	e.signIn(t, d, e.invite(t, ""))
-	token := e.session(t, d)
-	second := newDevice("phone")
-	_, out := e.post(t, "/v1/devices/invite", token, nil)
-	e.signIn(t, second, out["code"].(string))
-	secondToken := e.session(t, second)
-	var gone []string
-	e.svc.Hooks.AccountDeleted = func(ids []string) { gone = ids }
-	if status, out := e.call(t, "DELETE", "/v1/account", token, nil); status != 403 || out["error"] != "elevation-required" {
-		t.Fatalf("deleting an account needs approval: %d %v", status, out)
-	}
-	e.elevate(t, token, secondToken)
-	if status, _ := e.call(t, "DELETE", "/v1/account", token, nil); status != 204 {
-		t.Fatalf("delete %d", status)
-	}
-	if len(gone) != 2 {
-		t.Fatalf("hook: %v", gone)
-	}
-	if status, _ := e.call(t, "GET", "/v1/devices", token, nil); status != 401 {
-		t.Fatalf("session of a deleted account works: %d", status)
 	}
 }
 
 func TestDeviceLimit(t *testing.T) {
 	e := newEnv(t)
 	e.svc.Cfg.MaxDevices = 1
-	a := newDevice("a")
-	e.signIn(t, a, e.invite(t, ""))
-	token := e.session(t, a)
-	_, out := e.post(t, "/v1/devices/invite", token, nil)
-	b := newDevice("b")
-	body := b.registration()
-	body["code"] = out["code"]
-	if status, out := e.post(t, "/v1/auth/invite", "", body); status != 409 || out["error"] != "device-limit" {
+	e.gh.pending.Store(0)
+	signIn := func(name string) (int, map[string]any) {
+		_, out := e.post(t, "/v1/auth/github/device", "", nil)
+		*e.clock = e.clock.Add(6 * time.Second)
+		body := newDevice(name).registration()
+		body["flowId"] = out["flowId"]
+		return e.post(t, "/v1/auth/github/poll", "", body)
+	}
+	if status, out := signIn("a"); status != 201 {
+		t.Fatalf("first device: %d %v", status, out)
+	}
+	if status, out := signIn("b"); status != 409 || out["error"] != "device-limit" {
 		t.Fatalf("device limit: %d %v", status, out)
 	}
 }
@@ -563,7 +494,7 @@ func TestGitHubRoutesAbsentWhenNotConfigured(t *testing.T) {
 func TestChallengesAreOnlyKeptForRegisteredDevicesAndCappedPerDevice(t *testing.T) {
 	e := newEnv(t)
 	d := newDevice("desktop")
-	e.signIn(t, d, e.invite(t, ""))
+	e.signIn(t, d, e.invite(t))
 	for i := range 3 * maxChallengesPerDevice {
 		*e.clock = e.clock.Add(time.Second)
 		status, out := e.post(t, "/v1/auth/challenge", "", map[string]string{"deviceId": "ghost-" + string(rune('a'+i%26)) + strings.Repeat("x", i)})
@@ -603,7 +534,7 @@ func TestChallengesAreOnlyKeptForRegisteredDevicesAndCappedPerDevice(t *testing.
 func TestExpiredChallengesAreSwept(t *testing.T) {
 	e := newEnv(t)
 	d := newDevice("desktop")
-	e.signIn(t, d, e.invite(t, ""))
+	e.signIn(t, d, e.invite(t))
 	e.post(t, "/v1/auth/challenge", "", map[string]string{"deviceId": d.id})
 	*e.clock = e.clock.Add(2 * time.Minute)
 	e.svc.SweepChallenges()
@@ -626,205 +557,10 @@ func TestOneAddressCannotHoldManyGitHubFlows(t *testing.T) {
 	}
 }
 
-func TestElevationRules(t *testing.T) {
-	e := newEnv(t)
-	a, b := newDevice("laptop"), newDevice("phone")
-	e.signIn(t, a, e.invite(t, ""))
-	tokenA := e.session(t, a)
-	if status, out := e.post(t, "/v1/auth/elevation/approval", tokenA, nil); status != 409 || out["error"] != "no-second-device" {
-		t.Fatalf("a single-device account cannot be approved by anyone: %d %v", status, out)
-	}
-	_, out := e.post(t, "/v1/devices/invite", tokenA, nil)
-	e.signIn(t, b, out["code"].(string))
-	tokenB := e.session(t, b)
-
-	_, out = e.post(t, "/v1/auth/elevation/approval", tokenA, nil)
-	id := out["approvalId"].(string)
-	if status, _ := e.call(t, "POST", "/v1/auth/approvals/"+id+"/approve", tokenA, nil); status != 403 {
-		t.Fatalf("self approval: %d", status)
-	}
-	if _, list := e.call(t, "GET", "/v1/auth/approvals", tokenA, nil); len(list["approvals"].([]any)) != 0 {
-		t.Fatalf("the requester sees its own request: %v", list)
-	}
-	_, list := e.call(t, "GET", "/v1/auth/approvals", tokenB, nil)
-	if len(list["approvals"].([]any)) != 1 || list["approvals"].([]any)[0].(map[string]any)["deviceName"] != "laptop" {
-		t.Fatalf("the other device must see who asks: %v", list)
-	}
-	if _, st := e.call(t, "GET", "/v1/auth/approvals/"+id, tokenA, nil); st["status"] != "pending" {
-		t.Fatalf("status: %v", st)
-	}
-	if status, _ := e.call(t, "GET", "/v1/auth/approvals/"+id, tokenB, nil); status != 404 {
-		t.Fatalf("another session read the request status: %d", status)
-	}
-	if status, _ := e.call(t, "POST", "/v1/auth/approvals/"+id+"/approve", tokenB, nil); status != 204 {
-		t.Fatalf("approve: %d", status)
-	}
-	if _, el := e.call(t, "GET", "/v1/auth/elevation", tokenA, nil); el["elevatedUntil"].(float64) == 0 {
-		t.Fatalf("elevation: %v", el)
-	}
-	if _, el := e.call(t, "GET", "/v1/auth/elevation", tokenB, nil); el["elevatedUntil"].(float64) != 0 {
-		t.Fatalf("the approver was elevated too: %v", el)
-	}
-	newToken := e.session(t, a)
-	if _, el := e.call(t, "GET", "/v1/auth/elevation", newToken, nil); el["elevatedUntil"].(float64) != 0 {
-		t.Fatalf("a fresh session of the same device must start unelevated: %v", el)
-	}
-}
-
-func TestElevationExpires(t *testing.T) {
-	e := newEnv(t)
-	a, b := newDevice("laptop"), newDevice("phone")
-	e.signIn(t, a, e.invite(t, ""))
-	tokenA := e.session(t, a)
-	_, out := e.post(t, "/v1/devices/invite", tokenA, nil)
-	e.signIn(t, b, out["code"].(string))
-	tokenB := e.session(t, b)
-	e.elevate(t, tokenA, tokenB)
-	*e.clock = e.clock.Add(6 * time.Minute)
-	if status, out := e.call(t, "DELETE", "/v1/devices/"+b.id, tokenA, nil); status != 403 || out["error"] != "elevation-required" {
-		t.Fatalf("elevation outlived its lifetime: %d %v", status, out)
-	}
-}
-
-func TestExpiredApprovalsCannotBeApproved(t *testing.T) {
-	e := newEnv(t)
-	a, b := newDevice("laptop"), newDevice("phone")
-	e.signIn(t, a, e.invite(t, ""))
-	tokenA := e.session(t, a)
-	_, out := e.post(t, "/v1/devices/invite", tokenA, nil)
-	e.signIn(t, b, out["code"].(string))
-	tokenB := e.session(t, b)
-	_, out = e.post(t, "/v1/auth/elevation/approval", tokenA, nil)
-	*e.clock = e.clock.Add(6 * time.Minute)
-	if status, _ := e.call(t, "POST", "/v1/auth/approvals/"+out["approvalId"].(string)+"/approve", tokenB, nil); status != 404 {
-		t.Fatalf("approving a stale request: %d", status)
-	}
-}
-
-func TestGitHubElevationRequiresTheSameGitHubUser(t *testing.T) {
-	e := newEnv(t)
-	e.gh.pending.Store(0)
-	signIn := func(name string) (string, string) {
-		_, out := e.post(t, "/v1/auth/github/device", "", nil)
-		flowID := out["flowId"].(string)
-		*e.clock = e.clock.Add(6 * time.Second)
-		d := newDevice(name)
-		body := d.registration()
-		body["flowId"] = flowID
-		status, out := e.post(t, "/v1/auth/github/poll", "", body)
-		if status != 201 {
-			t.Fatalf("sign-in %d %v", status, out)
-		}
-		d.id = out["deviceId"].(string)
-		return e.session(t, d), out["accountId"].(string)
-	}
-	token, _ := signIn("laptop")
-	startElevation := func() string {
-		status, out := e.post(t, "/v1/auth/elevation/github", token, nil)
-		if status != 200 {
-			t.Fatalf("start %d %v", status, out)
-		}
-		*e.clock = e.clock.Add(6 * time.Second)
-		return out["flowId"].(string)
-	}
-	e.gh.userID.Store(999)
-	flow := startElevation()
-	if status, out := e.post(t, "/v1/auth/elevation/github/poll", token, map[string]string{"flowId": flow}); status != 403 || out["error"] != "wrong-account" {
-		t.Fatalf("a different GitHub user elevated the session: %d %v", status, out)
-	}
-	e.gh.userID.Store(4242)
-	flow = startElevation()
-	if status, out := e.post(t, "/v1/auth/elevation/github/poll", token, map[string]string{"flowId": flow}); status != 200 || out["elevatedUntil"].(float64) == 0 {
-		t.Fatalf("elevation with the right user: %d %v", status, out)
-	}
-	other, _ := signIn("phone")
-	flow = startElevation()
-	if status, _ := e.post(t, "/v1/auth/elevation/github/poll", other, map[string]string{"flowId": flow}); status != 404 {
-		t.Fatalf("another session used the flow: %d", status)
-	}
-}
-
-func TestInviteAccountsCannotElevateWithGitHub(t *testing.T) {
-	e := newEnv(t)
-	d := newDevice("laptop")
-	e.signIn(t, d, e.invite(t, ""))
-	token := e.session(t, d)
-	if status, out := e.post(t, "/v1/auth/elevation/github", token, nil); status != 409 || out["error"] != "not-a-github-account" {
-		t.Fatalf("%d %v", status, out)
-	}
-}
-
-func TestDeviceInvitesNeedElevationOnceTheAccountHasTwoDevices(t *testing.T) {
-	e := newEnv(t)
-	a := newDevice("laptop")
-	e.signIn(t, a, e.invite(t, ""))
-	tokenA := e.session(t, a)
-	b := newDevice("phone")
-	status, out := e.post(t, "/v1/devices/invite", tokenA, nil)
-	if status != 201 {
-		t.Fatalf("the first extra device needs no approval: %d", status)
-	}
-	e.signIn(t, b, out["code"].(string))
-	tokenB := e.session(t, b)
-	if status, out := e.post(t, "/v1/devices/invite", tokenA, nil); status != 403 || out["error"] != "elevation-required" {
-		t.Fatalf("a third device needs approval: %d %v", status, out)
-	}
-	e.elevate(t, tokenA, tokenB)
-	if status, _ := e.post(t, "/v1/devices/invite", tokenA, nil); status != 201 {
-		t.Fatalf("after approval: %d", status)
-	}
-}
-
-func TestStolenTokenCannotElevateItselfWithADeviceItJustAdded(t *testing.T) {
-	e := newEnv(t)
-	e.svc.Cfg.ApproverMinAge = config.Duration(24 * time.Hour)
-	owner := newDevice("laptop")
-	e.signIn(t, owner, e.invite(t, ""))
-	stolen := e.session(t, owner)
-
-	_, out := e.post(t, "/v1/devices/invite", stolen, nil)
-	attacker := newDevice("attacker")
-	e.signIn(t, attacker, out["code"].(string))
-	attackerToken := e.session(t, attacker)
-
-	_, out = e.post(t, "/v1/auth/elevation/approval", stolen, nil)
-	id := out["approvalId"].(string)
-	status, out := e.call(t, "POST", "/v1/auth/approvals/"+id+"/approve", attackerToken, nil)
-	if status != 403 || out["error"] != "device-too-new" {
-		t.Fatalf("a device that has just joined must not approve: %d %v", status, out)
-	}
-	if status, out := e.call(t, "DELETE", "/v1/account", stolen, nil); status != 403 || out["error"] != "elevation-required" {
-		t.Fatalf("the stolen token destroyed the account: %d %v", status, out)
-	}
-	*e.clock = e.clock.Add(25 * time.Hour)
-	stolen = e.session(t, owner)
-	attackerToken = e.session(t, attacker)
-	_, out = e.post(t, "/v1/auth/elevation/approval", stolen, nil)
-	if status, _ := e.call(t, "POST", "/v1/auth/approvals/"+out["approvalId"].(string)+"/approve", attackerToken, nil); status != 204 {
-		t.Fatalf("an established device may approve: %d", status)
-	}
-}
-
-func TestApprovalListShowsHowLongTheRequesterHasBeenAround(t *testing.T) {
-	e := newEnv(t)
-	a, b := newDevice("laptop"), newDevice("phone")
-	e.signIn(t, a, e.invite(t, ""))
-	tokenA := e.session(t, a)
-	_, out := e.post(t, "/v1/devices/invite", tokenA, nil)
-	e.signIn(t, b, out["code"].(string))
-	tokenB := e.session(t, b)
-	e.post(t, "/v1/auth/elevation/approval", tokenA, nil)
-	_, list := e.call(t, "GET", "/v1/auth/approvals", tokenB, nil)
-	entry := list["approvals"].([]any)[0].(map[string]any)
-	if entry["deviceCreatedAt"].(float64) == 0 {
-		t.Fatalf("the approval card needs the requester's age: %v", entry)
-	}
-}
-
 func TestChallengesOfOneAddressCannotEvictAnotherAddressesChallenge(t *testing.T) {
 	e := newEnv(t)
 	d := newDevice("desktop")
-	e.signIn(t, d, e.invite(t, ""))
+	e.signIn(t, d, e.invite(t))
 	*e.clock = e.clock.Add(time.Second)
 	_, out := e.post(t, "/v1/auth/challenge", "", map[string]string{"deviceId": d.id})
 	real := out["nonce"].(string)
@@ -842,7 +578,7 @@ func TestChallengesOfOneAddressCannotEvictAnotherAddressesChallenge(t *testing.T
 func TestLogoutNotifiesTheHookWithTheSessionToken(t *testing.T) {
 	e := newEnv(t)
 	d := newDevice("desktop")
-	e.signIn(t, d, e.invite(t, ""))
+	e.signIn(t, d, e.invite(t))
 	token := e.session(t, d)
 	var ended [][]byte
 	e.svc.Hooks.SessionEnded = func(hash []byte) { ended = append(ended, hash) }
@@ -852,150 +588,23 @@ func TestLogoutNotifiesTheHookWithTheSessionToken(t *testing.T) {
 	}
 }
 
-func TestLiveInvitesCountTowardsTheTwoDeviceRule(t *testing.T) {
-	e := newEnv(t)
-	d := newDevice("laptop")
-	e.signIn(t, d, e.invite(t, ""))
-	token := e.session(t, d)
-	if status, _ := e.post(t, "/v1/devices/invite", token, nil); status != 201 {
-		t.Fatalf("first invite: %d", status)
-	}
-	if status, out := e.post(t, "/v1/devices/invite", token, nil); status != 403 || out["error"] != "elevation-required" {
-		t.Fatalf("a second live invite would let a stolen token add two devices at once: %d %v", status, out)
-	}
-}
-
-func TestInviteMintedAtOneDeviceDiesIfTheAccountGrowsFirst(t *testing.T) {
-	e := newEnv(t)
-	a := newDevice("laptop")
-	e.signIn(t, a, e.invite(t, ""))
-	token := e.session(t, a)
-	_, out := e.post(t, "/v1/devices/invite", token, nil)
-	stale := out["code"].(string)
-	for _, name := range []string{"phone", "tablet"} {
-		if _, err := e.svc.DB.AddDevice(t.Context(), a.accountID(e, t), store.NewDevice{Name: name, SignPub: make([]byte, 32), BoxPub: make([]byte, 32)}, 10); err != nil {
-			t.Fatal(err)
-		}
-	}
-	d := newDevice("late")
-	body := d.registration()
-	body["code"] = stale
-	if status, out := e.post(t, "/v1/auth/invite", "", body); status != 403 || out["error"] != "invalid-invite" {
-		t.Fatalf("%d %v", status, out)
-	}
-}
-
-func (d *device) accountID(e *env, t *testing.T) string {
-	t.Helper()
-	dev, err := e.svc.DB.Device(t.Context(), d.id)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return dev.AccountID
-}
-
-func TestRevokingRulesDuringProbation(t *testing.T) {
-	e := newEnv(t)
-	e.svc.Cfg.ApproverMinAge = config.Duration(24 * time.Hour)
-	owner := newDevice("laptop")
-	e.signIn(t, owner, e.invite(t, ""))
-	*e.clock = e.clock.Add(25 * time.Hour)
-	ownerToken := e.session(t, owner)
-	_, out := e.post(t, "/v1/devices/invite", ownerToken, nil)
-	intruder := newDevice("intruder")
-	e.signIn(t, intruder, out["code"].(string))
-	intruderToken := e.session(t, intruder)
-
-	if status, out := e.call(t, "DELETE", "/v1/devices/"+owner.id, intruderToken, nil); status != 403 || out["error"] != "elevation-required" {
-		t.Fatalf("a young device must not revoke the established one: %d %v", status, out)
-	}
-	if status, _ := e.call(t, "DELETE", "/v1/auth/session", e.session(t, owner), nil); status != 204 {
-		t.Fatalf("logging out stays free: %d", status)
-	}
-	ownerToken = e.session(t, owner)
-	if status, _ := e.call(t, "DELETE", "/v1/devices/"+intruder.id, ownerToken, nil); status != 204 {
-		t.Fatalf("an established device removes an intruder still on probation: %d", status)
-	}
-}
-
-func TestNewDevicesAreAnnounced(t *testing.T) {
-	e := newEnv(t)
-	a, b := newDevice("laptop"), newDevice("phone")
-	e.signIn(t, a, e.invite(t, ""))
-	tokenA := e.session(t, a)
-	var announced []string
-	e.svc.Hooks.DeviceAdded = func(accountID string, dev store.Device) { announced = append(announced, dev.Name) }
-	_, out := e.post(t, "/v1/devices/invite", tokenA, nil)
-	e.signIn(t, b, out["code"].(string))
-	if len(announced) != 1 || announced[0] != "phone" {
-		t.Fatalf("hook: %v", announced)
-	}
-	_, list := e.call(t, "GET", "/v1/devices", tokenA, nil)
-	for _, raw := range list["devices"].([]any) {
-		if _, flagged := raw.(map[string]any)["new"]; flagged {
-			t.Fatalf("the new flag is gone: %v", list)
-		}
-	}
-	if status, _ := e.call(t, "POST", "/v1/devices/"+b.id+"/seen", tokenA, nil); status != 404 && status != 405 {
-		t.Fatalf("the seen route is gone: %d", status)
-	}
-}
-
-func TestEveryDeviceMayLeaveWithoutElevation(t *testing.T) {
-	for _, minAge := range []time.Duration{0, 24 * time.Hour} {
-		e := newEnv(t)
-		e.svc.Cfg.ApproverMinAge = config.Duration(minAge)
-		older, younger := newDevice("laptop"), newDevice("phone")
-		e.signIn(t, older, e.invite(t, ""))
-		tokenOlder := e.session(t, older)
-		_, out := e.post(t, "/v1/devices/invite", tokenOlder, nil)
-		*e.clock = e.clock.Add(time.Second)
-		e.signIn(t, younger, out["code"].(string))
-		*e.clock = e.clock.Add(25 * time.Hour)
-		tokenOlder, tokenYounger := e.session(t, older), e.session(t, younger)
-		if status, _ := e.call(t, "DELETE", "/v1/devices/"+older.id, tokenOlder, nil); status != 204 {
-			t.Fatalf("min age %v: the oldest device must be able to leave: %d", minAge, status)
-		}
-		if status, _ := e.call(t, "DELETE", "/v1/devices/"+younger.id, tokenYounger, nil); status != 204 {
-			t.Fatalf("min age %v: the last device must be able to leave: %d", minAge, status)
-		}
-	}
-}
-
-func TestTheLastDeviceLeavingDeletesTheAccountAndItsSyncData(t *testing.T) {
-	e := newEnv(t)
-	d := newDevice("laptop")
-	e.signIn(t, d, e.invite(t, ""))
-	token := e.session(t, d)
-	_, devices := e.call(t, "GET", "/v1/devices", token, nil)
-	if len(devices["devices"].([]any)) != 1 {
-		t.Fatalf("%v", devices)
-	}
-	if status, _ := e.call(t, "DELETE", "/v1/devices/"+d.id, token, nil); status != 204 {
-		t.Fatalf("a lone device must be able to leave: %d", status)
-	}
-	if _, err := e.svc.DB.Device(t.Context(), d.id); err == nil {
-		t.Fatal("the account holds nothing else, so it must be gone with its devices")
-	}
-}
-
 func TestSignedActionsRefuseBareTokensStaleTimestampsAndReplays(t *testing.T) {
 	e := newEnv(t)
 	d := newDevice("laptop")
-	e.signIn(t, d, e.invite(t, ""))
+	e.signIn(t, d, e.invite(t))
 	token := e.session(t, d)
 
 	e.unsigned[token] = true
-	if status, out := e.call(t, "POST", "/v1/devices/invite", token, nil); status != 403 || out["error"] != "device-signature-required" {
-		t.Fatalf("a bare token minted an invite: %d %v", status, out)
+	if status, out := e.call(t, "POST", signedPath, token, nil); status != 403 || out["error"] != "device-signature-required" {
+		t.Fatalf("a bare token passed a signed action: %d %v", status, out)
 	}
 	delete(e.unsigned, token)
 
 	send := func(stamp int64) (int, map[string]any) {
-		req, _ := http.NewRequest("POST", e.srv.URL+"/v1/devices/invite", nil)
+		req, _ := http.NewRequest("POST", e.srv.URL+signedPath, nil)
 		req.Header.Set("Authorization", "Bearer "+token)
 		req.Header.Set(timestampHeader, strconv.FormatInt(stamp, 10))
-		req.Header.Set(signatureHeader, httpx.EncodeB64(ed25519.Sign(d.sign, InviteMessage(d.id, stamp))))
+		req.Header.Set(signatureHeader, httpx.EncodeB64(ed25519.Sign(d.sign, signedMessage(d.id, stamp))))
 		res, err := http.DefaultClient.Do(req)
 		if err != nil {
 			t.Fatal(err)
@@ -1009,31 +618,10 @@ func TestSignedActionsRefuseBareTokensStaleTimestampsAndReplays(t *testing.T) {
 	if status, out := send(now - int64(10*time.Minute/time.Millisecond)); status != 403 || out["error"] != "stale-signature" {
 		t.Fatalf("an old timestamp: %d %v", status, out)
 	}
-	if status, _ := send(now); status != 201 {
+	if status, _ := send(now); status != 204 {
 		t.Fatalf("a fresh signature: %d", status)
 	}
 	if status, out := send(now); status != 403 || out["error"] != "stale-signature" {
 		t.Fatalf("a replayed signature: %d %v", status, out)
-	}
-}
-
-func TestApprovalIsRefusedForARequesterThatJustJoinedEvenFromAnEstablishedDevice(t *testing.T) {
-	e := newEnv(t)
-	e.svc.Cfg.ApproverMinAge = config.Duration(24 * time.Hour)
-	a, b := newDevice("laptop"), newDevice("new phone")
-	e.signIn(t, a, e.invite(t, ""))
-	*e.clock = e.clock.Add(25 * time.Hour)
-	tokenA := e.session(t, a)
-	_, out := e.post(t, "/v1/devices/invite", tokenA, nil)
-	e.signIn(t, b, out["code"].(string))
-	tokenB := e.session(t, b)
-	_, out = e.post(t, "/v1/auth/elevation/approval", tokenB, nil)
-	id := out["approvalId"].(string)
-	if status, out := e.call(t, "POST", "/v1/auth/approvals/"+id+"/approve", tokenA, nil); status != 403 || out["error"] != "requester-too-new" {
-		t.Fatalf("A approving its own new device: %d %v", status, out)
-	}
-	e.unsigned[tokenA] = true
-	if status, out := e.call(t, "POST", "/v1/auth/approvals/"+id+"/approve", tokenA, nil); status != 403 || out["error"] != "device-signature-required" {
-		t.Fatalf("a bare token approving: %d %v", status, out)
 	}
 }

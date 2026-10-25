@@ -403,30 +403,6 @@ func TestRelayStopsAtTheMonthlyByteQuota(t *testing.T) {
 	}
 }
 
-func TestRevokedDeviceLosesItsRelayImmediately(t *testing.T) {
-	f := newRelayFixture(t, "[relay]\nhello_timeout = \"700ms\"\n")
-	other := f.env.device(t, f.api, "second desktop")
-	conn, err := testkit.DialAuthed(t.Context(), f.env.net, f.desktop.Host, f.cert.Fingerprint, f.gateway.Token)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer conn.Close()
-	other.ElevateByApproval(t, f.api)
-	other.Must(t, http.StatusNoContent, "DELETE", "/v1/devices/"+f.api.ID.DeviceID, nil)
-	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-	start := time.Now()
-	if _, err := conn.Read(make([]byte, 1)); err == nil || time.Since(start) > time.Second {
-		t.Fatalf("open phone stream must close at once when the desktop is revoked: %v after %v", err, time.Since(start))
-	}
-	waitUntil(t, "the label stops working", func() bool {
-		c, err := testkit.DialPhone(t.Context(), f.env.net, f.desktop.Host, f.cert.Fingerprint)
-		if err == nil {
-			_ = c.Close()
-		}
-		return err != nil
-	})
-}
-
 func TestNewListenerReplacesTheOld(t *testing.T) {
 	f := newRelayFixture(t, "")
 	second := &testkit.RelayDesktop{API: f.api, Gateway: f.gateway}
@@ -533,7 +509,7 @@ func TestRelayLabelCarriesThePublicPort(t *testing.T) {
 	proc := testkit.StartProcess(t, serverBinary, testkit.Config{
 		APIDomain: apiHost, RelayDomain: relayHost, CertFile: pki.CertFile, KeyFile: pki.KeyFile, Port: 8443,
 	})
-	mapped := &env{proc: proc, net: testkit.Net{HTTPSAddr: proc.HTTPSAddr, Roots: pki.Roots, APIHost: apiHost}, accounts: map[string][]*testkit.API{}, joined: map[string]time.Time{}}
+	mapped := &env{proc: proc, net: testkit.Net{HTTPSAddr: proc.HTTPSAddr, Roots: pki.Roots, APIHost: apiHost}, githubUsers: map[string]int64{}}
 	other := mapped.user(t, "desktop")
 	label = other.Must(t, http.StatusOK, "POST", "/v1/relay/label", nil).Map(t)
 	if label["port"].(float64) != 8443 {

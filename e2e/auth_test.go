@@ -41,25 +41,19 @@ func githubSignIn(t *testing.T, e *env, gh *testkit.FakeGitHub, name string) (*t
 func TestGitHubSignInUsesOneAccountPerGitHubUser(t *testing.T) {
 	gh := testkit.NewFakeGitHub(t, 4242)
 	gh.PendingPolls(1)
-	e := newEnv(t, "[auth]\ngithub_client_id = \"test-client\"\ngithub_base_url = \""+gh.Server.URL+"\"\ngithub_api_url = \""+gh.Server.URL+"\"\n")
+	e := newEnv(t, githubConfig(gh, ""))
 	info := e.anonymous().Must(t, http.StatusOK, "GET", "/v1/info", nil).Map(t)
 	if info["auth"].(map[string]any)["github"] != true {
 		t.Fatalf("info: %v", info)
 	}
 	first, account := githubSignIn(t, e, gh, "laptop")
-	first.Must(t, http.StatusOK, "GET", "/v1/devices", nil)
+	first.Must(t, http.StatusNoContent, "POST", "/v1/devices/heartbeat", nil)
 
 	second, secondAccount := githubSignIn(t, e, gh, "desktop")
-	if secondAccount != account {
-		t.Fatalf("the same GitHub user must reach the same account: %s vs %s", secondAccount, account)
+	if secondAccount != account || second.ID.DeviceID == first.ID.DeviceID {
+		t.Fatalf("the same GitHub user must reach the same account with a new device: %s vs %s", secondAccount, account)
 	}
-	var list struct {
-		Devices []any `json:"devices"`
-	}
-	second.Must(t, http.StatusOK, "GET", "/v1/devices", nil).JSON(t, &list)
-	if len(list.Devices) != 2 {
-		t.Fatalf("devices: %d", len(list.Devices))
-	}
+	second.Must(t, http.StatusNoContent, "POST", "/v1/devices/heartbeat", nil)
 
 	gh.SetUser(777)
 	_, other := githubSignIn(t, e, gh, "someone else")
@@ -105,7 +99,7 @@ func TestAuthenticatedCallsAreRateLimitedPerDevice(t *testing.T) {
 	api := e.user(t, "desktop")
 	limited := false
 	for range 600 {
-		if api.Do(t, "GET", "/v1/devices", nil).Status == http.StatusTooManyRequests {
+		if api.Do(t, "POST", "/v1/devices/heartbeat", nil).Status == http.StatusTooManyRequests {
 			limited = true
 			break
 		}
@@ -114,19 +108,19 @@ func TestAuthenticatedCallsAreRateLimitedPerDevice(t *testing.T) {
 		t.Fatal("a single device can hammer the API without limit")
 	}
 	other := e.user(t, "other")
-	other.Must(t, http.StatusOK, "GET", "/v1/devices", nil)
+	other.Must(t, http.StatusNoContent, "POST", "/v1/devices/heartbeat", nil)
 }
 
 func TestSessionsExpire(t *testing.T) {
 	e := newEnv(t, "[auth]\nsession_ttl = \"1s\"\n")
 	api := e.user(t, "desktop")
-	api.Must(t, http.StatusOK, "GET", "/v1/devices", nil)
+	api.Must(t, http.StatusNoContent, "POST", "/v1/devices/heartbeat", nil)
 	time.Sleep(1200 * time.Millisecond)
-	if res := api.Do(t, "GET", "/v1/devices", nil); res.Status != http.StatusUnauthorized {
+	if res := api.Do(t, "POST", "/v1/devices/heartbeat", nil); res.Status != http.StatusUnauthorized {
 		t.Fatalf("expired session: %s", res)
 	}
 	api.SignIn(t)
-	api.Must(t, http.StatusOK, "GET", "/v1/devices", nil)
+	api.Must(t, http.StatusNoContent, "POST", "/v1/devices/heartbeat", nil)
 }
 
 func TestForgedSignaturesAndReplayedNoncesAreRefused(t *testing.T) {

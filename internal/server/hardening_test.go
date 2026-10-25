@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"slices"
@@ -172,7 +173,7 @@ func TestSweepTruncatesTheWALSoDeletedPagesDoNotLinger(t *testing.T) {
 		t.Fatalf("the test needs the marker in the WAL first: %v", err)
 	}
 	accounts, _ := srv.DB.Accounts(t.Context())
-	if err := srv.Auth.DeleteAccount(t.Context(), accounts[0].ID, nil); err != nil {
+	if err := srv.Auth.DeleteAccount(t.Context(), accounts[0].ID); err != nil {
 		t.Fatal(err)
 	}
 	if raw, _ := os.ReadFile(wal); !bytes.Contains(raw, []byte(marker)) {
@@ -210,7 +211,7 @@ func TestSweepDeletesRevokedDevicesPastTheirRetention(t *testing.T) {
 	if _, err := srv.DB.AddDevice(t.Context(), acct.ID, store.NewDevice{Name: "b", SignPub: make([]byte, 32), BoxPub: make([]byte, 32)}, 10); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := srv.DB.RevokeDevice(t.Context(), acct.ID, gone.ID); err != nil {
+	if err := srv.DB.RevokeInactiveDevice(t.Context(), acct.ID, gone.ID, math.MaxInt64); err != nil {
 		t.Fatal(err)
 	}
 	now = now.Add(24 * time.Hour)
@@ -303,7 +304,7 @@ func TestSweepPurgesAccountsWithNoActiveDevice(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := srv.DB.RevokeDevice(t.Context(), acct.ID, dev.ID); err != nil {
+	if err := srv.DB.RevokeInactiveDevice(t.Context(), acct.ID, dev.ID, math.MaxInt64); err != nil {
 		t.Fatal(err)
 	}
 	srv.sweep(t.Context())
@@ -352,8 +353,8 @@ func TestSweepRemovesSilentDevicesThenPurgesAccountsLeftEmpty(t *testing.T) {
 	if _, err := srv.DB.Device(t.Context(), loneDev.ID); err == nil {
 		t.Fatal("an account left with no device must be purged in the same sweep")
 	}
-	if n, _ := srv.DB.ActiveDeviceCount(t.Context(), pair.ID); n != 1 {
-		t.Fatalf("the account that still has a device keeps it: %d", n)
+	if devices, _ := srv.DB.DevicesOf(t.Context(), pair.ID); len(devices) != 1 {
+		t.Fatalf("the account that still has a device keeps it: %v", devices)
 	}
 	if len(revoked) != 2 {
 		t.Fatalf("the revoke hook must run for each removed device: %v", revoked)

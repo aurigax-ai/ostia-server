@@ -162,7 +162,7 @@ func (s *Service) createInvite(w http.ResponseWriter, r *http.Request, sess sess
 	if ttl == 0 {
 		return httpx.ErrBadRequest
 	}
-	code, expires, err := s.Auth.CreateInvite(r.Context(), "", ttl, false)
+	code, expires, err := s.Auth.CreateInvite(r.Context(), ttl)
 	if err != nil {
 		return err
 	}
@@ -219,7 +219,7 @@ func (s *Service) deleteAccount(w http.ResponseWriter, r *http.Request, sess ses
 	if !ids.ValidID(id) {
 		return httpx.ErrNotFound
 	}
-	if err := s.Auth.DeleteAccount(r.Context(), id, nil); err != nil {
+	if err := s.Auth.DeleteAccount(r.Context(), id); err != nil {
 		return err
 	}
 	s.audit(r.Context(), sess.admin, "account.delete", id)

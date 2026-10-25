@@ -226,7 +226,7 @@ func (d *DB) Audit(ctx context.Context, limit int) ([]AuditEntry, error) {
 func (d *DB) AdminInvites(ctx context.Context) (open, used []AdminInvite, err error) {
 	rows, err := d.sql.QueryContext(ctx, `
 		SELECT hex(code_hash), hint, created_at, expires_at, used_at, COALESCE(created_account, '')
-		FROM invites WHERE account_id IS NULL ORDER BY created_at DESC`)
+		FROM invites ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -255,7 +255,7 @@ func (d *DB) RevokeInvite(ctx context.Context, id string) (hint string, err erro
 	if err != nil {
 		return "", ErrNotFound
 	}
-	err = d.sql.QueryRowContext(ctx, `DELETE FROM invites WHERE code_hash = ? AND account_id IS NULL AND used_at = 0 RETURNING hint`, raw).Scan(&hint)
+	err = d.sql.QueryRowContext(ctx, `DELETE FROM invites WHERE code_hash = ? AND used_at = 0 RETURNING hint`, raw).Scan(&hint)
 	return hint, notFound(err)
 }
 

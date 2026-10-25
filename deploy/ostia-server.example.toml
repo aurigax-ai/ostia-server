@@ -39,10 +39,6 @@ github_api_url = "https://api.github.com"
 session_ttl = "1h0m0s"
 max_devices_per_account = 10
 invite_ttl = "168h0m0s"
-device_invite_ttl = "10m0s"
-elevation_ttl = "5m0s"
-approval_ttl = "5m0s"
-approver_min_age = "24h0m0s"
 revoked_device_retention = "720h0m0s"
 
 [admin]

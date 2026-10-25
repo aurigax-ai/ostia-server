@@ -7,9 +7,10 @@ import (
 )
 
 type Manifest struct {
-	Version   int64
-	Blob      []byte
-	UpdatedAt int64
+	Version    int64
+	KeyVersion int64
+	Blob       []byte
+	UpdatedAt  int64
 }
 
 type VersionMismatchError struct{ Current int64 }
@@ -21,21 +22,21 @@ func (e VersionMismatchError) Is(target error) bool { return target == ErrVersio
 func (d *DB) CurrentManifest(ctx context.Context, accountID string) (Manifest, error) {
 	var m Manifest
 	err := d.sql.QueryRowContext(ctx, `
-		SELECT version, blob, updated_at FROM sync_manifests WHERE account_id = ? ORDER BY version DESC LIMIT 1`, accountID).
-		Scan(&m.Version, &m.Blob, &m.UpdatedAt)
+		SELECT version, key_version, blob, updated_at FROM sync_manifests WHERE account_id = ? ORDER BY version DESC LIMIT 1`, accountID).
+		Scan(&m.Version, &m.KeyVersion, &m.Blob, &m.UpdatedAt)
 	return m, notFound(err)
 }
 
 func (d *DB) ManifestAt(ctx context.Context, accountID string, version int64) (Manifest, error) {
 	var m Manifest
 	err := d.sql.QueryRowContext(ctx, `
-		SELECT version, blob, updated_at FROM sync_manifests WHERE account_id = ? AND version = ?`, accountID, version).
-		Scan(&m.Version, &m.Blob, &m.UpdatedAt)
+		SELECT version, key_version, blob, updated_at FROM sync_manifests WHERE account_id = ? AND version = ?`, accountID, version).
+		Scan(&m.Version, &m.KeyVersion, &m.Blob, &m.UpdatedAt)
 	return m, notFound(err)
 }
 
 func (d *DB) ManifestVersions(ctx context.Context, accountID string) ([]Manifest, error) {
-	rows, err := d.sql.QueryContext(ctx, `SELECT version, updated_at FROM sync_manifests WHERE account_id = ? ORDER BY version DESC`, accountID)
+	rows, err := d.sql.QueryContext(ctx, `SELECT version, key_version, updated_at FROM sync_manifests WHERE account_id = ? ORDER BY version DESC`, accountID)
 	if err != nil {
 		return nil, err
 	}
@@ -43,7 +44,7 @@ func (d *DB) ManifestVersions(ctx context.Context, accountID string) ([]Manifest
 	var out []Manifest
 	for rows.Next() {
 		var m Manifest
-		if err := rows.Scan(&m.Version, &m.UpdatedAt); err != nil {
+		if err := rows.Scan(&m.Version, &m.KeyVersion, &m.UpdatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, m)
@@ -51,7 +52,7 @@ func (d *DB) ManifestVersions(ctx context.Context, accountID string) ([]Manifest
 	return out, rows.Err()
 }
 
-func putManifestTx(ctx context.Context, tx *sql.Tx, now int64, accountID string, ifMatch int64, blob []byte, keep Retention) (int64, error) {
+func putManifestTx(ctx context.Context, tx *sql.Tx, now int64, accountID string, ifMatch, keyVersion int64, blob []byte, keep Retention) (int64, error) {
 	var current int64
 	err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(version), 0) FROM sync_manifests WHERE account_id = ?`, accountID).Scan(&current)
 	if err != nil {
@@ -61,7 +62,7 @@ func putManifestTx(ctx context.Context, tx *sql.Tx, now int64, accountID string,
 		return 0, VersionMismatchError{Current: current}
 	}
 	next := current + 1
-	if _, err := tx.ExecContext(ctx, `INSERT INTO sync_manifests (account_id, version, blob, updated_at) VALUES (?, ?, ?, ?)`, accountID, next, blob, now); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO sync_manifests (account_id, version, key_version, blob, updated_at) VALUES (?, ?, ?, ?, ?)`, accountID, next, keyVersion, blob, now); err != nil {
 		return 0, err
 	}
 	if keep.Versions > 0 {
@@ -75,43 +76,45 @@ func putManifestTx(ctx context.Context, tx *sql.Tx, now int64, accountID string,
 func (d *DB) PutManifest(ctx context.Context, accountID string, ifMatch int64, blob []byte, keep Retention) (int64, error) {
 	var next int64
 	err := d.tx(ctx, func(tx *sql.Tx) error {
-		var err error
-		next, err = putManifestTx(ctx, tx, d.ms(), accountID, ifMatch, blob, keep)
+		var keyVersion int64
+		err := tx.QueryRowContext(ctx, `SELECT version FROM sync_keys WHERE account_id = ?`, accountID).Scan(&keyVersion)
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrNoKey
+		}
+		if err != nil {
+			return err
+		}
+		next, err = putManifestTx(ctx, tx, d.ms(), accountID, ifMatch, keyVersion, blob, keep)
 		return err
 	})
 	return next, err
 }
 
-type Rotation struct {
-	IfMatch     int64
-	Manifest    []byte
-	Wraps       map[string][]byte
-	DeleteSlots []string
-	Retention   Retention
+type KeyReplacement struct {
+	IfMatch    int64
+	Manifest   []byte
+	Passphrase []byte
+	Recovery   []byte
+	Retention  Retention
 }
 
-func (d *DB) Rotate(ctx context.Context, accountID string, r Rotation) (int64, error) {
-	var next int64
-	err := d.tx(ctx, func(tx *sql.Tx) error {
+func (d *DB) ReplaceKey(ctx context.Context, accountID string, r KeyReplacement) (version, keyVersion int64, err error) {
+	err = d.tx(ctx, func(tx *sql.Tx) error {
 		now := d.ms()
-		var err error
-		next, err = putManifestTx(ctx, tx, now, accountID, r.IfMatch, r.Manifest, r.Retention)
-		if err != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(version), 0) + 1 FROM sync_keys WHERE account_id = ?`, accountID).Scan(&keyVersion); err != nil {
 			return err
 		}
-		for slot, blob := range r.Wraps {
-			if err := putWrapTx(ctx, tx, now, accountID, slot, blob); err != nil {
-				return err
-			}
+		var err error
+		if version, err = putManifestTx(ctx, tx, now, accountID, r.IfMatch, keyVersion, r.Manifest, r.Retention); err != nil {
+			return err
 		}
-		for _, slot := range r.DeleteSlots {
-			if _, err := tx.ExecContext(ctx, `DELETE FROM key_wraps WHERE account_id = ? AND slot = ?`, accountID, slot); err != nil {
-				return err
-			}
-		}
-		return nil
+		_, err = tx.ExecContext(ctx, `
+			INSERT INTO sync_keys (account_id, version, passphrase, recovery, updated_at) VALUES (?, ?, ?, ?, ?)
+			ON CONFLICT (account_id) DO UPDATE SET version = excluded.version, passphrase = excluded.passphrase, recovery = excluded.recovery, updated_at = excluded.updated_at`,
+			accountID, keyVersion, r.Passphrase, r.Recovery, now)
+		return err
 	})
-	return next, err
+	return version, keyVersion, err
 }
 
 func CurrentOf(err error) (int64, bool) {

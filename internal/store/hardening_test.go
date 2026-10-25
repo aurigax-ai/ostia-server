@@ -117,13 +117,9 @@ func TestRevokedDevicesAreDeletedAfterTheRetention(t *testing.T) {
 	recent, _ := d.DevicesOf(t.Context(), a.ID)
 	keep := recent[len(recent)-1]
 	active, _ := d.AddDevice(t.Context(), a.ID, newDevice("active"), 10)
-	if _, err := d.RevokeDevice(t.Context(), a.ID, old.ID); err != nil {
-		t.Fatal(err)
-	}
+	revoke(t, d, a.ID, old.ID)
 	c.t = c.t.Add(20 * 24 * time.Hour)
-	if _, err := d.RevokeDevice(t.Context(), a.ID, keep.ID); err != nil {
-		t.Fatal(err)
-	}
+	revoke(t, d, a.ID, keep.ID)
 	c.t = c.t.Add(15 * 24 * time.Hour)
 	if err := d.SweepRevokedDevices(t.Context(), 30*24*time.Hour); err != nil {
 		t.Fatal(err)
@@ -142,7 +138,7 @@ func TestRevokedDevicesAreDeletedAfterTheRetention(t *testing.T) {
 func TestInvitesRefuseANonPositiveTTL(t *testing.T) {
 	d, _ := open(t)
 	for _, ttl := range []time.Duration{0, -time.Minute} {
-		if _, err := d.CreateInvite(t.Context(), ids.Hash("code"), "", ttl, false, ""); !errors.Is(err, ErrInvalidTTL) {
+		if _, err := d.CreateInvite(t.Context(), ids.Hash("code"), ttl, ""); !errors.Is(err, ErrInvalidTTL) {
 			t.Fatalf("ttl %v: %v", ttl, err)
 		}
 	}
@@ -150,7 +146,7 @@ func TestInvitesRefuseANonPositiveTTL(t *testing.T) {
 
 func TestInvitesWithoutAnExpiryDoNotWorkAndAreSwept(t *testing.T) {
 	d, _ := open(t)
-	if _, err := d.sql.Exec(`INSERT INTO invites (code_hash, account_id, created_at, expires_at, elevated) VALUES (?, NULL, 1, 0, 0)`, ids.Hash("legacy")); err != nil {
+	if _, err := d.sql.Exec(`INSERT INTO invites (code_hash, created_at, expires_at) VALUES (?, 1, 0)`, ids.Hash("legacy")); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, err := d.RegisterWithInvite(t.Context(), ids.Hash("legacy"), newDevice("x"), 10); !errors.Is(err, ErrNotFound) {

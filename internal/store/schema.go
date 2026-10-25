@@ -155,3 +155,35 @@ DROP TABLE device_seen;
 ALTER TABLE devices RENAME COLUMN last_seen TO last_seen_at;
 UPDATE devices SET last_seen_at = {now};
 `
+
+const schemaV3 = `
+DROP TABLE approvals;
+ALTER TABLE sessions DROP COLUMN elevated_until;
+CREATE TABLE invites_v3 (
+	code_hash BLOB PRIMARY KEY,
+	created_at INTEGER NOT NULL,
+	expires_at INTEGER NOT NULL,
+	used_at INTEGER NOT NULL DEFAULT 0,
+	hint TEXT NOT NULL DEFAULT '',
+	created_account TEXT REFERENCES accounts(id) ON DELETE SET NULL
+);
+INSERT INTO invites_v3 (code_hash, created_at, expires_at, used_at, hint, created_account)
+	SELECT code_hash, created_at, expires_at, used_at, hint, created_account FROM invites WHERE account_id IS NULL;
+DROP TABLE invites;
+ALTER TABLE invites_v3 RENAME TO invites;
+CREATE INDEX invites_created_account ON invites(created_account);
+CREATE TABLE sync_keys (
+	account_id TEXT PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
+	version INTEGER NOT NULL,
+	passphrase BLOB NOT NULL,
+	recovery BLOB NOT NULL,
+	updated_at INTEGER NOT NULL
+);
+INSERT INTO sync_keys (account_id, version, passphrase, recovery, updated_at)
+	SELECT p.account_id, 1, p.blob, r.blob, MAX(p.updated_at, r.updated_at)
+	FROM key_wraps p JOIN key_wraps r ON r.account_id = p.account_id AND r.slot = 'recovery'
+	WHERE p.slot = 'passphrase';
+DROP TABLE key_wraps;
+DELETE FROM sync_manifests WHERE account_id NOT IN (SELECT account_id FROM sync_keys);
+ALTER TABLE sync_manifests ADD COLUMN key_version INTEGER NOT NULL DEFAULT 1;
+`

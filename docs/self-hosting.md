@@ -293,6 +293,8 @@ No access logs, no addresses or user agents stored, view counts only. Addresses 
 
 Replace the binary and restart. The database migrates itself and refuses to open a schema newer than the binary understands.
 
-## Accounts with one device
+## Accounts and devices
 
-Adding a third device, revoking another device, deleting the account, deleting or replacing sync key wraps, garbage collection and key rotation need an elevated session: another device of the account approves, or the owner signs in with GitHub again. A device must belong to the account for 24 hours before its approval counts (`auth.approver_min_age = 0` switches that protection off and is for tests only), so a stolen session cannot approve itself with a device it just added. An account with a single device that did not sign in with GitHub cannot elevate. The operator can still run `admin delete-account`; the other actions wait until a second device is added.
+An `admin invite` code makes a new account with one device. A second device joins the same account only through GitHub sign-in with the same GitHub user, so set `auth.github_client_id` if people sync between computers. No action needs another device's approval. The server has no API that removes a device or deletes an account: run `admin delete-account`, or let the inactivity sweep remove devices that stay silent for `devices.inactive_after`.
+
+The configuration keys `auth.device_invite_ttl`, `auth.elevation_ttl`, `auth.approval_ttl` and `auth.approver_min_age` are removed. The server refuses to start while the file still sets one of them, so remove them before you upgrade.
