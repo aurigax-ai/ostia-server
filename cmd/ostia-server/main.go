@@ -93,7 +93,7 @@ func setupLogging(level string) {
 
 const usage = `ostia-server [-config file]            run the server
 ostia-server admin [-config file] <command>
-    invite [-ttl 168h]                 print a one-time sign-in code that creates a new account
+    invite [-ttl 168h] [-account <id>] print a one-time sign-in code that creates a new account, or adds a device to <id>
     setup                              print a one-time code that sets up the first admin (GitHub sign-in)
     reset                              remove every admin and session; the next setup starts over
     logout-all                         end every admin web UI session
@@ -135,10 +135,11 @@ func admin(args []string) error {
 	case "invite":
 		sub := flag.NewFlagSet("invite", flag.ContinueOnError)
 		ttl := sub.Duration("ttl", cfg.Auth.InviteTTL.Std(), "how long the code stays valid")
+		account := sub.String("account", "", "add the new device to this account instead of creating one")
 		if err := sub.Parse(operands); err != nil {
 			return err
 		}
-		code, expires, err := a.Invite(ctx, *ttl)
+		code, expires, err := a.Invite(ctx, *account, *ttl)
 		if err != nil {
 			return err
 		}

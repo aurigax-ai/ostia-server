@@ -162,7 +162,7 @@ func (s *Service) createInvite(w http.ResponseWriter, r *http.Request, sess sess
 	if ttl == 0 {
 		return httpx.ErrBadRequest
 	}
-	code, expires, err := s.Auth.CreateInvite(r.Context(), ttl)
+	code, expires, err := s.Auth.CreateInvite(r.Context(), "", ttl)
 	if err != nil {
 		return err
 	}

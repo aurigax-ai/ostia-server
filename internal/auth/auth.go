@@ -196,9 +196,9 @@ func (s *Service) registerInvite(w http.ResponseWriter, r *http.Request) error {
 	return nil
 }
 
-func (s *Service) CreateInvite(ctx context.Context, ttl time.Duration) (code string, expiresAt int64, err error) {
+func (s *Service) CreateInvite(ctx context.Context, accountID string, ttl time.Duration) (code string, expiresAt int64, err error) {
 	code = FormatCode(ids.New()[:25])
-	expiresAt, err = s.DB.CreateInvite(ctx, ids.Hash(NormalizeCode(code)), ttl, CodeHint(code))
+	expiresAt, err = s.DB.CreateInvite(ctx, ids.Hash(NormalizeCode(code)), accountID, ttl, CodeHint(code))
 	return code, expiresAt, err
 }
 

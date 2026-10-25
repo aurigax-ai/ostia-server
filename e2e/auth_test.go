@@ -62,6 +62,30 @@ func TestGitHubSignInUsesOneAccountPerGitHubUser(t *testing.T) {
 	}
 }
 
+func TestAnAccountInviteAddsADeviceAndAPlainInviteMakesANewAccount(t *testing.T) {
+	e := newEnv(t, "")
+	owner := e.user(t, "laptop")
+	second := e.device(t, owner, "desktop")
+	if second.ID.DeviceID == owner.ID.DeviceID {
+		t.Fatal("the account invite must register a new device")
+	}
+	second.Must(t, http.StatusNoContent, "POST", "/v1/devices/heartbeat", nil)
+	if other := e.user(t, "someone else"); other.ID.AccountID == owner.ID.AccountID {
+		t.Fatal("a plain invite joined an existing account")
+	}
+	if out, err := adminOutput(t, e, "invite", "-account", "nosuchaccount"); err == nil {
+		t.Fatalf("an invite for an unknown account was minted: %s", out)
+	}
+	code := e.invite(t, "-account", owner.ID.AccountID)
+	e.anonymous().Onboard(t, code)
+	late := testkit.NewAPI(e.net, testkit.NewIdentity("late"))
+	body := late.ID.Registration()
+	body["code"] = code
+	if res := late.Do(t, "POST", "/v1/auth/invite", body); res.Status != http.StatusForbidden {
+		t.Fatalf("an account invite worked twice: %s", res)
+	}
+}
+
 func TestGitHubSignInAbsentWithoutAClientID(t *testing.T) {
 	e := newEnv(t, "")
 	if res := e.anonymous().Do(t, "POST", "/v1/auth/github/device", nil); res.Status != http.StatusNotFound && res.Status != http.StatusMethodNotAllowed {

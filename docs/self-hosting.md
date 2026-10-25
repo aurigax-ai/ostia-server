@@ -225,7 +225,7 @@ Everything the server writes is owner-only (the process sets umask 077, and the 
 ## Administration
 
 ```
-ostia-server admin invite [-ttl 168h]
+ostia-server admin invite [-ttl 168h] [-account <account-id>]
 ostia-server admin backup -recipient <age1...> -out <file>
 ostia-server admin setup
 ostia-server admin reset
@@ -239,7 +239,7 @@ ostia-server admin enable-publish <account-id>
 ostia-server admin delete-account <account-id>
 ```
 
-`invite` refuses a ttl of zero or below and one longer than `auth.invite_ttl`: a code always expires. These work against the same data directory while the server is running. A reported share is disabled with `takedown`; its content is deleted and the share page says it was removed. Repeat abuse is handled with `disable-publish`.
+`invite` refuses a ttl of zero or below and one longer than `auth.invite_ttl`: a code always expires. With `-account`, the code adds a new device to that account instead of making a new account (see [Accounts and devices](#accounts-and-devices)). These work against the same data directory while the server is running. A reported share is disabled with `takedown`; its content is deleted and the share page says it was removed. Repeat abuse is handled with `disable-publish`.
 
 ### Admin web UI
 
@@ -295,6 +295,11 @@ Replace the binary and restart. The database migrates itself and refuses to open
 
 ## Accounts and devices
 
-An `admin invite` code makes a new account with one device. A second device joins the same account only through GitHub sign-in with the same GitHub user, so set `auth.github_client_id` if people sync between computers. No action needs another device's approval. The server has no API that removes a device or deletes an account: run `admin delete-account`, or let the inactivity sweep remove devices that stay silent for `devices.inactive_after`.
+A plain `admin invite` code makes a new account with one device. A second computer joins an existing account in one of two ways:
+
+- GitHub sign-in with the same GitHub user, on a server that sets `auth.github_client_id`. This needs nothing from the operator.
+- An account invite. Find the account id with `admin accounts`, then run `ostia-server admin invite -account <account-id>` and give the code to the person. The code works once, expires like any invite, and stops working when the account is deleted. Only the operator can mint it: no device and no API can.
+
+The new computer then enters the sync passphrase once. No action needs another device's approval. The server has no API that removes a device or deletes an account: run `admin delete-account`, or let the inactivity sweep remove devices that stay silent for `devices.inactive_after`.
 
 The configuration keys `auth.device_invite_ttl`, `auth.elevation_ttl`, `auth.approval_ttl` and `auth.approver_min_age` are removed. The server refuses to start while the file still sets one of them, so remove them before you upgrade.

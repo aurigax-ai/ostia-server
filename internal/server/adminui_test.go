@@ -711,7 +711,7 @@ func TestStateChangingRoutesNeedTheCSRFToken(t *testing.T) {
 	s := e.signIn()
 	other := e.signIn()
 	acct, _ := e.account("laptop")
-	code, _, err := e.srv.Auth.CreateInvite(t.Context(), time.Hour)
+	code, _, err := e.srv.Auth.CreateInvite(t.Context(), "", time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}

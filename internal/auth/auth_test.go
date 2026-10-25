@@ -186,7 +186,7 @@ func (e *env) call(t *testing.T, method, path, token string, body any) (int, map
 
 func (e *env) invite(t *testing.T) string {
 	t.Helper()
-	code, _, err := e.svc.CreateInvite(t.Context(), time.Hour)
+	code, _, err := e.svc.CreateInvite(t.Context(), "", time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}

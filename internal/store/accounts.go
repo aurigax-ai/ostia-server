@@ -149,6 +149,7 @@ func (d *DB) PurgeDeparted(ctx context.Context, accountID string) (blobKeys []st
 			`DELETE FROM sync_keys WHERE account_id = ?`,
 			`DELETE FROM push_handles WHERE account_id = ?`,
 			`DELETE FROM push_tickets WHERE account_id = ?`,
+			`DELETE FROM invites WHERE account_id = ? AND used_at = 0`,
 		} {
 			if _, err := tx.ExecContext(ctx, q, accountID); err != nil {
 				return err

@@ -159,19 +159,8 @@ UPDATE devices SET last_seen_at = {now};
 const schemaV3 = `
 DROP TABLE approvals;
 ALTER TABLE sessions DROP COLUMN elevated_until;
-CREATE TABLE invites_v3 (
-	code_hash BLOB PRIMARY KEY,
-	created_at INTEGER NOT NULL,
-	expires_at INTEGER NOT NULL,
-	used_at INTEGER NOT NULL DEFAULT 0,
-	hint TEXT NOT NULL DEFAULT '',
-	created_account TEXT REFERENCES accounts(id) ON DELETE SET NULL
-);
-INSERT INTO invites_v3 (code_hash, created_at, expires_at, used_at, hint, created_account)
-	SELECT code_hash, created_at, expires_at, used_at, hint, created_account FROM invites WHERE account_id IS NULL;
-DROP TABLE invites;
-ALTER TABLE invites_v3 RENAME TO invites;
-CREATE INDEX invites_created_account ON invites(created_account);
+DELETE FROM invites WHERE account_id IS NOT NULL;
+ALTER TABLE invites DROP COLUMN elevated;
 CREATE TABLE sync_keys (
 	account_id TEXT PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
 	version INTEGER NOT NULL,

@@ -31,10 +31,8 @@ func TestMain(m *testing.M) {
 }
 
 type env struct {
-	proc        *testkit.Process
-	net         testkit.Net
-	gh          *testkit.FakeGitHub
-	githubUsers map[string]int64
+	proc *testkit.Process
+	net  testkit.Net
 }
 
 func newEnv(t *testing.T, extra string) *env {
@@ -48,7 +46,7 @@ func newEnvModules(t *testing.T, modules, extra string) *env {
 		APIDomain: apiHost, RelayDomain: relayHost,
 		CertFile: pki.CertFile, KeyFile: pki.KeyFile, Modules: modules, Extra: extra,
 	})
-	return &env{proc: proc, net: testkit.Net{HTTPSAddr: proc.HTTPSAddr, Roots: pki.Roots, APIHost: apiHost}, githubUsers: map[string]int64{}}
+	return &env{proc: proc, net: testkit.Net{HTTPSAddr: proc.HTTPSAddr, Roots: pki.Roots, APIHost: apiHost}}
 }
 
 func githubConfig(gh *testkit.FakeGitHub, extra string) string {
@@ -57,17 +55,9 @@ func githubConfig(gh *testkit.FakeGitHub, extra string) string {
 	return testkit.WithKey(extra, "[auth]", "github_api_url", `"`+gh.Server.URL+`"`)
 }
 
-func newGitHubEnv(t *testing.T, extra string) *env {
+func (e *env) invite(t *testing.T, args ...string) string {
 	t.Helper()
-	gh := testkit.NewFakeGitHub(t, 1)
-	e := newEnv(t, githubConfig(gh, extra))
-	e.gh = gh
-	return e
-}
-
-func (e *env) invite(t *testing.T) string {
-	t.Helper()
-	out := e.proc.Admin(t, "invite")
+	out := e.proc.Admin(t, append([]string{"invite"}, args...)...)
 	code, _, _ := strings.Cut(out, "\n")
 	return strings.TrimSpace(code)
 }
@@ -79,25 +69,12 @@ func (e *env) user(t *testing.T, name string) *testkit.API {
 	return api
 }
 
-func (e *env) githubUser(t *testing.T, name string) *testkit.API {
-	t.Helper()
-	user := int64(len(e.githubUsers) + 1000)
-	e.gh.SetUser(user)
-	api, account := githubSignIn(t, e, e.gh, name)
-	e.githubUsers[account] = user
-	return api
-}
-
 func (e *env) device(t *testing.T, owner *testkit.API, name string) *testkit.API {
 	t.Helper()
-	user, ok := e.githubUsers[owner.ID.AccountID]
-	if !ok {
-		t.Fatal("a second device of an account signs in with the account's GitHub user; create the owner with githubUser")
-	}
-	e.gh.SetUser(user)
-	api, account := githubSignIn(t, e, e.gh, name)
-	if account != owner.ID.AccountID {
-		t.Fatalf("the second device landed in account %s, want %s", account, owner.ID.AccountID)
+	api := testkit.NewAPI(e.net, testkit.NewIdentity(name))
+	api.Onboard(t, e.invite(t, "-account", owner.ID.AccountID))
+	if api.ID.AccountID != owner.ID.AccountID {
+		t.Fatalf("the second device landed in account %s, want %s", api.ID.AccountID, owner.ID.AccountID)
 	}
 	return api
 }

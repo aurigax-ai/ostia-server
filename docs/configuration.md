@@ -53,7 +53,7 @@
 | `github_base_url`, `github_api_url` | github.com | For GitHub Enterprise. |
 | `session_ttl` | `1h` | Lifetime of a bearer token. |
 | `max_devices_per_account` | `10` | |
-| `invite_ttl` | `168h` | Default and maximum lifetime of `admin invite` codes. Each code makes a new account; only GitHub sign-in adds a device to an existing account. The admin web UI offers 7 days, 1 day and 1 hour, leaving out any that exceed this. Must be positive: a code that never expires is not allowed. |
+| `invite_ttl` | `168h` | Default and maximum lifetime of `admin invite` codes. A plain code makes a new account; `admin invite -account <id>` makes a code that adds a device to that account. The admin web UI offers 7 days, 1 day and 1 hour, leaving out any that exceed this. Must be positive: a code that never expires is not allowed. |
 | `revoked_device_retention` | `720h` | How long the row of a revoked device is kept before the sweep deletes it. Must be positive. |
 
 ## `[admin]`

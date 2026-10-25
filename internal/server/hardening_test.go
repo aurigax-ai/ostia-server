@@ -32,18 +32,32 @@ func openTestAdmin(t *testing.T) *Admin {
 	return a
 }
 
+func TestAdminInviteForAnAccountRefusesAnUnknownAccount(t *testing.T) {
+	a := openTestAdmin(t)
+	if _, _, err := a.Invite(t.Context(), "nosuchaccount", time.Hour); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("an invite for an account that does not exist: %v", err)
+	}
+	acct, _, err := a.DB.RegisterProvider(t.Context(), "github", "h", store.NewDevice{Name: "a", SignPub: make([]byte, 32), BoxPub: make([]byte, 32)}, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := a.Invite(t.Context(), acct.ID, time.Hour); err != nil {
+		t.Fatalf("an invite for an existing account: %v", err)
+	}
+}
+
 func TestAdminInviteRefusesNeverExpiringAndOverlongCodes(t *testing.T) {
 	a := openTestAdmin(t)
 	for _, ttl := range []time.Duration{0, -time.Hour} {
-		if _, _, err := a.Invite(t.Context(), ttl); err == nil {
+		if _, _, err := a.Invite(t.Context(), "", ttl); err == nil {
 			t.Errorf("ttl %v was accepted", ttl)
 		}
 	}
 	max := a.Cfg.Auth.InviteTTL.Std()
-	if _, _, err := a.Invite(t.Context(), max+time.Second); err == nil || !strings.Contains(err.Error(), "auth.invite_ttl") {
+	if _, _, err := a.Invite(t.Context(), "", max+time.Second); err == nil || !strings.Contains(err.Error(), "auth.invite_ttl") {
 		t.Errorf("a code longer than the configured maximum was accepted: %v", err)
 	}
-	if _, _, err := a.Invite(t.Context(), max); err != nil {
+	if _, _, err := a.Invite(t.Context(), "", max); err != nil {
 		t.Errorf("the configured maximum itself was refused: %v", err)
 	}
 }

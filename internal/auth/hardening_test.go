@@ -50,7 +50,7 @@ func TestRequestsMoveLastSeenOncePerHour(t *testing.T) {
 func TestInvitesCannotBeMintedWithoutAnExpiry(t *testing.T) {
 	e := newEnv(t)
 	for _, ttl := range []time.Duration{0, -time.Second} {
-		if _, _, err := e.svc.CreateInvite(t.Context(), ttl); !errors.Is(err, store.ErrInvalidTTL) {
+		if _, _, err := e.svc.CreateInvite(t.Context(), "", ttl); !errors.Is(err, store.ErrInvalidTTL) {
 			t.Errorf("ttl %v: %v", ttl, err)
 		}
 	}

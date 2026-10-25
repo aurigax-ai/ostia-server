@@ -33,7 +33,7 @@ ostia-server/register/v1\n<signPub, base64url>\n<boxPub, base64url>
 
 and `proof` is the Ed25519 signature of its UTF-8 bytes. `signPub` and `boxPub` are 32 bytes; `name` is 1 to 64 printable characters.
 
-**Invite code** (the default for self-hosted instances; `ostia-server admin invite` mints one). An invite code always makes a new account. Only GitHub sign-in puts a second device into an existing account:
+**Invite code** (the default for self-hosted instances; `ostia-server admin invite` mints one). A plain code makes a new account. A code that the operator minted with `admin invite -account <id>` adds the device to that account. No device and no API mints an invite code:
 
 ```
 POST /v1/auth/invite  {code, name, signPub, boxPub, proof}

@@ -509,7 +509,7 @@ func TestRelayLabelCarriesThePublicPort(t *testing.T) {
 	proc := testkit.StartProcess(t, serverBinary, testkit.Config{
 		APIDomain: apiHost, RelayDomain: relayHost, CertFile: pki.CertFile, KeyFile: pki.KeyFile, Port: 8443,
 	})
-	mapped := &env{proc: proc, net: testkit.Net{HTTPSAddr: proc.HTTPSAddr, Roots: pki.Roots, APIHost: apiHost}, githubUsers: map[string]int64{}}
+	mapped := &env{proc: proc, net: testkit.Net{HTTPSAddr: proc.HTTPSAddr, Roots: pki.Roots, APIHost: apiHost}}
 	other := mapped.user(t, "desktop")
 	label = other.Must(t, http.StatusOK, "POST", "/v1/relay/label", nil).Map(t)
 	if label["port"].(float64) != 8443 {

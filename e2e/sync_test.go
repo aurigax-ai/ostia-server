@@ -26,8 +26,8 @@ const (
 
 func newSyncFixture(t *testing.T, extra string) *syncFixture {
 	t.Helper()
-	e := newGitHubEnv(t, extra)
-	a := testkit.NewSyncDevice(e.githubUser(t, "laptop"))
+	e := newEnv(t, extra)
+	a := testkit.NewSyncDevice(e.user(t, "laptop"))
 	a.Create(t, passphrase, recoveryKey)
 	return &syncFixture{env: e, a: a}
 }

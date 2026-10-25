@@ -35,7 +35,7 @@ func TestSweepsRunWithPublishSwitchedOff(t *testing.T) {
 		t.Fatal(err)
 	}
 	invite := ids.Hash("code")
-	if _, err := srv.DB.CreateInvite(t.Context(), invite, time.Minute, ""); err != nil {
+	if _, err := srv.DB.CreateInvite(t.Context(), invite, "", time.Minute, ""); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := srv.DB.CreatePushTicket(t.Context(), ids.Hash("ticket"), dev.AccountID, time.Minute); err != nil {

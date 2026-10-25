@@ -95,7 +95,7 @@ func TestDeviceLimit(t *testing.T) {
 func TestInviteIsSingleUseAndExpires(t *testing.T) {
 	d, c := open(t)
 	hash := ids.Hash("code-1")
-	if _, err := d.CreateInvite(t.Context(), hash, time.Hour, ""); err != nil {
+	if _, err := d.CreateInvite(t.Context(), hash, "", time.Hour, ""); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, err := d.RegisterWithInvite(t.Context(), hash, newDevice("a"), 10); err != nil {
@@ -106,10 +106,40 @@ func TestInviteIsSingleUseAndExpires(t *testing.T) {
 	}
 
 	late := ids.Hash("code-3")
-	_, _ = d.CreateInvite(t.Context(), late, time.Minute, "")
+	_, _ = d.CreateInvite(t.Context(), late, "", time.Minute, "")
 	c.t = c.t.Add(2 * time.Minute)
 	if _, _, err := d.RegisterWithInvite(t.Context(), late, newDevice("c"), 10); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("expired invite accepted: %v", err)
+	}
+}
+
+func TestAnAccountInviteAddsADeviceToThatAccountOnce(t *testing.T) {
+	d, _ := open(t)
+	a, _ := register(t, d, "github", "h")
+	code := ids.Hash("bound")
+	if _, err := d.CreateInvite(t.Context(), code, a.ID, time.Hour, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := d.RegisterWithInvite(t.Context(), code, newDevice("x"), 1); !errors.Is(err, ErrLimit) {
+		t.Fatalf("want ErrLimit, got %v", err)
+	}
+	joined, dev, err := d.RegisterWithInvite(t.Context(), code, newDevice("x"), 5)
+	if err != nil || joined.ID != a.ID || dev.AccountID != a.ID {
+		t.Fatalf("the invite must add the device to its account and survive a failed registration: %v %v", joined.ID, err)
+	}
+	if _, _, err := d.RegisterWithInvite(t.Context(), code, newDevice("y"), 5); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("an account invite worked twice: %v", err)
+	}
+	if devices, _ := d.DevicesOf(t.Context(), a.ID); len(devices) != 2 {
+		t.Fatalf("devices: %v", devices)
+	}
+	unused := ids.Hash("unused")
+	_, _ = d.CreateInvite(t.Context(), unused, a.ID, time.Hour, "")
+	if err := d.DeleteAccount(t.Context(), a.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := d.RegisterWithInvite(t.Context(), unused, newDevice("z"), 5); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("an invite outlived its account: %v", err)
 	}
 }
 
@@ -541,7 +571,7 @@ func TestPurgeDepartedDeletesSyncDataAndTheAccountUnlessSharesRemain(t *testing.
 func TestUsedAccountInvitesStayUntilTheAccountIsGone(t *testing.T) {
 	d, c := open(t)
 	hash := ids.Hash("code-keep")
-	if _, err := d.CreateInvite(t.Context(), hash, time.Hour, "KEEP-…-CODE"); err != nil {
+	if _, err := d.CreateInvite(t.Context(), hash, "", time.Hour, "KEEP-…-CODE"); err != nil {
 		t.Fatal(err)
 	}
 	acct, _, err := d.RegisterWithInvite(t.Context(), hash, newDevice("a"), 10)
@@ -967,7 +997,9 @@ func TestSchemaV3KeepsOneKeyPerAccountAndDropsDeviceTrust(t *testing.T) {
 	_ = d.sql.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM sqlite_master WHERE name IN ('approvals', 'key_wraps')`).Scan(&tables)
 	_ = d.sql.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM invites`).Scan(&invites)
 	_ = d.sql.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM invites WHERE hint = 'ADMIN'`).Scan(&adminInvites)
-	if tables != 0 || invites != 1 || adminInvites != 1 {
+	var accountInvites int
+	_ = d.sql.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM invites WHERE account_id IS NOT NULL`).Scan(&accountInvites)
+	if tables != 0 || invites != 1 || adminInvites != 1 || accountInvites != 0 {
 		t.Fatalf("approvals and wrap tables %d, invites %d (admin %d)", tables, invites, adminInvites)
 	}
 	if dev, err := d.SessionDevice(t.Context(), []byte{1}); err != nil || dev.ID != "d1" {
