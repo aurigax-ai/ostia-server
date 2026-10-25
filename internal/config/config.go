@@ -78,16 +78,12 @@ type Modules struct {
 }
 
 type Auth struct {
-	GitHubClientID  string   `toml:"github_client_id"`
-	GitHubBaseURL   string   `toml:"github_base_url"`
-	GitHubAPIURL    string   `toml:"github_api_url"`
-	SessionTTL      Duration `toml:"session_ttl"`
-	MaxDevices      int      `toml:"max_devices_per_account"`
-	InviteTTL       Duration `toml:"invite_ttl"`
-	DeviceInviteTTL Duration `toml:"device_invite_ttl"`
-	ElevationTTL    Duration `toml:"elevation_ttl"`
-	ApprovalTTL     Duration `toml:"approval_ttl"`
-	ApproverMinAge  Duration `toml:"approver_min_age"`
+	GitHubClientID string   `toml:"github_client_id"`
+	GitHubBaseURL  string   `toml:"github_base_url"`
+	GitHubAPIURL   string   `toml:"github_api_url"`
+	SessionTTL     Duration `toml:"session_ttl"`
+	MaxDevices     int      `toml:"max_devices_per_account"`
+	InviteTTL      Duration `toml:"invite_ttl"`
 
 	RevokedDeviceRetention Duration `toml:"revoked_device_retention"`
 }
@@ -195,15 +191,11 @@ func Default() Config {
 		TLS:      TLS{Mode: TLSFiles, ForwardProxyProtocol: true},
 		Modules:  Modules{Relay: true, Publish: true, Sync: true},
 		Auth: Auth{
-			GitHubBaseURL:   "https://github.com",
-			GitHubAPIURL:    "https://api.github.com",
-			SessionTTL:      Duration(time.Hour),
-			MaxDevices:      10,
-			InviteTTL:       Duration(7 * 24 * time.Hour),
-			DeviceInviteTTL: Duration(10 * time.Minute),
-			ElevationTTL:    Duration(5 * time.Minute),
-			ApprovalTTL:     Duration(5 * time.Minute),
-			ApproverMinAge:  Duration(24 * time.Hour),
+			GitHubBaseURL: "https://github.com",
+			GitHubAPIURL:  "https://api.github.com",
+			SessionTTL:    Duration(time.Hour),
+			MaxDevices:    10,
+			InviteTTL:     Duration(7 * 24 * time.Hour),
 
 			RevokedDeviceRetention: Duration(30 * 24 * time.Hour),
 		},
@@ -368,9 +360,7 @@ func (c Config) Validate() error {
 	need(store.ValidJournal(c.Storage.SQLiteJournal), fmt.Sprintf("storage.sqlite_journal must be %q or %q", store.JournalWAL, store.JournalDelete))
 	need(c.Auth.SessionTTL.Std() > 0, "auth.session_ttl must be positive")
 	need(c.Auth.InviteTTL.Std() > 0, "auth.invite_ttl must be positive, an invite code that never expires is not allowed")
-	need(c.Auth.DeviceInviteTTL.Std() > 0, "auth.device_invite_ttl must be positive, an invite code that never expires is not allowed")
 	need(c.Auth.RevokedDeviceRetention.Std() > 0, "auth.revoked_device_retention must be positive")
-	need(c.Auth.ApproverMinAge == 0 || c.Auth.ApproverMinAge >= c.Auth.SessionTTL, "auth.approver_min_age must be 0 or at least auth.session_ttl, otherwise a stolen session outlives the wait")
 	if c.Admin.Enabled {
 		need(c.Admin.GitHubClientID != "", "admin.github_client_id is required when admin.enabled is on")
 		need(c.Admin.GitHubClientSecret != "", "the admin GitHub client secret is required when admin.enabled is on: set "+AdminSecretEnv+" or admin.github_client_secret_file")

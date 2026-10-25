@@ -27,11 +27,8 @@ import (
 const (
 	RegisterContext    = "ostia-server/register/v1"
 	ChallengeContext   = "ostia-server/auth/v1"
-	InviteContext      = "ostia-server/invite/v1"
-	ElevateContext     = "ostia-server/elevate/v1"
-	RevokeContext      = "ostia-server/revoke/v2"
 	SyncGCContext      = "ostia-server/sync-gc/v1"
-	ApproveContext     = "ostia-server/approve/v1"
+	SyncRotateContext  = "ostia-server/sync-rotate/v1"
 	WrapReadContext    = "ostia-server/wrap-read/v1"
 	ManifestPutContext = "ostia-server/manifest-put/v1"
 	signatureHeader    = "X-Device-Signature"
@@ -52,16 +49,14 @@ const (
 
 type Hooks struct {
 	SessionEnded   func(tokenHash []byte)
-	DeviceAdded    func(accountID string, device store.Device)
 	DeviceRevoked  func(deviceID string)
 	AccountDeleted func(deviceIDs []string)
 }
 
 type Principal struct {
-	DeviceID      string
-	AccountID     string
-	TokenHash     []byte
-	ElevatedUntil int64
+	DeviceID  string
+	AccountID string
+	TokenHash []byte
 }
 
 type Service struct {
@@ -111,12 +106,7 @@ func (s *Service) Mount(mux *httpx.Mux) {
 		mux.Handle("POST /v1/auth/github/poll", g.PerIP("auth.github.poll", limit.Rule{Every: time.Second, Burst: 30}, httpx.Handle(s.githubPoll)))
 	}
 	mux.Handle("DELETE /v1/auth/session", s.Authed(s.logout))
-	mux.Handle("GET /v1/devices", s.Authed(s.listDevices))
-	mux.Handle("POST /v1/devices/invite", s.Authed(s.deviceInvite))
 	mux.Handle("POST /v1/devices/heartbeat", s.Authed(s.heartbeat))
-	mux.Handle("DELETE /v1/devices/{id}", s.Authed(s.revokeDevice))
-	mux.Handle("DELETE /v1/account", s.Authed(s.deleteAccount))
-	s.mountElevation(mux)
 }
 
 func (s *Service) Authed(fn func(w http.ResponseWriter, r *http.Request, p Principal) error) http.Handler {
@@ -139,15 +129,14 @@ func (s *Service) Authenticate(r *http.Request) (Principal, error) {
 		return Principal{}, httpx.ErrUnauthorized
 	}
 	hash := ids.Hash(token)
-	sess, err := s.DB.LookupSession(r.Context(), hash)
+	dev, err := s.DB.SessionDevice(r.Context(), hash)
 	if err != nil {
 		return Principal{}, httpx.ErrUnauthorized
 	}
-	dev := sess.Device
 	if s.Now().UnixMilli()-dev.LastSeenAt >= time.Hour.Milliseconds() {
 		_ = s.DB.TouchDevice(r.Context(), dev.ID)
 	}
-	return Principal{DeviceID: dev.ID, AccountID: dev.AccountID, TokenHash: hash, ElevatedUntil: sess.ElevatedUntil}, nil
+	return Principal{DeviceID: dev.ID, AccountID: dev.AccountID, TokenHash: hash}, nil
 }
 
 type registration struct {
@@ -203,23 +192,13 @@ func (s *Service) registerInvite(w http.ResponseWriter, r *http.Request) error {
 	default:
 		return err
 	}
-	s.announceDevice(r, acct.ID, dev)
 	httpx.WriteJSON(w, http.StatusCreated, registered{AccountID: acct.ID, DeviceID: dev.ID, Provider: acct.Provider})
 	return nil
 }
 
-func (s *Service) announceDevice(r *http.Request, accountID string, dev store.Device) {
-	if s.Hooks.DeviceAdded == nil {
-		return
-	}
-	if count, err := s.DB.ActiveDeviceCount(r.Context(), accountID); err == nil && count >= 2 {
-		s.Hooks.DeviceAdded(accountID, dev)
-	}
-}
-
-func (s *Service) CreateInvite(ctx context.Context, accountID string, ttl time.Duration, elevated bool) (code string, expiresAt int64, err error) {
+func (s *Service) CreateInvite(ctx context.Context, accountID string, ttl time.Duration) (code string, expiresAt int64, err error) {
 	code = FormatCode(ids.New()[:25])
-	expiresAt, err = s.DB.CreateInvite(ctx, ids.Hash(NormalizeCode(code)), accountID, ttl, elevated, CodeHint(code))
+	expiresAt, err = s.DB.CreateInvite(ctx, ids.Hash(NormalizeCode(code)), accountID, ttl, CodeHint(code))
 	return code, expiresAt, err
 }
 
@@ -370,17 +349,6 @@ func (s *Service) logout(w http.ResponseWriter, r *http.Request, p Principal) er
 	return nil
 }
 
-type deviceView struct {
-	ID         string    `json:"id"`
-	Name       string    `json:"name"`
-	SignPub    httpx.B64 `json:"signPub"`
-	BoxPub     httpx.B64 `json:"boxPub"`
-	CreatedAt  int64     `json:"createdAt"`
-	LastSeenAt int64     `json:"lastSeenAt"`
-	RemoveAt   int64     `json:"removeAt"`
-	Current    bool      `json:"current,omitzero"`
-}
-
 func (s *Service) heartbeat(w http.ResponseWriter, r *http.Request, p Principal) error {
 	w.WriteHeader(http.StatusNoContent)
 	return nil
@@ -409,60 +377,12 @@ func (s *Service) RevokeInactive(ctx context.Context) error {
 	return nil
 }
 
-func (s *Service) listDevices(w http.ResponseWriter, r *http.Request, p Principal) error {
-	devices, err := s.DB.DevicesOf(r.Context(), p.AccountID)
-	if err != nil {
-		return err
-	}
-	out := make([]deviceView, 0, len(devices))
-	for _, d := range devices {
-		out = append(out, deviceView{ID: d.ID, Name: d.Name, SignPub: d.SignPub, BoxPub: d.BoxPub, CreatedAt: d.CreatedAt, LastSeenAt: d.LastSeenAt, RemoveAt: d.LastSeenAt + s.InactiveAfter.Milliseconds(), Current: d.ID == p.DeviceID})
-	}
-	httpx.WriteJSON(w, http.StatusOK, map[string]any{"devices": out})
-	return nil
-}
-
-func (s *Service) deviceInvite(w http.ResponseWriter, r *http.Request, p Principal) error {
-	if err := s.RequireSignedTimestamp(r, p, InviteContext); err != nil {
-		return err
-	}
-	active, err := s.DB.ActiveDeviceCount(r.Context(), p.AccountID)
-	if err != nil {
-		return err
-	}
-	live, err := s.DB.LiveInvites(r.Context(), p.AccountID)
-	if err != nil {
-		return err
-	}
-	elevated := false
-	if active+live >= 2 {
-		if err := s.NeedElevation(p); err != nil {
-			return err
-		}
-		elevated = true
-	}
-	code, expires, err := s.CreateInvite(r.Context(), p.AccountID, s.Cfg.DeviceInviteTTL.Std(), elevated)
-	if err != nil {
-		return err
-	}
-	httpx.WriteJSON(w, http.StatusCreated, map[string]any{"code": code, "expiresAt": expires})
-	return nil
-}
-
 func StampedMessage(context, deviceID string, ms int64, fields ...string) []byte {
 	message := context + "\n" + deviceID + "\n" + strconv.FormatInt(ms, 10)
 	for _, field := range fields {
 		message += "\n" + field
 	}
 	return []byte(message)
-}
-
-func InviteMessage(deviceID string, ms int64) []byte {
-	return StampedMessage(InviteContext, deviceID, ms)
-}
-
-func ElevateMessage(deviceID string, ms int64) []byte {
-	return StampedMessage(ElevateContext, deviceID, ms)
 }
 
 func WrapReadMessage(deviceID string, ms int64, slot string) []byte {
@@ -511,28 +431,12 @@ func (s *Service) RequireSignature(r *http.Request, p Principal, context string,
 	return nil
 }
 
-func RevokeMessage(signerID string, ms int64, targetID string) []byte {
-	return StampedMessage(RevokeContext, signerID, ms, targetID)
-}
-
 func SyncGCMessage(deviceID string, ms int64, ifMatch int64, body []byte) []byte {
 	return StampedMessage(SyncGCContext, deviceID, ms, ManifestPutFields(ifMatch, body)...)
 }
 
-func (s *Service) RequireEstablishedDevice(ctx context.Context, p Principal) error {
-	device, err := s.DB.Device(ctx, p.DeviceID)
-	if err != nil {
-		return err
-	}
-	min := s.Cfg.ApproverMinAge.Std()
-	if min > 0 && s.Now().Sub(time.UnixMilli(device.CreatedAt)) < min {
-		return httpx.Errf(http.StatusForbidden, "device-too-new", "this device joined recently; it may do this once it has been part of the account long enough")
-	}
-	return nil
-}
-
-func ApproveMessage(approverID, approvalID, requesterID string) []byte {
-	return []byte(ApproveContext + "\n" + approverID + "\n" + approvalID + "\n" + requesterID)
+func SyncRotateMessage(deviceID string, ms int64, ifMatch int64, body []byte) []byte {
+	return StampedMessage(SyncRotateContext, deviceID, ms, ManifestPutFields(ifMatch, body)...)
 }
 
 func (s *Service) requireDeviceSignature(r *http.Request, p Principal, message []byte) error {
@@ -547,57 +451,6 @@ func (s *Service) requireDeviceSignature(r *http.Request, p Principal, message [
 	if !ed25519.Verify(ed25519.PublicKey(device.SignPub), message, signature) {
 		return httpx.Errf(http.StatusForbidden, "bad-signature", "the device signature does not match")
 	}
-	return nil
-}
-
-func (s *Service) needsElevationToRevoke(r *http.Request, p Principal, id string) (bool, error) {
-	self, err := s.DB.Device(r.Context(), p.DeviceID)
-	if err != nil {
-		return false, err
-	}
-	if id == p.DeviceID {
-		return false, nil
-	}
-	min := s.Cfg.ApproverMinAge.Std()
-	if min <= 0 {
-		return true, nil
-	}
-	target, err := s.DB.Device(r.Context(), id)
-	if err != nil || target.AccountID != p.AccountID {
-		return true, nil
-	}
-	older := self.CreatedAt < target.CreatedAt || (self.CreatedAt == target.CreatedAt && self.ID < target.ID)
-	probation := s.Now().Sub(time.UnixMilli(target.CreatedAt)) < min
-	return !(older && probation), nil
-}
-
-func (s *Service) revokeDevice(w http.ResponseWriter, r *http.Request, p Principal) error {
-	id := r.PathValue("id")
-	if err := s.RequireSignedTimestamp(r, p, RevokeContext, id); err != nil {
-		return err
-	}
-	needs, err := s.needsElevationToRevoke(r, p, id)
-	if err != nil {
-		return err
-	}
-	if needs {
-		if err := s.NeedElevation(p); err != nil {
-			return err
-		}
-	}
-	if _, err := s.DB.RevokeDevice(r.Context(), p.AccountID, id); err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			return httpx.ErrNotFound
-		}
-		return err
-	}
-	if s.Hooks.DeviceRevoked != nil {
-		s.Hooks.DeviceRevoked(id)
-	}
-	if err := s.purgeIfAbandoned(r.Context(), p.AccountID); err != nil {
-		return err
-	}
-	w.WriteHeader(http.StatusNoContent)
 	return nil
 }
 
@@ -631,14 +484,7 @@ func (s *Service) PurgeAbandoned(ctx context.Context) error {
 	return nil
 }
 
-func (s *Service) deleteAccount(w http.ResponseWriter, r *http.Request, p Principal) error {
-	if err := s.NeedElevation(p); err != nil {
-		return err
-	}
-	return s.DeleteAccount(r.Context(), p.AccountID, w)
-}
-
-func (s *Service) DeleteAccount(ctx context.Context, accountID string, w http.ResponseWriter) error {
+func (s *Service) DeleteAccount(ctx context.Context, accountID string) error {
 	devices, err := s.DB.DevicesOf(ctx, accountID)
 	if err != nil {
 		return err
@@ -662,9 +508,6 @@ func (s *Service) DeleteAccount(ctx context.Context, accountID string, w http.Re
 			deviceIDs = append(deviceIDs, d.ID)
 		}
 		s.Hooks.AccountDeleted(deviceIDs)
-	}
-	if w != nil {
-		w.WriteHeader(http.StatusNoContent)
 	}
 	return nil
 }

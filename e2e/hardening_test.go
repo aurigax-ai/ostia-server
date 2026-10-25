@@ -40,7 +40,26 @@ func manifestPutFor(ifMatch int64, body []byte) func(string, int64) []byte {
 	return func(deviceID string, ms int64) []byte { return auth.ManifestPutMessage(deviceID, ms, ifMatch, body) }
 }
 
-func TestStolenTokenCannotReadPassphraseOrRecoveryWrapsOrPushManifests(t *testing.T) {
+func rotateFor(ifMatch int64, body []byte) func(string, int64) []byte {
+	return func(deviceID string, ms int64) []byte { return auth.SyncRotateMessage(deviceID, ms, ifMatch, body) }
+}
+
+func stolenCopy(e *env, owner *testkit.API) *testkit.API {
+	stolen := testkit.NewAPI(e.net, &testkit.Identity{Name: "copy of the owner", DeviceID: owner.ID.DeviceID, AccountID: owner.ID.AccountID})
+	stolen.Token = owner.Token
+	stolen.Unsigned = true
+	return stolen
+}
+
+func requireSignature(t *testing.T, api *testkit.API, what, method, path string, body any, headers ...string) {
+	t.Helper()
+	res := api.Do(t, method, path, body, headers...)
+	if res.Status != http.StatusForbidden || res.Map(t)["error"] != "device-signature-required" {
+		t.Errorf("%s without the device key was not refused: %s", what, res)
+	}
+}
+
+func TestStolenTokenCannotReadWrapsPushManifestsOrReplaceTheKey(t *testing.T) {
 	f := newSyncFixture(t, "")
 	stolen := stolenCopy(f.env, f.a.API)
 	owner := f.a.API
@@ -49,16 +68,12 @@ func TestStolenTokenCannotReadPassphraseOrRecoveryWrapsOrPushManifests(t *testin
 		requireSignature(t, stolen, "reading the "+slot+" wrap", "GET", "/v1/sync/wraps/"+slot, nil)
 		owner.Must(t, http.StatusOK, "GET", "/v1/sync/wraps/"+slot, nil)
 	}
-	stolen.Must(t, http.StatusOK, "GET", "/v1/sync/wraps/device:"+owner.ID.DeviceID, nil)
-	stolen.Must(t, http.StatusOK, "GET", "/v1/sync/wraps", nil)
-
-	body := map[string]string{"blob": testkit.EncodeB64([]byte("junk"))}
-	res := stolen.Do(t, "PUT", "/v1/sync/manifest", body, "If-Match", "0")
-	if res.Status != http.StatusForbidden || res.Map(t)["error"] != "device-signature-required" {
-		t.Fatalf("a manifest push with a token alone: %s", res)
-	}
-	if res := owner.Do(t, "GET", "/v1/sync/manifest", nil); res.Status != http.StatusNotFound {
-		t.Fatalf("the refused push left a manifest behind: %s", res)
+	junk := testkit.EncodeB64([]byte("junk"))
+	requireSignature(t, stolen, "pushing a manifest", "PUT", "/v1/sync/manifest", map[string]string{"blob": junk}, "If-Match", "1")
+	requireSignature(t, stolen, "replacing the key", "POST", "/v1/sync/rotate", map[string]string{"manifest": junk, "passphrase": junk, "recovery": junk}, "If-Match", "1")
+	view := owner.Must(t, http.StatusOK, "GET", "/v1/sync/manifest", nil).Map(t)
+	if view["version"] != float64(1) || view["keyVersion"] != float64(1) {
+		t.Fatalf("a refused request changed the account: %v", view)
 	}
 }
 
@@ -83,7 +98,7 @@ func TestSignedReadsRejectWrongContextStaleAndReplayedSignatures(t *testing.T) {
 		}
 	}
 
-	expect("a signature made for inviting", read(signedHeaders(owner.ID, auth.InviteMessage, now)), http.StatusForbidden, "bad-signature")
+	expect("a signature made for replacing the key", read(signedHeaders(owner.ID, rotateFor(1, []byte("{}")), now)), http.StatusForbidden, "bad-signature")
 	expect("a signature made for pushing a manifest", read(signedHeaders(owner.ID, manifestPutFor(0, []byte("{}")), now+1)), http.StatusForbidden, "bad-signature")
 	expect("a timestamp ten minutes old", read(signedHeaders(owner.ID, wrapReadFor("passphrase"), now-10*60*1000)), http.StatusForbidden, "stale-signature")
 	expect("a timestamp ten minutes ahead", read(signedHeaders(owner.ID, wrapReadFor("passphrase"), now+10*60*1000)), http.StatusForbidden, "stale-signature")
@@ -103,8 +118,8 @@ func TestManifestPushWithSignatureStillHonoursIfMatch(t *testing.T) {
 	f := newSyncFixture(t, "")
 	owner := f.a.API
 	body := map[string]string{"blob": testkit.EncodeB64([]byte("sealed"))}
-	owner.Must(t, http.StatusOK, "PUT", "/v1/sync/manifest", body, "If-Match", "0")
-	res := owner.Do(t, "PUT", "/v1/sync/manifest", body, "If-Match", "0")
+	owner.Must(t, http.StatusOK, "PUT", "/v1/sync/manifest", body, "If-Match", "1")
+	res := owner.Do(t, "PUT", "/v1/sync/manifest", body, "If-Match", "1")
 	if res.Status != http.StatusPreconditionFailed {
 		t.Fatalf("a stale If-Match: %s", res)
 	}
@@ -308,13 +323,16 @@ func TestSignaturesBindTheSlotTheVersionAndTheBody(t *testing.T) {
 		return res
 	}
 	forged := []byte(`{"blob":"` + testkit.EncodeB64([]byte("junk!!")) + `"}`)
-	if res := put("0", forged, signedHeaders(owner.ID, manifestPutFor(0, body), now+2)); res.Status != http.StatusForbidden || res.Map(t)["error"] != "bad-signature" {
+	if res := put("1", forged, signedHeaders(owner.ID, manifestPutFor(1, body), now+2)); res.Status != http.StatusForbidden || res.Map(t)["error"] != "bad-signature" {
 		t.Fatalf("a captured signature carried another body: %s", res)
 	}
-	if res := put("1", body, signedHeaders(owner.ID, manifestPutFor(0, body), now+3)); res.Status != http.StatusForbidden || res.Map(t)["error"] != "bad-signature" {
+	if res := put("2", body, signedHeaders(owner.ID, manifestPutFor(1, body), now+3)); res.Status != http.StatusForbidden || res.Map(t)["error"] != "bad-signature" {
 		t.Fatalf("a captured signature carried another If-Match: %s", res)
 	}
-	if res := put("0", body, signedHeaders(owner.ID, manifestPutFor(0, body), now+4)); res.Status != http.StatusOK {
+	if res := put("1", body, signedHeaders(owner.ID, rotateFor(1, body), now+4)); res.Status != http.StatusForbidden || res.Map(t)["error"] != "bad-signature" {
+		t.Fatalf("a key replacement signature pushed a manifest: %s", res)
+	}
+	if res := put("1", body, signedHeaders(owner.ID, manifestPutFor(1, body), now+5)); res.Status != http.StatusOK {
 		t.Fatalf("the exact request the signature covers: %s", res)
 	}
 }
@@ -372,7 +390,7 @@ func TestManifestPushRefusesMissingOrStaleTimestampsWithoutReadingTheBody(t *tes
 			t.Fatal(err)
 		}
 		request := "PUT /v1/sync/manifest HTTP/1.1\r\nHost: " + apiHost + "\r\nAuthorization: Bearer " + owner.Token +
-			"\r\nIf-Match: 0\r\nContent-Type: application/json\r\nContent-Length: 4000000\r\n"
+			"\r\nIf-Match: 1\r\nContent-Type: application/json\r\nContent-Length: 4000000\r\n"
 		if stamp != "" {
 			request += "X-Device-Timestamp: " + stamp + "\r\nX-Device-Signature: AAAA\r\n"
 		}

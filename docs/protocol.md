@@ -15,7 +15,7 @@ This is the contract between ostia-server and its clients (the Ostia desktop app
 | Route | Answer |
 |---|---|
 | `GET /healthz` | `{"ok": true}` |
-| `GET /v1/info` | `{api, modules: {relay, publish, sync, push}, auth: {invite, github}, approverMinAgeSeconds, relayDomain, syncGCBound, deviceInactiveAfterSeconds, limits}`; the modules are booleans; `approverMinAgeSeconds` is `auth.approver_min_age` in seconds and is informational, see Client rules for device wraps; `deviceInactiveAfterSeconds` is `devices.inactive_after`; `syncGCBound: true` means `POST /v1/sync/gc` is bound to the manifest version and signed, and a client runs garbage collection only when it is present |
+| `GET /v1/info` | `{api, modules: {relay, publish, sync, push}, auth: {invite, github}, relayDomain, limits}`; the modules are booleans |
 
 A disabled module's routes do not exist (`404`).
 
@@ -33,7 +33,7 @@ ostia-server/register/v1\n<signPub, base64url>\n<boxPub, base64url>
 
 and `proof` is the Ed25519 signature of its UTF-8 bytes. `signPub` and `boxPub` are 32 bytes; `name` is 1 to 64 printable characters.
 
-**Invite code** (the default for self-hosted instances; `ostia-server admin invite` mints one, or a signed-in device mints one for another device of the same account):
+**Invite code** (the default for self-hosted instances; `ostia-server admin invite` mints one). A plain code makes a new account. A code that the operator minted with `admin invite -account <id>` adds the device to that account. No device and no API mints an invite code:
 
 ```
 POST /v1/auth/invite  {code, name, signPub, boxPub, proof}
@@ -72,58 +72,34 @@ ostia-server/auth/v1\n<deviceId>\n<nonce>
 
 A nonce is single use and lives 60 seconds. A device holds at most five open nonces. `challenge` answers the same way for unknown devices, but keeps nothing for them. The token is valid for `auth.session_ttl` (default one hour). Keep the token and the private keys in the main process only.
 
-**Why a bearer token and not a signature on every request.** All traffic is TLS to a known host, so the transport already authenticates the server and hides the token. A per-request signature would add a signed body-hash format, a replay window and clock handling, and it does not fit the WebSocket upgrade or streaming uploads, while protecting against little: the signing key lives in the same process as the token. What matters instead is how little a stolen token can do. It lives one hour, the server stores only its hash, and the destructive actions below need an elevated session that a token alone cannot obtain.
+**Why a bearer token and not a signature on every request.** All traffic is TLS to a known host, so the transport already authenticates the server and hides the token. A per-request signature would add a signed body-hash format, a replay window and clock handling, and it does not fit the WebSocket upgrade or streaming uploads, while protecting against little: the signing key lives in the same process as the token. What matters instead is how little a stolen token can do. It lives one hour, the server stores only its hash, and the destructive actions below need a signature with the device key, which a token alone does not give.
 
-### Devices and accounts
+### Devices
 
 ```
-GET    /v1/devices               {devices: [{id, name, signPub, boxPub, createdAt, lastSeenAt, removeAt, current?}]}   `lastSeenAt` is the device's last activity in Unix milliseconds, updated by any authenticated request at most once an hour; `removeAt` is `lastSeenAt` plus `devices.inactive_after`, when the server removes the device if it stays silent
 POST   /v1/devices/heartbeat     204   no body; checks the device in so an idle client is not removed for inactivity (any other authenticated request does the same, at most once an hour)
-POST   /v1/devices/invite        201 {code, expiresAt}      one-time code for a new device of this account, valid 10 minutes by default (every code has an expiry); an elevated session once the account has two or more devices
-DELETE /v1/devices/{id}          204   signed with the device key and a timestamp (`revoke/v2`); revokes sessions, the relay label and the device's key wrap; open relay streams close. When it was the account's last device, the account's sync data (manifests, blobs, key wraps), push registrations and unused device invites are deleted, and the account itself unless it still has shares
-DELETE /v1/account               204   removes every row and blob, push handles included, and closes the relay listener (elevated session)
 ```
+
+There is no device list and no API that removes a device. A device that signs out ends its session with `DELETE /v1/auth/session`. Its row stays until the inactivity sweep removes it. A lost device keeps its session until the session expires. A key replacement (see Sync) stops it from reading data that comes after.
 
 ### Actions that need the device key
 
-Some actions change who belongs to the account, so a bearer token alone is not enough: the request must also be signed with the calling device's Ed25519 key (the key registered with the device). The signature goes in `X-Device-Signature` (unpadded base64url) over a prefixed message that names the device and the target:
+Some actions can destroy data or help an offline guess of the passphrase, so a bearer token alone is not enough: the request must also be signed with the calling device's Ed25519 key (the key registered with the device). The signature goes in `X-Device-Signature` (unpadded base64url) over a prefixed message that names the device and the target. Every signed action also sends `X-Device-Timestamp` (milliseconds, within two minutes of the server clock, and larger than the device's previous one, so a captured request cannot be replayed):
 
 | Action | Message |
 |---|---|
-| `POST /v1/devices/invite` | `ostia-server/invite/v1\n<device id>\n<timestamp>`; also send `X-Device-Timestamp` (milliseconds, within two minutes of the server clock, and larger than the device's previous one, so a captured request cannot be replayed) |
-| `POST /v1/auth/elevation/approval` | `ostia-server/elevate/v1\n<device id>\n<timestamp>`, with `X-Device-Timestamp` as for invites |
-| `GET /v1/sync/wraps/passphrase`, `GET /v1/sync/wraps/recovery` | `ostia-server/wrap-read/v1\n<device id>\n<timestamp>\n<slot>` (`passphrase` or `recovery`), with `X-Device-Timestamp` as for invites |
-| `PUT /v1/sync/manifest` | `ostia-server/manifest-put/v1\n<device id>\n<timestamp>\n<if-match>\n<body hash>`, with `X-Device-Timestamp` as for invites. `<if-match>` is the version in `If-Match` as a decimal number without quotes. `<body hash>` is the unpadded base64url SHA-256 of the exact request body bytes |
-| `DELETE /v1/devices/{id}` | `ostia-server/revoke/v2\n<device id>\n<timestamp>\n<target id>`, with `X-Device-Timestamp` as for invites |
-| `POST /v1/sync/gc` | `ostia-server/sync-gc/v1\n<device id>\n<timestamp>\n<if-match>\n<body hash>`, with `X-Device-Timestamp` as for invites and `<if-match>` and `<body hash>` as for `PUT /v1/sync/manifest` (the hash is over the exact request body). A device still on probation (younger than `auth.approver_min_age`) is refused with `403 device-too-new` |
-| `POST /v1/auth/approvals/{id}/approve` | `ostia-server/approve/v1\n<approver id>\n<approval id>\n<requester id>` |
+| `GET /v1/sync/wraps/passphrase`, `GET /v1/sync/wraps/recovery` | `ostia-server/wrap-read/v1\n<device id>\n<timestamp>\n<slot>` (`passphrase` or `recovery`) |
+| `PUT /v1/sync/manifest` | `ostia-server/manifest-put/v1\n<device id>\n<timestamp>\n<if-match>\n<body hash>`. `<if-match>` is the version in `If-Match` as a decimal number without quotes. `<body hash>` is the unpadded base64url SHA-256 of the exact request body bytes |
+| `POST /v1/sync/rotate` | `ostia-server/sync-rotate/v1\n<device id>\n<timestamp>\n<if-match>\n<body hash>`, with `<if-match>` and `<body hash>` as for `PUT /v1/sync/manifest` |
+| `POST /v1/sync/gc` | `ostia-server/sync-gc/v1\n<device id>\n<timestamp>\n<if-match>\n<body hash>`, with `<if-match>` and `<body hash>` as for `PUT /v1/sync/manifest` |
 
-A missing signature answers `403 device-signature-required`, a wrong one `403 bad-signature`, an old or reused timestamp `403 stale-signature`. A stolen session token therefore cannot add, remove or approve devices, download the passphrase or recovery wrap to guess it offline, or push manifest versions that push real history out.
+A missing signature answers `403 device-signature-required`, a wrong one `403 bad-signature`, an old or reused timestamp `403 stale-signature`. A stolen session token therefore cannot download the passphrase or recovery wrap to guess it offline, replace the account key, delete blobs, or push manifest versions that push real history out.
 
-The timestamp counter is one per device, shared by every action in the table: a timestamp must be larger than the last one the server accepted from that device, whichever action it signed. A client keeps `stamp = max(now, previous stamp + 1)` and does not send two signed requests concurrently. The signature covers what the request asks for, so a captured header cannot be attached to another slot, another `If-Match` or another body (`403 bad-signature`). A signed request that fails after the signature was checked (for example a manifest `PUT` answered `412`) has still used its timestamp, so a retry signs a new one. The server reads the whole body before it checks the signature, so sign over the bytes you send and do not re-serialize between hashing and sending. Only the passphrase and recovery wraps are signed reads; `device:<id>` wraps, the manifest, blobs and listings stay readable with the token, since they are sealed to a device key or under `K`. An approval is also refused (`403 requester-too-new`) when the device asking for elevation has not belonged to the account for `auth.approver_min_age`, whoever approves.
+The timestamp counter is one per device, shared by every action in the table: a timestamp must be larger than the last one the server accepted from that device, whichever action it signed. A client keeps `stamp = max(now, previous stamp + 1)` and does not send two signed requests concurrently. The signature covers what the request asks for, so a captured header cannot be attached to another slot, another `If-Match`, another body or another action (`403 bad-signature`). A signed request that fails after the signature was checked (for example a manifest `PUT` answered `412`) has still used its timestamp, so a retry signs a new one. The server reads the whole body before it checks the signature, so sign over the bytes you send and do not re-serialize between hashing and sending. The manifest, blobs and listings stay readable with the token, since they are sealed under `K`.
 
-### Revoking devices
+### Inactive devices
 
-Revoking another device or the account normally needs an elevated session. Exceptions, so an owner can always remove an intruder: a device may revoke a device that is still younger than `auth.approver_min_age` (probation) and was added after it, without elevation, and a device may always revoke itself without elevation (it still needs its own signature, which a stolen token does not give). A device that leaves takes its server data with it: when the last device of an account leaves, the account's sync data is deleted, and the account too if it holds no shares. `DELETE /v1/auth/session` (sign out) is always free. The row of a revoked device is deleted `auth.revoked_device_retention` (30 days) after the revocation. A relay listener receives `{"t": "device-added", "deviceId", "name", "createdAt"}` when a device joins an account that already had one; it is sent once, to listeners connected at that moment. An hourly sweep first revokes every device whose `lastSeenAt` is older than `devices.inactive_after` (90 days by default; sessions, relay label and open streams end exactly as for a revoke) and then purges accounts that have no active device (a purge that failed after a revoke is retried there), and deletes such an account when none of its shares is live (removed or expired shares do not count).
-
-### Elevated sessions
-
-A stolen bearer token must not be able to destroy an account. These actions need a session that was elevated within the last `auth.elevation_ttl` (five minutes), otherwise they answer `403 elevation-required`: revoking another device, deleting the account, deleting a sync wrap, replacing the passphrase or recovery wrap and `POST /v1/sync/rotate`. A session is elevated one of two ways, per session and never for the approving device. Adding a device must not be a way around this, so `POST /v1/devices/invite` also needs an elevated session once the account has two or more devices **counting invites that are still open** (one stolen token cannot mint several invites while the count is one), and an invite minted without elevation stops working if the account has grown to two devices before it is redeemed, and a device may approve only after it has been part of the account for `auth.approver_min_age` (24 hours, longer than a session lives): a stolen token that adds a device of its own cannot use that device to approve itself (`403 device-too-new`).
-
-```
-GET  /v1/auth/elevation                          {elevatedUntil}              0 when not elevated
-
-POST /v1/auth/elevation/approval                 201 {approvalId, expiresAt}  409 no-second-device with one device; signed with the device key
-GET  /v1/auth/approvals                          {approvals: [{id, deviceId, deviceName, deviceCreatedAt, createdAt, expiresAt}]}   requests from the account's other devices
-POST /v1/auth/approvals/{id}/approve             204   403 for the requesting device itself
-GET  /v1/auth/approvals/{id}                     {status: "pending"|"approved", elevatedUntil?}   the requester polls
-DELETE /v1/auth/approvals/{id}                   204   only the requesting device may cancel its own request; an approver who does not want to approve simply lets it expire
-
-POST /v1/auth/elevation/github                   like /v1/auth/github/device, for a GitHub account; 409 not-a-github-account
-POST /v1/auth/elevation/github/poll {flowId}     200 {elevatedUntil} | 202 pending | 403 wrong-account
-```
-
-The approving device must show who is asking (`deviceName`) and how long that device has existed (`deviceCreatedAt`, "added 3 minutes ago"), and approve only on the person's click. A client should also tell the person on every device when `GET /v1/devices` shows a device it has not seen before.
+An hourly sweep revokes every device whose last activity is older than `devices.inactive_after` (90 days by default). Its sessions and relay label end and its open relay streams close. The sweep then purges each account that has no active device: its sync data (manifests, blobs, the key and its wraps) and push registrations are deleted, and the account too when none of its shares is live (removed or expired shares do not count). The row of a revoked device is deleted `auth.revoked_device_retention` (30 days) after the revocation. `ostia-server admin delete-account` removes an account at once.
 
 ## Relay
 
@@ -221,12 +197,11 @@ Only the relay uses WebSocket. Control frames are JSON text; relayed bytes are b
 |---|---|---|
 | `/v1/relay/listen` | server to desktop | `{"t": "ping"}` |
 | `/v1/relay/listen` | server to desktop | `{"t": "incoming", "stream": string, "peer": "ip:port", "family": 4 or 6}` |
-| `/v1/relay/listen` | server to desktop | `{"t": "device-added", "deviceId": string, "name": string, "createdAt": ms}` |
 | `/v1/relay/listen` | desktop to server | `{"t": "pong"}` |
 | `/v1/relay/listen` | desktop to server | `{"t": "confirm", "stream": string}` |
 | `/v1/relay/accept/{stream}` | both | binary frames: the phone's TCP stream |
 
-Close codes: 1008 when a newer listener replaced this one, the device was removed, the session ended, or the pongs stopped; 1001 when the server shuts down.
+Close codes: 1008 when a newer listener replaced this one, the device or its account was removed, the session ended, or the pongs stopped; 1001 when the server shuts down.
 
 ## Sync
 
@@ -255,79 +230,54 @@ A blob id names its content, so a blob is write-once: uploading the same bytes a
 The manifest is JSON, sealed with `manifestKey` and AAD `ostia-sync/manifest/v1`:
 
 ```json
-{"counter": 7, "files": {"settings.json": {"blobId": "…", "hash": "…"}}, "devices": [{"id": "…", "name": "…", "signPub": "…", "boxPub": "…", "createdAt": 1760000000000}]}
+{"counter": 7, "files": {"settings.json": {"blobId": "…", "hash": "…"}}}
 ```
 
-`devices` is the approved list. Each entry carries the device's public keys (unpadded base64url) and `createdAt`, the time in Unix milliseconds that the approving device wrote when it approved the device. The approved list is the client's trust anchor for device wraps: a client takes a device's keys from the sealed manifest entry and never from `GET /v1/devices`, which is the server's word. `createdAt` alone is not proof of age, because every device that holds `K` can write the manifest and backdate its own entry; the age rule in Client rules for device wraps accounts for that.
+The server stores sealed manifests with a monotonically increasing `version` and the key version they are sealed under. It keeps the newest `sync.manifest_history`, plus the last version of each of the previous `sync.manifest_checkpoint_days` days, so a flood of writes from a stolen token cannot push every earlier version out of the history.
 
-The server stores sealed manifests with a monotonically increasing `version`. It keeps the newest `sync.manifest_history`, plus the last version of each of the previous `sync.manifest_checkpoint_days` days, so a flood of writes from a stolen token cannot push every earlier version out of the history.
+**Rollback guard.** Each device remembers the highest `counter` it has seen and refuses a manifest with a lower one (`stale-manifest`). A server that serves an old manifest is caught as soon as a device has seen a newer one. A manifest written by a key replacement continues the counter.
 
-**Rollback guard.** Each device remembers the highest `counter` it has seen and refuses a manifest with a lower one (`stale-manifest`). A server that serves an old manifest is caught as soon as a device has seen a newer one.
+### The account key
 
-### Wrapping `K`
+Each account has one profile key `K` at a time, with three things on the server: a passphrase wrap, a recovery wrap and a key version. The key version is 0 before sync is set up. It goes up by one each time `K` is replaced. All wraps are opaque to the server.
 
-All wraps are opaque to the server.
+- Both wraps use one format: `0x01 || memoryKiB (4 bytes BE) || passes (1) || lanes (1) || salt (16) || nonce (12) || AES-256-GCM(argon2id(secret, salt, passes, memoryKiB, lanes) → 32 bytes, K)`, AAD = `"ostia-sync/wrap/passphrase/v1"` followed by the first 23 header bytes. The secret is the passphrase or the recovery key. Production parameters are 64 MiB, 3 passes, 4 lanes.
+- Set up and every replacement go through `POST /v1/sync/rotate`. One request carries the new manifest, the new passphrase wrap and the new recovery wrap. The server writes all three and the new key version in one transaction, so no device sees a manifest without the wraps for its key.
+- A replacement needs no approval from another device. The server does not check that the caller holds `K`. Only a device that unlocked `K` with the passphrase can re-seal the data under `K'`. The request is signed with the device key, so a stolen token alone cannot replace `K`.
 
-- `passphrase` and `recovery` slots: `0x01 || memoryKiB (4 bytes BE) || passes (1) || lanes (1) || salt (16) || nonce (12) || AES-256-GCM(argon2id(secret, salt, passes, memoryKiB, lanes) → 32 bytes, K)`, AAD = `"ostia-sync/wrap/passphrase/v1"` followed by the first 23 header bytes. Production parameters are 64 MiB, 3 passes, 4 lanes.
-- `device:<deviceId>` slot (version 2): `0x02 || signerIdLen (1) || signerId (utf-8) || counter (8 BE) || ephemeral X25519 public key (32) || nonce (12) || AES-256-GCM(wrapKey, K) (48) || signature (64)`.
-  - `wrapKey = HKDF-SHA256(X25519(ephemeral, targetBoxPub), salt = empty, info = "ostia-sync/wrap/device" || ephemeralPub || targetBoxPub, 32)`. AAD = every byte before the ciphertext (version through nonce) followed by the target slot name in utf-8.
-  - `signature = Ed25519(signer's device sign key)` over `"ostia-sync/wrap/sig/v1\n" || slot || "\n" || every byte before the signature`. The slot is signed, so a wrap cannot be moved to another device's slot.
-  - `counter` is the manifest counter the wrap belongs to: for a link, the manifest counter at approval time (at least 1); for a rotation, the counter of the new manifest.
-
-The server checks every device wrap on `PUT /v1/sync/wraps/device:<id>` and inside `POST /v1/sync/rotate`: it must parse as version 2 (`400 bad-wrap` otherwise), `signerId` must be the calling device and that device must be active (`403 wrong-signer` otherwise), and the signature must verify under that device's registered sign key (`400 bad-wrap`). A rotation with any failing wrap changes nothing. The server cannot open the wrap, so it does not check the counter or the target key; clients do. `GET` returns the blob untouched.
-
-Client rules for device wraps:
-
-- Age bound. A client enforces `max(24 h, approverMinAgeSeconds)`. `approverMinAgeSeconds` from `GET /v1/info` can only raise the bound above the client's own 24 hour floor, never lower it, so a server that reports 0 changes nothing. The field is informational, for a UI that says "this device can approve in N hours".
-- A linked device adopts a new key (a rotation, or any wrap it did not ask for) only from a version 2 wrap whose signer is in the approved list of the last manifest it opened, whose sign key from that manifest entry verifies the signature, whose signer is at least the age bound old (see Signer age), whose `counter` is greater than the highest counter it has seen for the account, and whose key opens the manifest at that counter. Anything else is ignored with a warning: the client keeps `K` and uploads nothing.
-- Signer age. A client measures the age of a signer as `now - max(entry.createdAt, firstSeen, listingCreatedAt)`. `firstSeen` is the time this client first opened a manifest that lists that id with that `signPub`, kept locally in the client's sealed sync store; `listingCreatedAt` is `createdAt` from `GET /v1/devices` when the device is listed. Taking the maximum means a backdated entry has no effect, so a device that holds `K` cannot age itself by editing its entry, and the server can only make a device look younger, which at worst delays an adoption. An id whose keys or `createdAt` change in a later manifest is treated as a new device: its `firstSeen` is now, and the client warns.
-- A joining device adopts only a wrap signed by the approver's sign key that went into the link code the person confirmed; `counter` must be at least 1 and at least the `counter` of the manifest that the wrapped key then opens. Without a manifest on the server there is nothing to open and the wrap is adopted on the first two conditions.
-- A re-link always uses a new device id and new keys; the client enforces this and never joins again with the identity of a device that was linked before. A join wrap is not bound to one join beyond its counter, so reusing an identity could let the server replay an older wrap from the same approver together with an older manifest and hand the device a key that a rotation already revoked.
-- A rotation wraps `K'` only to devices whose listed sign and box keys equal the keys in the approved list. The new manifest's approved list is the list of those devices.
-- An approving device writes the new device into the approved list, with `createdAt` set to its own clock at approval, in the next manifest it uploads.
-
-Known limit. A device that was offline while another device was removed still has the removed device in its last opened manifest. The removed device, whose keys were stolen, and a hostile server can give it a signed wrap with a counter above its highest and a manifest sealed under the attacker's key, and the rules above accept it: the removed device is old, so the age bound does not help, and no signature scheme fixes this alone. A client may keep the last few approved lists and warn when an adopting wrap's signer is missing from a newer manifest it fetched before.
-
-Link code. The person compares a code on both screens before the approver uploads a wrap, and the code binds both of the joiner's public keys and the approver's sign key:
-
-```
-digest = SHA-256("ostia-sync/link-code/v1\n" || joinerSignPub (32) || joinerBoxPub (32) || approverSignPub (32))
-code   = first 125 bits of digest as 25 RFC 4648 base32 characters (A-Z, 2-7, no padding, uppercase),
-         shown as 5 groups of 5 separated by "-"
-```
-
-The joiner reads its own two keys locally and the approver's `signPub` from the device listing. The approver reads its own `signPub` locally and the joiner's two keys from the listing. Both compute the code and the person confirms that the two match; a server that swaps any of the three keys makes the codes differ. `testdata/vectors/link.json` holds a fixed-key vector and a negative case with the joiner's `boxPub` swapped, checked by `vectors.test.mjs` and the Go vector test.
-
-A new device gets `K` from the passphrase, the recovery key, or from a signed-in device that uploads the device wrap after the person approves it.
+A new device gets `K` from the passphrase or from the recovery key. There is no device wrap, link code or approval.
 
 ### API
 
 ```
-GET  /v1/sync/manifest[?version=N]    {version, blob, updatedAt}; 404 no-manifest
-PUT  /v1/sync/manifest                {blob}; If-Match: <current version, 0 for none>; signed with the device key → 200 {version}
-                                      412 {error: "version-mismatch", current}; 428 without If-Match
-GET  /v1/sync/manifest/versions       {versions: [{version, updatedAt}]}
+GET  /v1/sync/manifest[?version=N]    {version, keyVersion, blob, updatedAt}; 404 no-manifest. keyVersion is the key version the manifest is sealed under
+PUT  /v1/sync/manifest                {blob}; If-Match: <current version>; signed with the device key → 200 {version}
+                                      412 {error: "version-mismatch", current}; 428 without If-Match; 409 no-key before set up. The manifest keeps the current key version
+GET  /v1/sync/manifest/versions       {versions: [{version, keyVersion, updatedAt}]}
 GET  /v1/sync/blobs/{blobId}          raw bytes
 PUT  /v1/sync/blobs/{blobId}          raw bytes → 201 created | 200 identical | 409 | 413 | 507
-GET  /v1/sync/wraps                   {wraps: [{slot, updatedAt}]}
-GET  /v1/sync/wraps/{slot}            {slot, blob, updatedAt}; the passphrase and recovery slots are signed with the device key (`403 device-signature-required`)
-PUT  /v1/sync/wraps/{slot}            {blob} → 204        slot: passphrase | recovery | device:<id of an active device>; an unelevated session may only fill an empty slot; replacing any existing wrap needs an elevated session. A `device:<id>` blob must be a version 2 wrap signed by the calling device (`400 bad-wrap`, `403 wrong-signer`), see Wrapping `K`
-DELETE /v1/sync/wraps/{slot}          204
-POST /v1/sync/rotate                  {ifMatch, manifest, wraps: {slot: blob}, deleteSlots: [slot]} → 200 {version} | 412 | 400 bad-wrap | 403 wrong-signer     every device wrap is checked like a PUT
-POST /v1/sync/gc                      {keep: [blobId]} → {deleted}     removes blobs older than sync.gc_grace that are not listed. Allowed for an established device (older than `auth.approver_min_age`) with a signed request (`ostia-server/sync-gc/v1`) and `If-Match: <manifest version the caller pushed>`, with no elevation: `428` without `If-Match`, `412 {error: "version-mismatch", current}` when the manifest has moved. Uploading a blob that already exists refreshes its age, so a blob id that returns to an earlier state is not collected by an old grace period
+GET  /v1/sync/wraps/{slot}            {slot, blob, keyVersion, updatedAt}; slot: passphrase | recovery (400 bad-slot otherwise); signed with the device key; 404 before set up
+POST /v1/sync/rotate                  {manifest, passphrase, recovery}; If-Match: <manifest version read, 0 for none>; signed with the device key
+                                      → 200 {version, keyVersion}; 412 {error: "version-mismatch", current}; 428 without If-Match; 400 bad-request when a part is missing or too large
+POST /v1/sync/gc                      {keep: [blobId]} → {deleted}     removes blobs older than sync.gc_grace that are not listed. Signed with the device key (`ostia-server/sync-gc/v1`) and `If-Match: <manifest version the caller pushed>`: `428` without If-Match, `412 {error: "version-mismatch", current}` when the manifest has moved. Uploading a blob that already exists refreshes its age, so a blob id that returns to an earlier state is not collected by an old grace period
 GET  /v1/sync/usage                   {blobs, bytes, quotaBytes}
 ```
 
 ### Client algorithm
 
-1. `GET manifest`; open it; refuse a counter lower than the highest seen. Fetch and open the blobs it lists; check each content hash.
-2. Merge per key with the last synced state as base. Upload blobs whose id the remote manifest does not list, then `PUT manifest` with `If-Match: <version read>` and `counter = highest + 1`.
-3. On `412`, repeat from step 1 (the reference client tries three times).
-4. A manifest that does not open with `K` may mean the key was rotated. Unwrap the `device:<own id>` wrap only per the device-wrap client rules (signer in the last opened manifest, signature, age, counter above the highest, the manifest opens at that counter) and retry. Otherwise keep `K`, warn, and do not upload.
+1. `GET manifest`. If `keyVersion` is not the key version this device unlocked, `K` was replaced: ask the person for the passphrase once, `GET` the passphrase wrap and unwrap the new `K`. Do not upload anything before that.
+2. Open the manifest and refuse a counter lower than the highest seen. Fetch and open the blobs it lists and check each content hash.
+3. Merge per key with the last synced state as base. Upload blobs whose id the remote manifest does not list, then `PUT manifest` with `If-Match: <version read>` and `counter = highest + 1`.
+4. On `412`, repeat from step 1 (the reference client tries three times).
 
-### Removing a device
+### Changing the passphrase
 
-`DELETE /v1/devices/{id}` ends its sessions and deletes its wrap (the last device of an account leaving deletes the account's sync data instead). The remaining device then generates a new `K'`, re-seals every blob and the manifest under it, and sends one `POST /v1/sync/rotate` with the new manifest, the new passphrase wrap, a recovery wrap only if the person re-entered the recovery key (otherwise the slot is deleted), and a device wrap for every remaining device. The server swaps manifest and wraps in one transaction. A removed device keeps what it already decrypted; rotation protects what comes after.
+1. Read and open the current manifest and its blobs with `K`.
+2. Make a new `K'` and re-seal every blob and the manifest under it.
+3. Send one `POST /v1/sync/rotate` with the new manifest, a passphrase wrap and a recovery wrap of `K'`, and `If-Match: <version read>`.
+4. Show the new recovery key to the person once.
+
+The same steps set a new passphrase after a recovery with the recovery key. The other devices see the new key version and ask for the new passphrase once. A device that knew only the old passphrase cannot read what comes after. It keeps what it already decrypted.
 
 ## Push
 
@@ -350,11 +300,11 @@ DELETE /v1/push/{handle} (session)                         204
 
 | Status | `error` |
 |---|---|
-| 400 | `bad-request`, `bad-proof`, `bad-slot`, `size-mismatch`, `bad-wrap` |
+| 400 | `bad-request`, `bad-proof`, `bad-slot`, `size-mismatch` |
 | 401 | `unauthorized` |
-| 403 | `forbidden`, `invalid-invite`, `denied`, `device-too-new`, `wrong-account`, `invalid-ticket`, `elevation-required`, `wrong-signer`, `public-disabled`, `publish-disabled` |
-| 404 | `not-found`, `no-manifest`, `unknown-flow`, `unknown-device` |
-| 409 | `conflict`, `blob-exists`, `already-uploaded`, `device-limit`, `no-second-device`, `not-a-github-account` |
+| 403 | `forbidden`, `invalid-invite`, `denied`, `invalid-ticket`, `device-signature-required`, `bad-signature`, `stale-signature`, `public-disabled`, `publish-disabled` |
+| 404 | `not-found`, `no-manifest`, `unknown-flow` |
+| 409 | `conflict`, `blob-exists`, `already-uploaded`, `device-limit`, `no-key` |
 | 410 | `gone`, `expired` |
 | 412 | `version-mismatch` |
 | 413 | `too-large` |

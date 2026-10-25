@@ -711,7 +711,7 @@ func TestStateChangingRoutesNeedTheCSRFToken(t *testing.T) {
 	s := e.signIn()
 	other := e.signIn()
 	acct, _ := e.account("laptop")
-	code, _, err := e.srv.Auth.CreateInvite(t.Context(), "", time.Hour, false)
+	code, _, err := e.srv.Auth.CreateInvite(t.Context(), "", time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -927,7 +927,7 @@ func TestDeletingAnAccountRemovesEverythingItStored(t *testing.T) {
 	}
 	blobKey := e.putBlob(a.ID, "blob-aaaaaaaaaaaaaaaaaaaa", 10)
 	keepKey := e.putBlob(keep.ID, "blob-bbbbbbbbbbbbbbbbbbbb", 10)
-	if err := e.srv.DB.PutWrap(t.Context(), a.ID, "passphrase", []byte("wrap")); err != nil {
+	if _, _, err := e.srv.DB.ReplaceKey(t.Context(), a.ID, store.KeyReplacement{Manifest: []byte("m"), Passphrase: []byte("p"), Recovery: []byte("r")}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := e.srv.DB.CreateSession(t.Context(), ids.Hash("tok"), dev.ID, time.Hour); err != nil {
@@ -975,8 +975,8 @@ func TestDeletingAnAccountRemovesEverythingItStored(t *testing.T) {
 			t.Errorf("session %s survived: %v", tok, err)
 		}
 	}
-	if wraps, _ := e.srv.DB.Wraps(ctx, a.ID); len(wraps) != 0 {
-		t.Errorf("wraps survived: %v", wraps)
+	if _, err := e.srv.DB.SyncKey(ctx, a.ID); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("the sync key survived: %v", err)
 	}
 	if _, err := e.srv.DB.PushHandle(ctx, "h-aaaaaaaa"); !errors.Is(err, store.ErrNotFound) {
 		t.Errorf("the push handle survived: %v", err)

@@ -26,13 +26,17 @@ const registerContext = "ostia-server/register/v1"
 const challengeContext = "ostia-server/auth/v1"
 
 const (
-	inviteContext      = "ostia-server/invite/v1"
-	elevateContext     = "ostia-server/elevate/v1"
 	wrapReadContext    = "ostia-server/wrap-read/v1"
 	manifestPutContext = "ostia-server/manifest-put/v1"
-	revokeContext      = "ostia-server/revoke/v2"
 	syncGCContext      = "ostia-server/sync-gc/v1"
+	syncRotateContext  = "ostia-server/sync-rotate/v1"
 )
+
+var boundContexts = map[string]string{
+	"PUT /v1/sync/manifest": manifestPutContext,
+	"POST /v1/sync/gc":      syncGCContext,
+	"POST /v1/sync/rotate":  syncRotateContext,
+}
 
 type Net struct {
 	HTTPSAddr string
@@ -156,49 +160,19 @@ func (a *API) deviceSignature(method, path string, headers map[string]string, bo
 			"X-Device-Signature": sign(message),
 		}
 	}
-	switch {
-	case method == "POST" && path == "/v1/devices/invite":
-		return stamped(inviteContext)
-	case method == "POST" && path == "/v1/auth/elevation/approval":
-		return stamped(elevateContext)
-	case method == "GET" && (path == "/v1/sync/wraps/passphrase" || path == "/v1/sync/wraps/recovery"):
+	if method == "GET" && (path == "/v1/sync/wraps/passphrase" || path == "/v1/sync/wraps/recovery") {
 		return stamped(wrapReadContext, strings.TrimPrefix(path, "/v1/sync/wraps/"))
-	case (method == "PUT" && path == "/v1/sync/manifest") || (method == "POST" && path == "/v1/sync/gc"):
-		context := manifestPutContext
-		if path == "/v1/sync/gc" {
-			context = syncGCContext
-		}
-		ifMatch, err := strconv.ParseInt(strings.Trim(headers["If-Match"], `" `), 10, 64)
-		if err != nil {
-			return nil
-		}
-		sum := sha256.Sum256(body)
-		return stamped(context, fmt.Sprint(ifMatch), b64.EncodeToString(sum[:]))
-	case method == "DELETE" && strings.HasPrefix(path, "/v1/devices/"):
-		target := strings.TrimPrefix(path, "/v1/devices/")
-		return stamped(revokeContext, target)
-	case method == "POST" && strings.HasPrefix(path, "/v1/auth/approvals/") && strings.HasSuffix(path, "/approve"):
-		id := strings.TrimSuffix(strings.TrimPrefix(path, "/v1/auth/approvals/"), "/approve")
-		res, err := a.rawUnsigned("GET", "/v1/auth/approvals", nil, nil)
-		if err != nil || res.Status != http.StatusOK {
-			return nil
-		}
-		var list struct {
-			Approvals []struct {
-				ID       string `json:"id"`
-				DeviceID string `json:"deviceId"`
-			} `json:"approvals"`
-		}
-		if json.Unmarshal(res.Body, &list) != nil {
-			return nil
-		}
-		for _, pending := range list.Approvals {
-			if pending.ID == id {
-				return map[string]string{"X-Device-Signature": sign("ostia-server/approve/v1\n" + a.ID.DeviceID + "\n" + id + "\n" + pending.DeviceID)}
-			}
-		}
 	}
-	return nil
+	context, bound := boundContexts[method+" "+path]
+	if !bound {
+		return nil
+	}
+	ifMatch, err := strconv.ParseInt(strings.Trim(headers["If-Match"], `" `), 10, 64)
+	if err != nil {
+		return nil
+	}
+	sum := sha256.Sum256(body)
+	return stamped(context, fmt.Sprint(ifMatch), b64.EncodeToString(sum[:]))
 }
 
 func NewAPI(n Net, id *Identity) *API {
@@ -301,32 +275,4 @@ func (a *API) Onboard(t testing.TB, code string) {
 	t.Helper()
 	a.Register(t, code)
 	a.SignIn(t)
-}
-
-func (a *API) ElevateByApproval(t testing.TB, approver *API) {
-	t.Helper()
-	approvalID := a.Must(t, http.StatusCreated, "POST", "/v1/auth/elevation/approval", nil).Map(t)["approvalId"].(string)
-	var list struct {
-		Approvals []struct {
-			ID string `json:"id"`
-		} `json:"approvals"`
-	}
-	approver.Must(t, http.StatusOK, "GET", "/v1/auth/approvals", nil).JSON(t, &list)
-	found := false
-	for _, pending := range list.Approvals {
-		found = found || pending.ID == approvalID
-	}
-	if !found {
-		t.Fatalf("the approver does not see approval %s: %+v", approvalID, list.Approvals)
-	}
-	approver.Must(t, http.StatusNoContent, "POST", "/v1/auth/approvals/"+approvalID+"/approve", nil)
-	status := a.Must(t, http.StatusOK, "GET", "/v1/auth/approvals/"+approvalID, nil).Map(t)
-	if status["status"] != "approved" {
-		t.Fatalf("approval status: %v", status)
-	}
-}
-
-func (a *API) Elevated(t testing.TB) bool {
-	t.Helper()
-	return a.Must(t, http.StatusOK, "GET", "/v1/auth/elevation", nil).Map(t)["elevatedUntil"].(float64) > 0
 }

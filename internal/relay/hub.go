@@ -54,13 +54,10 @@ type Hub struct {
 }
 
 type controlMessage struct {
-	Type      string `json:"t"`
-	Stream    string `json:"stream,omitzero"`
-	Peer      string `json:"peer,omitzero"`
-	Family    int    `json:"family,omitzero"`
-	DeviceID  string `json:"deviceId,omitzero"`
-	Name      string `json:"name,omitzero"`
-	CreatedAt int64  `json:"createdAt,omitzero"`
+	Type   string `json:"t"`
+	Stream string `json:"stream,omitzero"`
+	Peer   string `json:"peer,omitzero"`
+	Family int    `json:"family,omitzero"`
 }
 
 type listener struct {
@@ -457,20 +454,6 @@ func (h *Hub) serveAccept(w http.ResponseWriter, r *http.Request, p auth.Princip
 	desktop := websocket.NetConn(context.Background(), ws, websocket.MessageBinary)
 	h.splice(pending, desktop, p)
 	return nil
-}
-
-func (h *Hub) NotifyDeviceAdded(accountID string, device store.Device) {
-	h.mu.Lock()
-	var ls []*listener
-	for _, l := range h.listeners {
-		if l.accountID == accountID && l.deviceID != device.ID {
-			ls = append(ls, l)
-		}
-	}
-	h.mu.Unlock()
-	for _, l := range ls {
-		_ = l.send(controlMessage{Type: "device-added", DeviceID: device.ID, Name: device.Name, CreatedAt: device.CreatedAt})
-	}
 }
 
 func (h *Hub) KickSession(tokenHash []byte) {

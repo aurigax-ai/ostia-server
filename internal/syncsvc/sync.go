@@ -1,13 +1,10 @@
 package syncsvc
 
 import (
-	"context"
 	"crypto/sha256"
 	"errors"
 	"io"
-	"maps"
 	"net/http"
-	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -21,12 +18,11 @@ import (
 )
 
 const (
-	maxWrapBytes    = 64 << 10
-	jsonOverhead    = 4 << 10
-	slotPassphrase  = "passphrase"
-	slotRecovery    = "recovery"
-	maxKeepIDs      = 100000
-	maxRotatedWraps = 16
+	maxWrapBytes   = 64 << 10
+	jsonOverhead   = 4 << 10
+	slotPassphrase = "passphrase"
+	slotRecovery   = "recovery"
+	maxKeepIDs     = 100000
 )
 
 type Service struct {
@@ -51,19 +47,17 @@ func (s *Service) Mount(mux *httpx.Mux) {
 	mux.Handle("GET /v1/sync/manifest/versions", s.Auth.Authed(s.manifestVersions))
 	mux.HandleBulk("GET /v1/sync/blobs/{blobId}", s.Auth.Authed(s.getBlob))
 	mux.HandleBulk("PUT /v1/sync/blobs/{blobId}", s.Auth.Authed(s.putBlob))
-	mux.Handle("GET /v1/sync/wraps", s.Auth.Authed(s.listWraps))
 	mux.Handle("GET /v1/sync/wraps/{slot}", s.Auth.Authed(s.getWrap))
-	mux.Handle("PUT /v1/sync/wraps/{slot}", s.Auth.Authed(s.putWrap))
-	mux.Handle("DELETE /v1/sync/wraps/{slot}", s.Auth.Authed(s.deleteWrap))
 	mux.HandleBulk("POST /v1/sync/rotate", s.Auth.Authed(s.rotate))
 	mux.Handle("POST /v1/sync/gc", s.Auth.Authed(s.gc))
 	mux.Handle("GET /v1/sync/usage", s.Auth.Authed(s.usage))
 }
 
 type manifestView struct {
-	Version   int64     `json:"version"`
-	Blob      httpx.B64 `json:"blob"`
-	UpdatedAt int64     `json:"updatedAt"`
+	Version    int64     `json:"version"`
+	KeyVersion int64     `json:"keyVersion"`
+	Blob       httpx.B64 `json:"blob"`
+	UpdatedAt  int64     `json:"updatedAt"`
 }
 
 func (s *Service) getManifest(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
@@ -84,7 +78,7 @@ func (s *Service) getManifest(w http.ResponseWriter, r *http.Request, p auth.Pri
 	if err != nil {
 		return err
 	}
-	httpx.WriteJSON(w, http.StatusOK, manifestView{Version: m.Version, Blob: m.Blob, UpdatedAt: m.UpdatedAt})
+	httpx.WriteJSON(w, http.StatusOK, manifestView{Version: m.Version, KeyVersion: m.KeyVersion, Blob: m.Blob, UpdatedAt: m.UpdatedAt})
 	return nil
 }
 
@@ -94,12 +88,13 @@ func (s *Service) manifestVersions(w http.ResponseWriter, r *http.Request, p aut
 		return err
 	}
 	type entry struct {
-		Version   int64 `json:"version"`
-		UpdatedAt int64 `json:"updatedAt"`
+		Version    int64 `json:"version"`
+		KeyVersion int64 `json:"keyVersion"`
+		UpdatedAt  int64 `json:"updatedAt"`
 	}
 	out := make([]entry, 0, len(versions))
 	for _, v := range versions {
-		out = append(out, entry{v.Version, v.UpdatedAt})
+		out = append(out, entry{v.Version, v.KeyVersion, v.UpdatedAt})
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"versions": out})
 	return nil
@@ -156,6 +151,9 @@ func (s *Service) putManifest(w http.ResponseWriter, r *http.Request, p auth.Pri
 	version, err := s.DB.PutManifest(r.Context(), p.AccountID, expected, in.Blob, s.retention())
 	if versionMismatch(w, err) {
 		return nil
+	}
+	if errors.Is(err, store.ErrNoKey) {
+		return httpx.Errf(http.StatusConflict, "no-key", "set up the sync key with POST /v1/sync/rotate first")
 	}
 	if err != nil {
 		return err
@@ -249,146 +247,80 @@ func (s *Service) putBlob(w http.ResponseWriter, r *http.Request, p auth.Princip
 	return nil
 }
 
-func (s *Service) validSlot(ctx context.Context, accountID, slot string) error {
-	if slot == slotPassphrase || slot == slotRecovery {
-		return nil
-	}
-	deviceID, ok := strings.CutPrefix(slot, "device:")
-	if !ok || !ids.ValidID(deviceID) {
-		return httpx.Errf(http.StatusBadRequest, "bad-slot", "slot must be passphrase, recovery or device:<id>")
-	}
-	dev, err := s.DB.Device(ctx, deviceID)
-	if err != nil || dev.AccountID != accountID || dev.RevokedAt != 0 {
-		return httpx.Errf(http.StatusNotFound, "unknown-device", "no such device in this account")
-	}
-	return nil
-}
-
-func (s *Service) checkWrap(ctx context.Context, p auth.Principal, slot string, blob []byte) error {
-	if slot == slotPassphrase || slot == slotRecovery {
-		return nil
-	}
-	return s.checkDeviceWrap(ctx, p, slot, blob)
-}
-
 type wrapView struct {
-	Slot      string    `json:"slot"`
-	Blob      httpx.B64 `json:"blob,omitzero"`
-	UpdatedAt int64     `json:"updatedAt"`
-}
-
-func (s *Service) listWraps(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
-	wraps, err := s.DB.Wraps(r.Context(), p.AccountID)
-	if err != nil {
-		return err
-	}
-	out := make([]wrapView, 0, len(wraps))
-	for _, wrap := range wraps {
-		out = append(out, wrapView{Slot: wrap.Slot, UpdatedAt: wrap.UpdatedAt})
-	}
-	httpx.WriteJSON(w, http.StatusOK, map[string]any{"wraps": out})
-	return nil
+	Slot       string    `json:"slot"`
+	Blob       httpx.B64 `json:"blob"`
+	KeyVersion int64     `json:"keyVersion"`
+	UpdatedAt  int64     `json:"updatedAt"`
 }
 
 func (s *Service) getWrap(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
 	slot := r.PathValue("slot")
-	if slot == slotPassphrase || slot == slotRecovery {
-		if err := s.Auth.RequireSignedTimestamp(r, p, auth.WrapReadContext, slot); err != nil {
-			return err
-		}
+	if slot != slotPassphrase && slot != slotRecovery {
+		return httpx.Errf(http.StatusBadRequest, "bad-slot", "slot must be passphrase or recovery")
 	}
-	wrap, err := s.DB.Wrap(r.Context(), p.AccountID, slot)
+	if err := s.Auth.RequireSignedTimestamp(r, p, auth.WrapReadContext, slot); err != nil {
+		return err
+	}
+	key, err := s.DB.SyncKey(r.Context(), p.AccountID)
 	if errors.Is(err, store.ErrNotFound) {
 		return httpx.ErrNotFound
 	}
 	if err != nil {
 		return err
 	}
-	httpx.WriteJSON(w, http.StatusOK, wrapView{Slot: slot, Blob: wrap.Blob, UpdatedAt: wrap.UpdatedAt})
+	blob := key.Passphrase
+	if slot == slotRecovery {
+		blob = key.Recovery
+	}
+	httpx.WriteJSON(w, http.StatusOK, wrapView{Slot: slot, Blob: blob, KeyVersion: key.Version, UpdatedAt: key.UpdatedAt})
 	return nil
 }
 
-func (s *Service) putWrap(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
-	slot := r.PathValue("slot")
-	if err := s.validSlot(r.Context(), p.AccountID, slot); err != nil {
-		return err
-	}
-	if _, err := s.DB.Wrap(r.Context(), p.AccountID, slot); err == nil {
-		if err := s.Auth.NeedElevation(p); err != nil {
-			return err
-		}
-	}
-	var in struct {
-		Blob httpx.B64 `json:"blob"`
-	}
-	if err := httpx.ReadJSON(w, r, &in, maxWrapBytes*4/3+jsonOverhead); err != nil {
-		return err
-	}
-	if len(in.Blob) == 0 || len(in.Blob) > maxWrapBytes {
-		return httpx.Errf(http.StatusRequestEntityTooLarge, "too-large", "wrap size is outside the allowed range")
-	}
-	if err := s.checkWrap(r.Context(), p, slot, in.Blob); err != nil {
-		return err
-	}
-	if err := s.DB.PutWrap(r.Context(), p.AccountID, slot, in.Blob); err != nil {
-		return err
-	}
-	w.WriteHeader(http.StatusNoContent)
-	return nil
-}
-
-func (s *Service) deleteWrap(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
-	if err := s.Auth.NeedElevation(p); err != nil {
-		return err
-	}
-	if err := s.DB.DeleteWrap(r.Context(), p.AccountID, r.PathValue("slot")); err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			return httpx.ErrNotFound
-		}
-		return err
-	}
-	w.WriteHeader(http.StatusNoContent)
-	return nil
-}
+func (s *Service) rotateLimit() int64 { return s.manifestLimit() + 2*(maxWrapBytes*4/3) + jsonOverhead }
 
 func (s *Service) rotate(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
-	if err := s.Auth.NeedElevation(p); err != nil {
+	expected, err := ifMatch(r)
+	if err != nil {
+		return err
+	}
+	stamp, err := s.Auth.SignedTimestamp(r)
+	if err != nil {
+		return err
+	}
+	body, err := httpx.ReadBody(w, r, s.rotateLimit())
+	if err != nil {
+		return err
+	}
+	if err := s.Auth.RequireSignature(r, p, auth.SyncRotateContext, stamp, auth.ManifestPutFields(expected, body)...); err != nil {
 		return err
 	}
 	var in struct {
-		IfMatch     int64                `json:"ifMatch"`
-		Manifest    httpx.B64            `json:"manifest"`
-		Wraps       map[string]httpx.B64 `json:"wraps"`
-		DeleteSlots []string             `json:"deleteSlots"`
+		Manifest   httpx.B64 `json:"manifest"`
+		Passphrase httpx.B64 `json:"passphrase"`
+		Recovery   httpx.B64 `json:"recovery"`
 	}
-	if err := httpx.ReadJSON(w, r, &in, s.manifestLimit()+maxRotatedWraps*(maxWrapBytes*4/3+jsonOverhead)); err != nil {
+	if err := httpx.DecodeJSON(body, &in); err != nil {
 		return err
 	}
-	if len(in.Manifest) == 0 || int64(len(in.Manifest)) > s.Cfg.MaxManifestBytes || in.IfMatch < 0 {
+	if len(in.Manifest) == 0 || int64(len(in.Manifest)) > s.Cfg.MaxManifestBytes {
 		return httpx.Errf(http.StatusBadRequest, "bad-request", "manifest size is outside the allowed range")
 	}
-	rotation := store.Rotation{IfMatch: in.IfMatch, Manifest: in.Manifest, Wraps: map[string][]byte{}, DeleteSlots: in.DeleteSlots, Retention: s.retention()}
-	for _, slot := range slices.Sorted(maps.Keys(in.Wraps)) {
-		wrap := in.Wraps[slot]
-		if err := s.validSlot(r.Context(), p.AccountID, slot); err != nil {
-			return err
-		}
+	for _, wrap := range [][]byte{in.Passphrase, in.Recovery} {
 		if len(wrap) == 0 || len(wrap) > maxWrapBytes {
-			return httpx.Errf(http.StatusRequestEntityTooLarge, "too-large", "wrap size is outside the allowed range")
+			return httpx.Errf(http.StatusBadRequest, "bad-request", "passphrase and recovery wraps are both required and at most 64 KiB")
 		}
-		if err := s.checkWrap(r.Context(), p, slot, wrap); err != nil {
-			return err
-		}
-		rotation.Wraps[slot] = wrap
 	}
-	version, err := s.DB.Rotate(r.Context(), p.AccountID, rotation)
+	version, keyVersion, err := s.DB.ReplaceKey(r.Context(), p.AccountID, store.KeyReplacement{
+		IfMatch: expected, Manifest: in.Manifest, Passphrase: in.Passphrase, Recovery: in.Recovery, Retention: s.retention(),
+	})
 	if versionMismatch(w, err) {
 		return nil
 	}
 	if err != nil {
 		return err
 	}
-	httpx.WriteJSON(w, http.StatusOK, map[string]any{"version": version})
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"version": version, "keyVersion": keyVersion})
 	return nil
 }
 
@@ -406,9 +338,6 @@ func (s *Service) gc(w http.ResponseWriter, r *http.Request, p auth.Principal) e
 		return err
 	}
 	if err := s.Auth.RequireSignature(r, p, auth.SyncGCContext, stamp, auth.ManifestPutFields(expected, body)...); err != nil {
-		return err
-	}
-	if err := s.Auth.RequireEstablishedDevice(r.Context(), p); err != nil {
 		return err
 	}
 	var in struct {

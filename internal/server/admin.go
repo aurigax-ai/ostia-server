@@ -48,11 +48,16 @@ func OpenAdmin(cfg config.Config) (*Admin, error) {
 
 func (a *Admin) Close() error { return a.DB.Close() }
 
-func (a *Admin) Invite(ctx context.Context, ttl time.Duration) (code string, expiresAt int64, err error) {
+func (a *Admin) Invite(ctx context.Context, accountID string, ttl time.Duration) (code string, expiresAt int64, err error) {
 	if max := a.Cfg.Auth.InviteTTL.Std(); ttl > max {
 		return "", 0, fmt.Errorf("an invite code may live at most auth.invite_ttl (%s), not %s", max, ttl)
 	}
-	return a.Auth.CreateInvite(ctx, "", ttl, false)
+	if accountID != "" {
+		if _, err := a.DB.Account(ctx, accountID); err != nil {
+			return "", 0, fmt.Errorf("account %s: %w", accountID, err)
+		}
+	}
+	return a.Auth.CreateInvite(ctx, accountID, ttl)
 }
 
 func (a *Admin) SetupCode(ctx context.Context) (string, error) {
@@ -100,5 +105,5 @@ func (a *Admin) SetPublishDisabled(ctx context.Context, accountID string, disabl
 }
 
 func (a *Admin) DeleteAccount(ctx context.Context, accountID string) error {
-	return a.Auth.DeleteAccount(ctx, accountID, nil)
+	return a.Auth.DeleteAccount(ctx, accountID)
 }

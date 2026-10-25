@@ -225,7 +225,7 @@ Everything the server writes is owner-only (the process sets umask 077, and the 
 ## Administration
 
 ```
-ostia-server admin invite [-ttl 168h]
+ostia-server admin invite [-ttl 168h] [-account <account-id>]
 ostia-server admin backup -recipient <age1...> -out <file>
 ostia-server admin setup
 ostia-server admin reset
@@ -239,7 +239,7 @@ ostia-server admin enable-publish <account-id>
 ostia-server admin delete-account <account-id>
 ```
 
-`invite` refuses a ttl of zero or below and one longer than `auth.invite_ttl`: a code always expires. These work against the same data directory while the server is running. A reported share is disabled with `takedown`; its content is deleted and the share page says it was removed. Repeat abuse is handled with `disable-publish`.
+`invite` refuses a ttl of zero or below and one longer than `auth.invite_ttl`: a code always expires. With `-account`, the code adds a new device to that account instead of making a new account (see [Accounts and devices](#accounts-and-devices)). These work against the same data directory while the server is running. A reported share is disabled with `takedown`; its content is deleted and the share page says it was removed. Repeat abuse is handled with `disable-publish`.
 
 ### Admin web UI
 
@@ -293,6 +293,13 @@ No access logs, no addresses or user agents stored, view counts only. Addresses 
 
 Replace the binary and restart. The database migrates itself and refuses to open a schema newer than the binary understands.
 
-## Accounts with one device
+## Accounts and devices
 
-Adding a third device, revoking another device, deleting the account, deleting or replacing sync key wraps, garbage collection and key rotation need an elevated session: another device of the account approves, or the owner signs in with GitHub again. A device must belong to the account for 24 hours before its approval counts (`auth.approver_min_age = 0` switches that protection off and is for tests only), so a stolen session cannot approve itself with a device it just added. An account with a single device that did not sign in with GitHub cannot elevate. The operator can still run `admin delete-account`; the other actions wait until a second device is added.
+A plain `admin invite` code makes a new account with one device. A second computer joins an existing account in one of two ways:
+
+- GitHub sign-in with the same GitHub user, on a server that sets `auth.github_client_id`. This needs nothing from the operator.
+- An account invite. Find the account id with `admin accounts`, then run `ostia-server admin invite -account <account-id>` and give the code to the person. The code works once, expires like any invite, and stops working when the account is deleted. Only the operator can mint it: no device and no API can.
+
+The new computer then enters the sync passphrase once. No action needs another device's approval. The server has no API that removes a device or deletes an account: run `admin delete-account`, or let the inactivity sweep remove devices that stay silent for `devices.inactive_after`.
+
+The configuration keys `auth.device_invite_ttl`, `auth.elevation_ttl`, `auth.approval_ttl` and `auth.approver_min_age` are removed. The server refuses to start while the file still sets one of them, so remove them before you upgrade.

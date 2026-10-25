@@ -13,14 +13,8 @@ import (
 	"github.com/aurigax-ai/ostia-server/internal/store"
 )
 
-type flowOwner struct {
-	accountID string
-	tokenHash []byte
-}
-
 type flow struct {
 	mu         sync.Mutex
-	owner      flowOwner
 	ip         string
 	deviceCode string
 	expires    time.Time
@@ -28,11 +22,7 @@ type flow struct {
 	interval   time.Duration
 }
 
-func (o flowOwner) is(other flowOwner) bool {
-	return o.accountID == other.accountID && ids.Equal(o.tokenHash, other.tokenHash)
-}
-
-func (s *Service) startFlow(w http.ResponseWriter, r *http.Request, owner flowOwner) error {
+func (s *Service) githubStart(w http.ResponseWriter, r *http.Request) error {
 	ip := netkey.Of(s.Guard.IP(r))
 	s.mu.Lock()
 	inFlight := 0
@@ -57,7 +47,7 @@ func (s *Service) startFlow(w http.ResponseWriter, r *http.Request, owner flowOw
 		return httpx.Errf(http.StatusBadGateway, "github-unavailable", "could not start the GitHub device flow")
 	}
 	interval := pollInterval(code.Interval)
-	f := &flow{owner: owner, ip: ip, deviceCode: code.DeviceCode, expires: s.Now().Add(time.Duration(code.ExpiresIn) * time.Second), interval: interval, nextPoll: s.Now().Add(interval)}
+	f := &flow{ip: ip, deviceCode: code.DeviceCode, expires: s.Now().Add(time.Duration(code.ExpiresIn) * time.Second), interval: interval, nextPoll: s.Now().Add(interval)}
 	flowID := ids.Token()
 	s.mu.Lock()
 	s.flows[flowID] = f
@@ -72,15 +62,11 @@ func (s *Service) startFlow(w http.ResponseWriter, r *http.Request, owner flowOw
 	return nil
 }
 
-func (s *Service) githubStart(w http.ResponseWriter, r *http.Request) error {
-	return s.startFlow(w, r, flowOwner{})
-}
-
-func (s *Service) advanceFlow(w http.ResponseWriter, r *http.Request, flowID string, owner flowOwner) (userID int64, finished bool, err error) {
+func (s *Service) advanceFlow(w http.ResponseWriter, r *http.Request, flowID string) (userID int64, finished bool, err error) {
 	s.mu.Lock()
 	f := s.flows[flowID]
 	s.mu.Unlock()
-	if f == nil || !f.owner.is(owner) {
+	if f == nil {
 		return 0, false, httpx.Errf(http.StatusNotFound, "unknown-flow", "start the sign-in again")
 	}
 	f.mu.Lock()
@@ -132,7 +118,7 @@ func (s *Service) githubPoll(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	userID, finished, err := s.advanceFlow(w, r, in.FlowID, flowOwner{})
+	userID, finished, err := s.advanceFlow(w, r, in.FlowID)
 	if err != nil || !finished {
 		return err
 	}
@@ -143,7 +129,6 @@ func (s *Service) githubPoll(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	s.announceDevice(r, acct.ID, dev)
 	httpx.WriteJSON(w, http.StatusCreated, registered{AccountID: acct.ID, DeviceID: dev.ID, Provider: acct.Provider})
 	return nil
 }

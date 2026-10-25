@@ -641,978 +641,6 @@
         ]
       }
     },
-    "/v1/devices": {
-      "get": {
-        "summary": "List the account's devices",
-        "security": [
-          {
-            "bearer": []
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Devices",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "devices": {
-                      "type": "array",
-                      "items": {
-                        "$ref": "#/components/schemas/Device"
-                      }
-                    }
-                  }
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Missing, expired or invalid bearer token",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "429": {
-            "description": "Rate limited",
-            "headers": {
-              "Retry-After": {
-                "schema": {
-                  "type": "integer"
-                }
-              }
-            },
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          }
-        },
-        "tags": [
-          "Accounts"
-        ]
-      }
-    },
-    "/v1/devices/invite": {
-      "post": {
-        "summary": "Mint a one-time code that adds a device to this account (signed with the device key; needs an elevated session once there are two devices)",
-        "security": [
-          {
-            "bearer": []
-          }
-        ],
-        "responses": {
-          "201": {
-            "description": "Code",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "code": {
-                      "type": "string"
-                    },
-                    "expiresAt": {
-                      "type": "integer",
-                      "description": "Unix milliseconds"
-                    }
-                  }
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "device-signature-required, bad-signature, stale-signature or elevation-required",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Missing, expired or invalid bearer token",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "429": {
-            "description": "Rate limited",
-            "headers": {
-              "Retry-After": {
-                "schema": {
-                  "type": "integer"
-                }
-              }
-            },
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          }
-        },
-        "parameters": [
-          {
-            "name": "X-Device-Signature",
-            "in": "header",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "X-Device-Timestamp",
-            "in": "header",
-            "required": true,
-            "schema": {
-              "type": "integer"
-            }
-          }
-        ],
-        "tags": [
-          "Accounts"
-        ]
-      }
-    },
-    "/v1/devices/{id}": {
-      "delete": {
-        "summary": "Revoke a device (needs an elevated session, except an established device revoking one still on probation, a device revoking itself, and logout). When the last device of an account leaves, the account's sync data is deleted, and the account too if it has no shares",
-        "security": [
-          {
-            "bearer": []
-          }
-        ],
-        "responses": {
-          "204": {
-            "description": "Revoked"
-          },
-          "404": {
-            "description": "not-found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Missing, expired or invalid bearer token",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "429": {
-            "description": "Rate limited",
-            "headers": {
-              "Retry-After": {
-                "schema": {
-                  "type": "integer"
-                }
-              }
-            },
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "elevation-required: approve from another device or re-authenticate with GitHub (see /v1/auth/elevation)",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          }
-        },
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            },
-            "description": ""
-          },
-          {
-            "name": "X-Device-Signature",
-            "in": "header",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "X-Device-Timestamp",
-            "in": "header",
-            "required": true,
-            "description": "Unix milliseconds, within two minutes of the server clock and larger than this device's previous signed timestamp",
-            "schema": {
-              "type": "integer"
-            }
-          }
-        ],
-        "tags": [
-          "Accounts"
-        ]
-      }
-    },
-    "/v1/account": {
-      "delete": {
-        "summary": "Delete the account and everything it stored (needs an elevated session)",
-        "security": [
-          {
-            "bearer": []
-          }
-        ],
-        "responses": {
-          "204": {
-            "description": "Deleted"
-          },
-          "401": {
-            "description": "Missing, expired or invalid bearer token",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "429": {
-            "description": "Rate limited",
-            "headers": {
-              "Retry-After": {
-                "schema": {
-                  "type": "integer"
-                }
-              }
-            },
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "elevation-required: approve from another device or re-authenticate with GitHub (see /v1/auth/elevation)",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          }
-        },
-        "tags": [
-          "Accounts"
-        ]
-      }
-    },
-    "/v1/auth/elevation": {
-      "get": {
-        "summary": "Whether this session is elevated, and until when",
-        "security": [
-          {
-            "bearer": []
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Elevation",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "elevatedUntil": {
-                      "type": "integer",
-                      "description": "Unix milliseconds"
-                    }
-                  }
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Missing, expired or invalid bearer token",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "429": {
-            "description": "Rate limited",
-            "headers": {
-              "Retry-After": {
-                "schema": {
-                  "type": "integer"
-                }
-              }
-            },
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          }
-        },
-        "tags": [
-          "Accounts"
-        ]
-      }
-    },
-    "/v1/auth/elevation/approval": {
-      "post": {
-        "summary": "Ask another signed-in device to approve destructive actions for this session (signed with the device key)",
-        "security": [
-          {
-            "bearer": []
-          }
-        ],
-        "responses": {
-          "201": {
-            "description": "Requested",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "approvalId": {
-                      "type": "string"
-                    },
-                    "expiresAt": {
-                      "type": "integer",
-                      "description": "Unix milliseconds"
-                    }
-                  }
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "device-signature-required, bad-signature or stale-signature",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "no-second-device",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Missing, expired or invalid bearer token",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "429": {
-            "description": "Rate limited",
-            "headers": {
-              "Retry-After": {
-                "schema": {
-                  "type": "integer"
-                }
-              }
-            },
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          }
-        },
-        "parameters": [
-          {
-            "name": "X-Device-Signature",
-            "in": "header",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "X-Device-Timestamp",
-            "in": "header",
-            "required": true,
-            "schema": {
-              "type": "integer"
-            }
-          }
-        ],
-        "tags": [
-          "Accounts"
-        ]
-      }
-    },
-    "/v1/auth/approvals": {
-      "get": {
-        "summary": "Requests from the account's other devices waiting for approval",
-        "security": [
-          {
-            "bearer": []
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Requests",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "approvals": {
-                      "type": "array",
-                      "items": {
-                        "type": "object",
-                        "properties": {
-                          "id": {
-                            "type": "string"
-                          },
-                          "deviceId": {
-                            "type": "string"
-                          },
-                          "deviceName": {
-                            "type": "string"
-                          },
-                          "deviceCreatedAt": {
-                            "type": "integer",
-                            "description": "Unix milliseconds"
-                          },
-                          "createdAt": {
-                            "type": "integer",
-                            "description": "Unix milliseconds"
-                          },
-                          "expiresAt": {
-                            "type": "integer",
-                            "description": "Unix milliseconds"
-                          }
-                        }
-                      }
-                    }
-                  }
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Missing, expired or invalid bearer token",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "429": {
-            "description": "Rate limited",
-            "headers": {
-              "Retry-After": {
-                "schema": {
-                  "type": "integer"
-                }
-              }
-            },
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          }
-        },
-        "tags": [
-          "Accounts"
-        ]
-      }
-    },
-    "/v1/auth/approvals/{id}": {
-      "get": {
-        "summary": "Status of this session's own approval request",
-        "security": [
-          {
-            "bearer": []
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Status",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "status": {
-                      "type": "string",
-                      "enum": [
-                        "pending",
-                        "approved"
-                      ]
-                    },
-                    "expiresAt": {
-                      "type": "integer",
-                      "description": "Unix milliseconds"
-                    },
-                    "elevatedUntil": {
-                      "type": "integer",
-                      "description": "Unix milliseconds"
-                    }
-                  }
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "not-found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Missing, expired or invalid bearer token",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "429": {
-            "description": "Rate limited",
-            "headers": {
-              "Retry-After": {
-                "schema": {
-                  "type": "integer"
-                }
-              }
-            },
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          }
-        },
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            },
-            "description": ""
-          }
-        ],
-        "tags": [
-          "Accounts"
-        ]
-      },
-      "delete": {
-        "summary": "Cancel this device's own approval request",
-        "security": [
-          {
-            "bearer": []
-          }
-        ],
-        "responses": {
-          "204": {
-            "description": "Removed"
-          },
-          "404": {
-            "description": "not-found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Missing, expired or invalid bearer token",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "429": {
-            "description": "Rate limited",
-            "headers": {
-              "Retry-After": {
-                "schema": {
-                  "type": "integer"
-                }
-              }
-            },
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          }
-        },
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            },
-            "description": ""
-          }
-        ],
-        "tags": [
-          "Accounts"
-        ]
-      }
-    },
-    "/v1/auth/approvals/{id}/approve": {
-      "post": {
-        "summary": "Approve another device's request; the human confirms on this device first",
-        "security": [
-          {
-            "bearer": []
-          }
-        ],
-        "responses": {
-          "204": {
-            "description": "Approved; the requesting session is elevated"
-          },
-          "403": {
-            "description": "device-signature-required, bad-signature, device-too-new, requester-too-new, or a device cannot approve its own request",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "not-found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Missing, expired or invalid bearer token",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "429": {
-            "description": "Rate limited",
-            "headers": {
-              "Retry-After": {
-                "schema": {
-                  "type": "integer"
-                }
-              }
-            },
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          }
-        },
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            },
-            "description": ""
-          }
-        ],
-        "tags": [
-          "Accounts"
-        ]
-      }
-    },
-    "/v1/auth/elevation/github": {
-      "post": {
-        "summary": "Start a fresh GitHub sign-in that elevates this session",
-        "security": [
-          {
-            "bearer": []
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Flow started",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "flowId": {
-                      "type": "string"
-                    },
-                    "userCode": {
-                      "type": "string"
-                    },
-                    "verificationUri": {
-                      "type": "string"
-                    },
-                    "interval": {
-                      "type": "integer"
-                    },
-                    "expiresIn": {
-                      "type": "integer"
-                    }
-                  }
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "not-a-github-account",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Missing, expired or invalid bearer token",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "429": {
-            "description": "Rate limited",
-            "headers": {
-              "Retry-After": {
-                "schema": {
-                  "type": "integer"
-                }
-              }
-            },
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          }
-        },
-        "tags": [
-          "Accounts"
-        ],
-        "x-module": "github sign-in (auth.github_client_id)"
-      }
-    },
-    "/v1/auth/elevation/github/poll": {
-      "post": {
-        "summary": "Poll the elevation flow",
-        "security": [
-          {
-            "bearer": []
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Elevated",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "elevatedUntil": {
-                      "type": "integer",
-                      "description": "Unix milliseconds"
-                    }
-                  }
-                }
-              }
-            }
-          },
-          "202": {
-            "description": "Pending",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "status": {
-                      "type": "string"
-                    },
-                    "interval": {
-                      "type": "integer"
-                    }
-                  }
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "wrong-account or denied",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "unknown-flow",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "410": {
-            "description": "expired",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Missing, expired or invalid bearer token",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "429": {
-            "description": "Rate limited",
-            "headers": {
-              "Retry-After": {
-                "schema": {
-                  "type": "integer"
-                }
-              }
-            },
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          }
-        },
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "properties": {
-                  "flowId": {
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "flowId"
-                ]
-              }
-            }
-          }
-        },
-        "tags": [
-          "Accounts"
-        ],
-        "x-module": "github sign-in (auth.github_client_id)"
-      }
-    },
     "/v1/relay/label": {
       "post": {
         "summary": "Get or create the device's relay label",
@@ -2442,6 +1470,16 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "no-key: sync is not set up; the first manifest goes through POST /v1/sync/rotate",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           }
         },
         "requestBody": {
@@ -2520,6 +1558,9 @@
                         "type": "object",
                         "properties": {
                           "version": {
+                            "type": "integer"
+                          },
+                          "keyVersion": {
                             "type": "integer"
                           },
                           "updatedAt": {
@@ -2742,79 +1783,9 @@
         "x-module": "sync"
       }
     },
-    "/v1/sync/wraps": {
-      "get": {
-        "summary": "List key wrap slots",
-        "security": [
-          {
-            "bearer": []
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Slots",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "wraps": {
-                      "type": "array",
-                      "items": {
-                        "type": "object",
-                        "properties": {
-                          "slot": {
-                            "type": "string"
-                          },
-                          "updatedAt": {
-                            "type": "integer",
-                            "description": "Unix milliseconds"
-                          }
-                        }
-                      }
-                    }
-                  }
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Missing, expired or invalid bearer token",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "429": {
-            "description": "Rate limited",
-            "headers": {
-              "Retry-After": {
-                "schema": {
-                  "type": "integer"
-                }
-              }
-            },
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          }
-        },
-        "tags": [
-          "Sync"
-        ],
-        "x-module": "sync"
-      }
-    },
     "/v1/sync/wraps/{slot}": {
       "get": {
-        "summary": "Read a key wrap (the passphrase and recovery wraps must be signed with the device key)",
+        "summary": "Read the passphrase or recovery wrap of the account key (signed with the device key)",
         "security": [
           {
             "bearer": []
@@ -2835,6 +1806,10 @@
                       "type": "string",
                       "description": "unpadded base64url"
                     },
+                    "keyVersion": {
+                      "type": "integer",
+                      "description": "The key version this wrap holds; it moves on every POST /v1/sync/rotate"
+                    },
                     "updatedAt": {
                       "type": "integer",
                       "description": "Unix milliseconds"
@@ -2845,7 +1820,7 @@
             }
           },
           "404": {
-            "description": "not-found",
+            "description": "not-found: sync is not set up for this account",
             "content": {
               "application/json": {
                 "schema": {
@@ -2890,6 +1865,16 @@
                 }
               }
             }
+          },
+          "400": {
+            "description": "bad-slot: the slot is neither passphrase nor recovery",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           }
         },
         "parameters": [
@@ -2900,13 +1885,13 @@
             "schema": {
               "type": "string"
             },
-            "description": "passphrase, recovery or device:<device id>"
+            "description": "passphrase or recovery"
           },
           {
             "name": "X-Device-Signature",
             "in": "header",
-            "required": false,
-            "description": "Required for the passphrase and recovery slots: base64url Ed25519 signature over \"ostia-server/wrap-read/v1\\n<device id>\\n<timestamp>\\n<slot>\"",
+            "required": true,
+            "description": "Base64url Ed25519 signature over \"ostia-server/wrap-read/v1\\n<device id>\\n<timestamp>\\n<slot>\"",
             "schema": {
               "type": "string"
             }
@@ -2914,7 +1899,7 @@
           {
             "name": "X-Device-Timestamp",
             "in": "header",
-            "required": false,
+            "required": true,
             "description": "Unix milliseconds, within two minutes of the server clock and larger than this device's previous signed timestamp",
             "schema": {
               "type": "integer"
@@ -2925,190 +1910,11 @@
           "Sync"
         ],
         "x-module": "sync"
-      },
-      "put": {
-        "summary": "Write a key wrap (replacing the passphrase or recovery wrap needs an elevated session; device wraps must be version 2 and signed by the calling device)",
-        "security": [
-          {
-            "bearer": []
-          }
-        ],
-        "responses": {
-          "204": {
-            "description": "Stored"
-          },
-          "400": {
-            "description": "bad-slot, or bad-wrap: a device wrap that is not a well-formed version 2 wrap or whose signature does not verify under the calling device's registered sign key",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "unknown-device",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Missing, expired or invalid bearer token",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "429": {
-            "description": "Rate limited",
-            "headers": {
-              "Retry-After": {
-                "schema": {
-                  "type": "integer"
-                }
-              }
-            },
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "elevation-required (approve from another device or re-authenticate with GitHub, see /v1/auth/elevation), or wrong-signer: the wrap names a signer other than the calling device",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          }
-        },
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "properties": {
-                  "blob": {
-                    "type": "string",
-                    "description": "unpadded base64url"
-                  }
-                },
-                "required": [
-                  "blob"
-                ]
-              }
-            }
-          }
-        },
-        "parameters": [
-          {
-            "name": "slot",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            },
-            "description": "passphrase, recovery or device:<device id>"
-          }
-        ],
-        "tags": [
-          "Sync"
-        ],
-        "x-module": "sync"
-      },
-      "delete": {
-        "summary": "Delete a key wrap (needs an elevated session)",
-        "security": [
-          {
-            "bearer": []
-          }
-        ],
-        "responses": {
-          "204": {
-            "description": "Deleted"
-          },
-          "404": {
-            "description": "not-found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Missing, expired or invalid bearer token",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "429": {
-            "description": "Rate limited",
-            "headers": {
-              "Retry-After": {
-                "schema": {
-                  "type": "integer"
-                }
-              }
-            },
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "elevation-required: approve from another device or re-authenticate with GitHub (see /v1/auth/elevation)",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          }
-        },
-        "parameters": [
-          {
-            "name": "slot",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            },
-            "description": "passphrase, recovery or device:<device id>"
-          }
-        ],
-        "tags": [
-          "Sync"
-        ],
-        "x-module": "sync"
       }
     },
     "/v1/sync/rotate": {
       "post": {
-        "summary": "Replace the manifest and key wraps in one step (needs an elevated session)",
+        "summary": "Set up or replace the account key: a new manifest, a new passphrase wrap and a new recovery wrap in one step, and the key version goes up by one (signed with the device key and bound to the manifest version with If-Match)",
         "security": [
           {
             "bearer": []
@@ -3116,14 +1922,19 @@
         ],
         "responses": {
           "200": {
-            "description": "Rotated",
+            "description": "Replaced",
             "content": {
               "application/json": {
                 "schema": {
                   "type": "object",
                   "properties": {
                     "version": {
-                      "type": "integer"
+                      "type": "integer",
+                      "description": "The new manifest version"
+                    },
+                    "keyVersion": {
+                      "type": "integer",
+                      "description": "The new key version"
                     }
                   }
                 }
@@ -3148,16 +1959,6 @@
               }
             }
           },
-          "404": {
-            "description": "unknown-device",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
           "401": {
             "description": "Missing, expired or invalid bearer token",
             "content": {
@@ -3186,7 +1987,7 @@
             }
           },
           "403": {
-            "description": "elevation-required, or wrong-signer: a device wrap names a signer other than the calling device",
+            "description": "device-signature-required, bad-signature or stale-signature",
             "content": {
               "application/json": {
                 "schema": {
@@ -3196,7 +1997,17 @@
             }
           },
           "400": {
-            "description": "bad-request, or bad-wrap: a device wrap that is not a well-formed version 2 wrap or whose signature does not verify",
+            "description": "bad-request: a missing or oversize manifest, passphrase wrap or recovery wrap",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "428": {
+            "description": "precondition-required: send If-Match",
             "content": {
               "application/json": {
                 "schema": {
@@ -3213,30 +2024,23 @@
               "schema": {
                 "type": "object",
                 "properties": {
-                  "ifMatch": {
-                    "type": "integer"
-                  },
                   "manifest": {
                     "type": "string",
                     "description": "unpadded base64url"
                   },
-                  "wraps": {
-                    "type": "object",
-                    "additionalProperties": {
-                      "type": "string",
-                      "description": "unpadded base64url"
-                    }
+                  "passphrase": {
+                    "type": "string",
+                    "description": "unpadded base64url passphrase wrap of the new key"
                   },
-                  "deleteSlots": {
-                    "type": "array",
-                    "items": {
-                      "type": "string"
-                    }
+                  "recovery": {
+                    "type": "string",
+                    "description": "unpadded base64url recovery wrap of the new key"
                   }
                 },
                 "required": [
-                  "ifMatch",
-                  "manifest"
+                  "manifest",
+                  "passphrase",
+                  "recovery"
                 ]
               }
             }
@@ -3245,12 +2049,41 @@
         "tags": [
           "Sync"
         ],
-        "x-module": "sync"
+        "x-module": "sync",
+        "parameters": [
+          {
+            "name": "If-Match",
+            "in": "header",
+            "required": true,
+            "description": "The manifest version read, 0 when there is none",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "X-Device-Signature",
+            "in": "header",
+            "required": true,
+            "description": "Base64url Ed25519 signature over \"ostia-server/sync-rotate/v1\\n<device id>\\n<timestamp>\\n<If-Match as a decimal number>\\n<unpadded base64url SHA-256 of the exact request body>\"",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Device-Timestamp",
+            "in": "header",
+            "required": true,
+            "description": "Unix milliseconds, within two minutes of the server clock and larger than this device's previous signed timestamp",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ]
       }
     },
     "/v1/sync/gc": {
       "post": {
-        "summary": "Delete blobs that are not listed and are older than the grace period (an established current device, no elevation; signed with the device key and bound to the manifest version with If-Match)",
+        "summary": "Delete blobs that are not listed and are older than the grace period (signed with the device key and bound to the manifest version with If-Match)",
         "security": [
           {
             "bearer": []
@@ -3320,7 +2153,7 @@
             }
           },
           "403": {
-            "description": "device-signature-required, bad-signature, stale-signature or device-too-new",
+            "description": "device-signature-required, bad-signature or stale-signature",
             "content": {
               "application/json": {
                 "schema": {
@@ -3369,7 +2202,7 @@
             "name": "X-Device-Signature",
             "in": "header",
             "required": true,
-            "description": "Base64url Ed25519 signature over \"ostia-server/manifest-put/v1\\n<device id>\\n<timestamp>\\n<If-Match as a decimal number>\\n<unpadded base64url SHA-256 of the exact request body>\"",
+            "description": "Base64url Ed25519 signature over \"ostia-server/sync-gc/v1\\n<device id>\\n<timestamp>\\n<If-Match as a decimal number>\\n<unpadded base64url SHA-256 of the exact request body>\"",
             "schema": {
               "type": "string"
             }
@@ -4110,40 +2943,6 @@
           "provider"
         ]
       },
-      "Device": {
-        "type": "object",
-        "properties": {
-          "id": {
-            "type": "string"
-          },
-          "name": {
-            "type": "string"
-          },
-          "signPub": {
-            "type": "string",
-            "description": "unpadded base64url"
-          },
-          "boxPub": {
-            "type": "string",
-            "description": "unpadded base64url"
-          },
-          "createdAt": {
-            "type": "integer",
-            "description": "Unix milliseconds"
-          },
-          "lastSeenAt": {
-            "type": "integer",
-            "description": "Unix milliseconds of the device's last activity, updated at most once an hour"
-          },
-          "removeAt": {
-            "type": "integer",
-            "description": "Unix milliseconds when the server removes the device if it stays silent: lastSeenAt plus the inactivity limit"
-          },
-          "current": {
-            "type": "boolean"
-          }
-        }
-      },
       "Share": {
         "type": "object",
         "properties": {
@@ -4183,6 +2982,10 @@
         "properties": {
           "version": {
             "type": "integer"
+          },
+          "keyVersion": {
+            "type": "integer",
+            "description": "The key version this manifest is sealed under"
           },
           "blob": {
             "type": "string",
@@ -4233,18 +3036,6 @@
           },
           "limits": {
             "type": "object"
-          },
-          "approverMinAgeSeconds": {
-            "type": "integer",
-            "description": "How long a device must belong to the account before its approvals and signed wraps count (auth.approver_min_age, in seconds). Informational: clients enforce max(24 h, this value) and never act on a lower one"
-          },
-          "syncGCBound": {
-            "type": "boolean",
-            "description": "POST /v1/sync/gc is bound to the manifest version; run GC only when this is true"
-          },
-          "deviceInactiveAfterSeconds": {
-            "type": "integer",
-            "description": "devices.inactive_after: a device silent this long is removed"
           }
         }
       }

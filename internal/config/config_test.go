@@ -192,19 +192,19 @@ func TestValidationErrors(t *testing.T) {
 		body string
 		want string
 	}{
-		"missing api":            {strings.Replace(minimal, `api = "api.example.com"`, "", 1), "domains.api"},
-		"api under relay":        {strings.Replace(minimal, "api.example.com", "api.r.example.com", 1), "must not sit under"},
-		"no certs":               {strings.Replace(minimal, "[[tls.certs]]\ncert = \"/etc/c.pem\"\nkey = \"/etc/k.pem\"\n", "", 1), "tls.certs"},
-		"bad tls mode":           {strings.Replace(minimal, "[tls]\n", "[tls]\nmode = \"acme\"\n", 1), "tls.mode"},
-		"forward needs addr":     {strings.Replace(minimal, "[tls]\n", "[tls]\nmode = \"forward\"\n", 1), "forward_addr"},
-		"push no creds":          {minimal + "\n[modules]\npush = true\n", "push.fcm or push.apns"},
-		"bad scheme":             {strings.Replace(minimal, "[domains]\n", "[domains]\nscheme = \"ftp\"\n", 1), "domains.scheme"},
-		"expiry order":           {minimal + "\n[publish]\nmax_expiry = \"1h\"\n", "max_expiry"},
-		"endless invites":        {minimal + "\n[auth]\ninvite_ttl = \"0s\"\n", "auth.invite_ttl must be positive"},
-		"endless device invites": {minimal + "\n[auth]\ndevice_invite_ttl = \"0s\"\n", "auth.device_invite_ttl must be positive"},
-		"bad journal":            {minimal + "\n[storage]\nsqlite_journal = \"truncate\"\n", "storage.sqlite_journal"},
-		"empty journal":          {minimal + "\n[storage]\nsqlite_journal = \"\"\n", "storage.sqlite_journal"},
-		"no retention":           {minimal + "\n[auth]\nrevoked_device_retention = \"0s\"\n", "revoked_device_retention"},
+		"missing api":          {strings.Replace(minimal, `api = "api.example.com"`, "", 1), "domains.api"},
+		"api under relay":      {strings.Replace(minimal, "api.example.com", "api.r.example.com", 1), "must not sit under"},
+		"no certs":             {strings.Replace(minimal, "[[tls.certs]]\ncert = \"/etc/c.pem\"\nkey = \"/etc/k.pem\"\n", "", 1), "tls.certs"},
+		"bad tls mode":         {strings.Replace(minimal, "[tls]\n", "[tls]\nmode = \"acme\"\n", 1), "tls.mode"},
+		"forward needs addr":   {strings.Replace(minimal, "[tls]\n", "[tls]\nmode = \"forward\"\n", 1), "forward_addr"},
+		"push no creds":        {minimal + "\n[modules]\npush = true\n", "push.fcm or push.apns"},
+		"bad scheme":           {strings.Replace(minimal, "[domains]\n", "[domains]\nscheme = \"ftp\"\n", 1), "domains.scheme"},
+		"expiry order":         {minimal + "\n[publish]\nmax_expiry = \"1h\"\n", "max_expiry"},
+		"endless invites":      {minimal + "\n[auth]\ninvite_ttl = \"0s\"\n", "auth.invite_ttl must be positive"},
+		"removed approval key": {minimal + "\n[auth]\napprover_min_age = \"24h\"\n", "unknown key"},
+		"bad journal":          {minimal + "\n[storage]\nsqlite_journal = \"truncate\"\n", "storage.sqlite_journal"},
+		"empty journal":        {minimal + "\n[storage]\nsqlite_journal = \"\"\n", "storage.sqlite_journal"},
+		"no retention":         {minimal + "\n[auth]\nrevoked_device_retention = \"0s\"\n", "revoked_device_retention"},
 	}
 	for name, c := range cases {
 		_, err := Load(write(t, c.body))

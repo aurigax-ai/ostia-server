@@ -129,29 +129,11 @@ func (d *DB) RegisterProvider(ctx context.Context, provider, idHash string, nd N
 	return acct, dev, err
 }
 
-func (d *DB) RevokeDevice(ctx context.Context, accountID, id string) (label string, err error) {
-	return d.revoke(ctx, accountID, id, 0)
-}
-
 func (d *DB) RevokeInactiveDevice(ctx context.Context, accountID, id string, silentSince int64) error {
-	_, err := d.revoke(ctx, accountID, id, silentSince)
-	return err
-}
-
-func (d *DB) revoke(ctx context.Context, accountID, id string, silentSince int64) (label string, err error) {
-	err = d.tx(ctx, func(tx *sql.Tx) error {
-		query := `UPDATE devices SET revoked_at = ? WHERE id = ? AND account_id = ? AND revoked_at = 0`
-		args := []any{d.ms(), id, accountID}
-		if silentSince > 0 {
-			query += ` AND last_seen_at < ?`
-			args = append(args, silentSince)
-		}
-		res, err := tx.ExecContext(ctx, query, args...)
+	return d.tx(ctx, func(tx *sql.Tx) error {
+		res, err := tx.ExecContext(ctx, `UPDATE devices SET revoked_at = ? WHERE id = ? AND account_id = ? AND revoked_at = 0 AND last_seen_at < ?`,
+			d.ms(), id, accountID, silentSince)
 		if err := affected(res, err); err != nil {
-			return err
-		}
-		err = tx.QueryRowContext(ctx, `SELECT label FROM relay_labels WHERE device_id = ?`, id).Scan(&label)
-		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return err
 		}
 		for _, q := range []string{
@@ -162,13 +144,9 @@ func (d *DB) revoke(ctx context.Context, accountID, id string, silentSince int64
 				return err
 			}
 		}
-		_, err = tx.ExecContext(ctx, `DELETE FROM key_wraps WHERE account_id = ? AND slot = ?`, accountID, DeviceSlot(id))
-		return err
+		return nil
 	})
-	return label, err
 }
-
-func DeviceSlot(deviceID string) string { return "device:" + deviceID }
 
 func (d *DB) AdvanceSigningCounter(ctx context.Context, deviceID string, ms int64) (bool, error) {
 	res, err := d.sql.ExecContext(ctx, `UPDATE devices SET last_signed_ms = ? WHERE id = ? AND last_signed_ms < ?`, ms, deviceID, ms)

@@ -21,8 +21,8 @@ var (
 	ErrQuota           = errors.New("quota exceeded")
 	ErrLimit           = errors.New("limit reached")
 	ErrGone            = errors.New("gone")
-	ErrRequesterTooNew = errors.New("requester too new")
 	ErrInvalidTTL      = errors.New("ttl must be positive")
+	ErrNoKey           = errors.New("no sync key")
 )
 
 const (
@@ -33,7 +33,7 @@ const (
 
 func ValidJournal(mode string) bool { return mode == JournalWAL || mode == JournalDelete }
 
-var migrations = []string{schemaV1, schemaV2}
+var migrations = []string{schemaV1, schemaV2, schemaV3}
 
 type DB struct {
 	sql *sql.DB

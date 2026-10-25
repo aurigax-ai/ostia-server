@@ -138,7 +138,6 @@ func WithKey(extra, table, key, value string) string {
 
 func StartProcess(t testing.TB, binary string, cfg Config) *Process {
 	t.Helper()
-	cfg.Extra = WithKey(cfg.Extra, "[auth]", "approver_min_age", `"0s"`)
 	dir := t.TempDir()
 	dataDir := filepath.Join(dir, "data")
 	cfgPath := filepath.Join(dir, "ostia-server.toml")
